@@ -1,0 +1,12 @@
+[package]
+name = "part5-json-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a serializer turns a value tree into a string and a parser
+# turns a string back into a value tree. No serde, no crate — the whole thing is
+# testable by asserting the emitted JSON and round-tripping it.
+
+[[bin]]
+name = "json-demo"
+path = "src/main.rs"

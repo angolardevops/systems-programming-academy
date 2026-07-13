@@ -1,0 +1,411 @@
+---
+title: "Serialization: A JSON Encoder & Parser"
+description: Build a JSON serialization framework in Rust, Go, and Python — a canonical encoder and a recursive-descent parser, from scratch. Escaping for the JSON grammar (not HTML), deterministic byte-identical output, and a round trip proven across all three.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+Every service that talks to another speaks serialization: turning an in-memory
+value into bytes and back. JSON is the lingua franca, and it is small enough to
+build completely — an **encoder** that emits it and a **parser** that reads it.
+This lesson builds both from scratch in all three languages, `json`/`serde`/
+`encoding/json` deliberately set aside so you understand the thing every API
+leans on.
+
+Two framework ideas carry it. First, a **canonical encoder**: object keys in
+insertion order, no incidental whitespace, so the same value always produces the
+same bytes — which is what makes the output byte-identical across languages and,
+in the real world, what makes signatures and caches over JSON possible. Second, a
+**recursive-descent parser**: the mirror image of the encoder, walking the text
+and rebuilding the value tree, the same shape as the template-engine parser but
+for a richer grammar.
+
+<Aside type="note" title="Serialization is escaping, again — for a new grammar">
+  This is the third face of the Part 5 escaping theme. The query builder kept
+  values out of *SQL*; the template engine kept them out of *HTML*; the JSON
+  encoder puts them *into JSON*, which means escaping `"`, `\`, and control
+  characters — the characters dangerous in the *JSON* grammar. Reusing the HTML
+  escaper here would be doubly wrong: it would miss `\` and mangle `<` into
+  `&lt;` inside a string. The lesson that keeps recurring: encoding is always
+  encoding *for a specific grammar*.
+</Aside>
+
+Code:
+[`examples/part5-json-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 8–10 tests each, and the canonical encoding is **byte-identical
+across all three languages**.
+
+## The value model
+
+A JSON document is a tree of six kinds of value. Each language models it
+naturally: Rust an `enum`, Go a tagged struct, Python its native types.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>), // ordered pairs, not a HashMap
+}
+```
+
+Rust's `enum` is the ideal model: the six variants are a closed set the compiler
+exhaustively checks, so the encoder's `match` cannot forget a case. Note
+`Object` is a `Vec` of pairs, **not** a `HashMap` — preserving key order is what
+makes the output canonical.
+</TabItem>
+<TabItem label="Go">
+```go title="json.go"
+type Value struct {
+    Kind    Kind      // Null, Bool, Int, Str, Array, Object
+    Bool    bool
+    Int     int64
+    Str     string
+    Array   []*Value
+    Members []Member  // ordered key/value pairs
+}
+```
+
+Go has no sum type, so a tagged struct with a `Kind` discriminant models the
+value; `Members` is an ordered slice, again to keep encoding canonical (a Go
+`map` has *randomized* iteration order, which would break byte-identity).
+</TabItem>
+<TabItem label="Python">
+```python title="jsonkit.py"
+# A JSON value is just None / bool / int / str / list / dict.
+# Python's dict has preserved insertion order since 3.7, so it is
+# canonical for free.
+```
+
+Python needs no new types at all: `None`, `bool`, `int`, `str`, `list`, and
+`dict` already are the JSON value model, and `dict` has preserved insertion
+order since 3.7 — so the canonical property comes for free.
+</TabItem>
+</Tabs>
+
+## Encoding: escaping for the JSON grammar
+
+The encoder walks the tree and emits text. The interesting part is string
+escaping — the JSON grammar's dangerous characters, which are **not** HTML's:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="json.go"
+func EscapeJSONString(s string) string {
+    var b strings.Builder
+    b.WriteByte('"')
+    for _, r := range s {
+        switch r {
+        case '"':
+            b.WriteString("\\\"")
+        case '\\':
+            b.WriteString("\\\\")
+        case '\n':
+            b.WriteString("\\n")
+        case '\r':
+            b.WriteString("\\r")
+        case '\t':
+            b.WriteString("\\t")
+        default:
+            if r < 0x20 {
+                fmt.Fprintf(&b, "\\u%04x", r)
+            } else {
+                b.WriteRune(r)
+            }
+        }
+    }
+    b.WriteByte('"')
+    return b.String()
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="jsonkit.py"
+def escape_json_string(s: str) -> str:
+    out = ['"']
+    for ch in s:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+```
+</TabItem>
+</Tabs>
+
+The test that makes the grammar point explicit: a string `a"b\c⏎d<e>` encodes to
+`"a\"b\\c\nd<e>"` — the quote, backslash, and newline are JSON-escaped, but `<`
+and `>` are left **untouched**, because they are meaningful in HTML, not JSON.
+Control characters below `0x20` become `\u00XX`, which is JSON's requirement (raw
+control characters are invalid in a JSON string).
+
+## Parsing: recursive descent
+
+The parser is the encoder run backwards: a cursor over the text, one method per
+grammar production, each consuming its piece and recursing for nested values.
+
+```rust title="src/lib.rs — the dispatch"
+fn parse_value(&mut self) -> Result<Json, String> {
+    self.skip_ws();
+    match self.peek() {
+        Some('n') => self.parse_literal("null", Json::Null),
+        Some('t') => self.parse_literal("true", Json::Bool(true)),
+        Some('f') => self.parse_literal("false", Json::Bool(false)),
+        Some('"') => Ok(Json::Str(self.parse_string()?)),
+        Some('[') => self.parse_array(),
+        Some('{') => self.parse_object(),
+        Some(c) if c == '-' || c.is_ascii_digit() => self.parse_int(),
+        _ => Err(format!("unexpected input at position {}", self.pos)),
+    }
+}
+```
+
+Each language's parser has the same shape: `parse_value` dispatches on the first
+character, `parse_array` and `parse_object` loop consuming comma-separated
+elements and recurse into `parse_value`, and `parse_string` reverses the escaping
+(`\n` back to a newline, `\uXXXX` back to a character). Malformed input — an
+unterminated string, a trailing comma, a bare `nul` — returns a clear error with
+a position, not a panic.
+
+<Mermaid title="Encoder and parser are mirror images over the same grammar" code={`flowchart LR
+  V["value tree"] -->|encode| T["JSON text"]
+  T -->|decode| V2["value tree"]
+  V2 -.->|encode again| T2["identical JSON text"]
+  T -.->|round trip| T2`} />
+
+## The round trip, proven
+
+The property that ties encoder and parser together: for canonical JSON,
+`encode(decode(text)) == text`. The test asserts exactly this on a document that
+exercises every type:
+
+```text
+input:  {"id":7,"items":["x","y"],"ok":false,"note":null}
+decode -> value tree -> encode -> {"id":7,"items":["x","y"],"ok":false,"note":null}
+                                   (identical, byte for byte)
+```
+
+And a second round trip proves escaping survives both directions: a string with
+a newline, a tab, and embedded quotes decodes and re-encodes to itself. Because
+the encoding is canonical, the same document encodes byte-identically in Rust,
+Go, and Python — the same guarantee every cross-language project in this academy
+rests on, now for the format the whole industry exchanges.
+
+<Aside type="tip" title="What real JSON libraries add (and why we skipped it)">
+  Production encoders handle floating-point numbers (with all their formatting
+  subtlety), full Unicode surrogate pairs in `\u` escapes, streaming for large
+  documents, and mapping to/from native structs (serde's derive, `encoding/json`
+  tags, Pydantic). We built integers, strings, bools, null, arrays, and objects —
+  the spine — so the mechanism is clear. Floats are the notable omission: their
+  cross-language formatting differs (`2.0` vs `2`), which is its own lesson in why
+  "canonical" is harder than it looks.
+</Aside>
+
+## Exercises
+
+**1. Add floating-point numbers (all three).** Extend the value model and the
+parser to handle `3.14` and `-0.5`. Then discover the hard part: make the
+*encoding* byte-identical across the three languages. Why is that so much harder
+than for integers?
+
+<details>
+<summary>Solution sketch</summary>
+
+Parsing floats is easy; encoding them identically is not, because each language's
+default float-to-string differs (`2.0` in Python vs `2` in Go's `%g`, differing
+precision on `0.1`). Canonical float encoding needs a shortest-round-trippable
+algorithm (Ryū / Grisu) applied identically everywhere, which is why JSON
+canonicalization standards (JCS, RFC 8785) spend most of their length on numbers.
+The lesson: "the same value" is subtle once floats enter, and byte-identity is a
+real engineering property, not a given.
+
+</details>
+
+**2. Pretty-print (any language).** Add an `encode_pretty` that indents nested
+structures with two spaces and a newline per element. What must stay the same as
+the canonical encoder, and what changes — and why is the canonical (compact) form
+still the one you sign or hash?
+
+<details>
+<summary>Solution sketch</summary>
+
+Only the whitespace between tokens changes; the token sequence, key order, and
+escaping are identical. Pretty output is for humans; the compact canonical form
+is for machines — signatures, hashes, and equality checks must use the canonical
+form because incidental whitespace would change the bytes without changing the
+meaning. This separates *presentation* from *identity*, the same split the
+validation lesson drew between an error's message and its code.
+
+</details>
+
+**3. Reject duplicate keys (Rust or Go).** The spec is ambiguous about
+`{"a":1,"a":2}`; many parsers silently keep the last. Make yours reject
+duplicates with a clear error. Where in the parser does the check go, and what
+attack does lenient duplicate-handling enable?
+
+<details>
+<summary>Solution sketch</summary>
+
+The check goes in `parse_object`, tracking seen keys and erroring on a repeat.
+Lenient last-wins duplicate handling is a real security issue: if one component
+(an auth check) reads the first `"admin":false` and another (the action) reads
+the second `"admin":true`, an attacker exploits the disagreement — a parser
+mismatch vulnerability. Rejecting duplicates makes the document unambiguous, which
+is why strict JSON profiles require it. Parsing is a security boundary too:
+"be liberal in what you accept" has a body count.
+
+</details>
+
+<Quiz
+  question={'The JSON encoder escapes " and \\ and newlines, but leaves < and > untouched. Why?'}
+  options={[
+    { text: 'Because escaping is grammar-specific: <, > are dangerous in HTML, but in JSON the significant characters are the quote, backslash, and control characters — a JSON string containing < is perfectly valid', correct: true, explanation: 'JSON and HTML are different grammars with different metacharacters. The JSON encoder escapes exactly what JSON needs; < and > carry no special meaning inside a JSON string, so touching them would be wrong. If that JSON is later embedded in HTML, that is a separate HTML-escaping step at that boundary.' },
+    { text: 'Because < and > cannot appear in JSON strings', correct: false, explanation: 'They absolutely can — a JSON string may contain any character except an unescaped quote, backslash, or control character. < and > are ordinary characters in JSON.' },
+    { text: 'Because escaping < and > would make the JSON invalid', correct: false, explanation: 'Escaping them would not be invalid, just unnecessary and wrong for the grammar — you would be applying HTML rules to JSON. The point is that JSON does not require it.' },
+    { text: 'Because the encoder is incomplete and should escape them too', correct: false, explanation: 'It is not incomplete — escaping < and > is HTML\'s job, done at the HTML boundary, not JSON\'s. Doing it in the JSON encoder would corrupt strings for non-HTML consumers.' },
+  ]}
+/>
+
+<Quiz
+  question={'Why does the encoder store object keys in an ordered structure (Vec/slice/insertion-ordered dict) instead of a hash map?'}
+  options={[
+    { text: 'To make the output canonical — the same value always encodes to the same bytes, which hash maps with randomized iteration order would break', correct: true, explanation: 'Byte-identical, deterministic output is what lets you compare, hash, sign, or cache JSON. A Go map or Rust HashMap iterates in unspecified (Go: randomized) order, so the same document would encode differently run to run. Ordered storage guarantees one canonical encoding.' },
+    { text: 'Because hash maps cannot store string keys', correct: false, explanation: 'Hash maps store string keys fine. The reason for ordered storage is deterministic output, not a limitation of the map type.' },
+    { text: 'Because ordered structures are faster to encode', correct: false, explanation: 'Performance is not the motivation; determinism is. An ordered slice and a hash map are comparable to iterate — the point is that the order is stable and reproducible.' },
+    { text: 'Because JSON requires keys in alphabetical order', correct: false, explanation: 'JSON does not mandate key order at all. We preserve insertion order for determinism; some canonicalization standards sort keys instead — either works as long as it is consistent.' },
+  ]}
+/>
+
+<Quiz
+  question={'A lenient parser silently keeps the last value for duplicate keys in {"admin":false,"admin":true}. Why is rejecting duplicates safer?'}
+  options={[
+    { text: 'Because two components parsing the same document might disagree on which value wins, and an attacker exploits that mismatch — rejecting duplicates removes the ambiguity', correct: true, explanation: 'If an auth layer reads the first "admin":false and the business logic reads the last "admin":true (or vice versa), the attacker gets a privilege escalation from a parser disagreement. Unambiguous parsing — one document, one meaning — closes this class of bug. Strictness at a boundary is a security property.' },
+    { text: 'Because duplicate keys always indicate an attack', correct: false, explanation: 'They usually indicate a bug or a lazy generator, not necessarily an attack. The danger is the ambiguity they create between components, which rejecting removes regardless of intent.' },
+    { text: 'Because keeping the last value uses more memory', correct: false, explanation: 'Memory is irrelevant here. The issue is semantic ambiguity between different parsers, not resource use.' },
+    { text: 'Because JSON forbids duplicate keys, so it is a parse error by definition', correct: false, explanation: 'The JSON spec is actually ambiguous about duplicates — it neither clearly forbids nor defines them, which is exactly why lenient parsers disagree. Rejecting is a deliberate strictness choice, not a spec requirement.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Walk me through building a JSON parser. What are the pieces?">
+
+A recursive-descent parser mirrors the grammar: a cursor over the input and one
+function per production. `parse_value` skips whitespace and dispatches on the
+first character — `{` to an object, `[` to an array, `"` to a string, a digit or
+minus to a number, and the letters to the `true`/`false`/`null` literals.
+`parse_array` and `parse_object` loop over comma-separated elements, recursing
+into `parse_value`, and stop at their closing bracket. `parse_string` handles
+escapes in reverse — `\n` back to a newline, `\uXXXX` back to a code point. The
+essential discipline is error handling: every malformed input (unterminated
+string, trailing comma, bare `nul`, trailing garbage after the value) must return
+a clear error with a position, never crash. It is a small, complete example of
+the lexer-less recursive-descent technique that scales up to real language
+parsers, which is why writing one is a rite of passage.
+
+</Interview>
+
+<Interview question="What does 'canonical' JSON mean and when does it matter?">
+
+Canonical means a single, deterministic byte sequence for a given value — fixed
+key order (insertion or sorted), no incidental whitespace, a defined number
+format, consistent escaping. It matters whenever you compare, hash, sign, or
+cache JSON: a digital signature over a JSON payload is meaningless if the same
+document can serialize two different ways, and a cache keyed by JSON body needs
+identical bytes for identical meaning. Non-canonical encoding is fine for
+human-facing or transport use where only the parsed value matters, but the moment
+JSON becomes an *identity* — a signed token, a content hash, a dedup key — you
+need canonicalization (RFC 8785 / JCS). The subtle part is numbers: floating
+point has many textual forms for one value, so canonical number formatting
+(shortest round-trippable) is where most of the standard's complexity lives — the
+exact issue our integer-only encoder sidesteps.
+
+</Interview>
+
+<Interview question="Where can JSON parsing be a security concern?">
+
+Several places. Duplicate keys are ambiguous and let two components disagree on a
+value — a real privilege-escalation vector if an auth check and the action parse
+differently; strict parsers reject them. Deeply nested input can exhaust the
+stack in a naive recursive parser — a denial of service — so production parsers
+bound the depth. Very large numbers or strings can blow memory if unbounded.
+Integer overflow matters if you parse into a fixed-width type without checking.
+And the classic downstream issue: JSON safely parsed is still untrusted *data* —
+a string field pulled from JSON and interpolated into SQL or HTML reopens
+injection, so the Part 5 defences still apply after parsing. The theme is that a
+parser is a trust boundary: "be liberal in what you accept" (Postel's law) has
+aged badly for security, and modern practice favors strict, bounded, unambiguous
+parsing.
+
+</Interview>
+
+## Challenge
+
+Wire this into the running guestbook: add `GET /comments.json` that encodes the
+comments with *this* encoder (not the language's built-in one) and confirm a body
+containing `"` or a control character round-trips correctly. Then point the
+parser at real-world JSON — a config file, an API response — and fix whatever it
+chokes on (floats, `\u` surrogate pairs, big numbers) until it handles your
+actual data. You will have built the serialization layer every service depends
+on, understood its escaping and its ambiguities from the inside, and earned the
+right to reach for `serde` or `encoding/json` knowing exactly what they do for
+you.
+
+## References & further reading
+
+- [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259) — the JSON specification (short enough to read in full) · [json.org](https://www.json.org/) — the grammar as railroad diagrams
+- [RFC 8785 (JCS)](https://www.rfc-editor.org/rfc/rfc8785) — JSON Canonicalization Scheme (why canonical is hard)
+- Rust — [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) · Go — [`encoding/json`](https://pkg.go.dev/encoding/json) · Python — [`json`](https://docs.python.org/3/library/json.html)
+- The [template-engine lesson](/systems-programming-academy/part-5-frameworks/template-engine/) — the same escaping theme, for the HTML grammar
+- Bryan Ford — [Parsing Expression Grammars](https://bford.info/pub/lang/peg.pdf) (the theory under recursive descent)
+
+<Progress />

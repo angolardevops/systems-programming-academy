@@ -322,6 +322,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/template-engine',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Serialization: JSON Encoder & Parser',
+              translations: { 'pt-BR': 'Serialization: Encoder & Parser JSON' },
+              slug: 'part-5-frameworks/serialization',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
         {
