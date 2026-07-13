@@ -6,6 +6,9 @@ An open educational resource that teaches **software engineering**, not just
 syntax. Every lesson is executable, tested, benchmarked with real numbers, and
 written bilingually (English / Português).
 
+**📖 Read it live: <https://angolardevops.github.io/systems-programming-academy/>**
+(deployed automatically from `main` via GitHub Actions)
+
 Built with [Astro Starlight](https://starlight.astro.build/): fast static output,
 full-text offline search, dark/light themes, SEO, and WCAG-friendly navigation.
 
@@ -22,7 +25,8 @@ bar over time.
 | Part 1 → **Go foundations track** (6 lessons, EN + PT) | ✅ Complete & tested (`go test -race`) |
 | Part 1 → **Python foundations track** (5 lessons, EN + PT) | ✅ Complete & tested (unittest + doctests) |
 | **Part 2 → Real-World Engineering** (7 lessons, EN + PT) | ✅ Planned arc complete & tested |
-| Remaining Parts 3–5 + Capstone | 🚧 Planned |
+| **Part 3 → DevOps Automation** (4 projects × 3 languages, EN + PT) | ✅ Complete, tested & benchmarked |
+| Remaining Parts 4–5 + Capstone | 🚧 Planned |
 
 **Part 1 · Foundations is complete across all three languages — 20 lessons.**
 
