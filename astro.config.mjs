@@ -304,6 +304,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/query-builder',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'DI Container',
+              translations: { 'pt-BR': 'DI Container' },
+              slug: 'part-5-frameworks/di-container',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],

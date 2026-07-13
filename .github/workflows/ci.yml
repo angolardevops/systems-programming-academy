@@ -48,6 +48,7 @@ jobs:
           - part4-mininginx-rust
           - part5-router-rust
           - part5-querybuilder-rust
+          - part5-container-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -88,6 +89,7 @@ jobs:
           - part4-mininginx-go
           - part5-router-go
           - part5-querybuilder-go
+          - part5-container-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -127,6 +129,7 @@ jobs:
           - part4-mininginx-py
           - part5-router-py
           - part5-querybuilder-py
+          - part5-container-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}

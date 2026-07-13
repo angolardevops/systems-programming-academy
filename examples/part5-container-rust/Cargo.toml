@@ -1,0 +1,12 @@
+[package]
+name = "part5-container-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a DI container is registration + resolution + lifetime
+# management + cycle detection. No I/O to build or test any of it — factories
+# assemble string values so we can assert the wiring directly.
+
+[[bin]]
+name = "container-demo"
+path = "src/main.rs"

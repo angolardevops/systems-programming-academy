@@ -1,0 +1,473 @@
+---
+title: "DI Container: Montar o Grafo de Objetos"
+description: Constrói um container de injeção de dependências em Rust, Go e Python — registo, lifetimes singleton vs transient, e deteção de ciclos que transforma um stack overflow num erro claro. Os mesmos oito testes passam nas três.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+A [lição de Repository & DI da Parte 2](/systems-programming-academy/pt/part-2-engineering/repository-pattern/)
+defendeu a injeção de dependências: um componente declara o que precisa e
+recebe-o, em vez de construir as suas próprias dependências. Aí ligámos o grafo
+à mão. Esta lição constrói a **framework que o liga por ti** — um container de
+injeção de dependências. Registas como construir cada serviço; o container monta
+o grafo de objetos inteiro a pedido.
+
+É pouca linha de código com três responsabilidades afiadas, cada uma que um
+container real tem de acertar e cada uma testada aqui:
+
+- **Lifetimes** — um serviço *transient* é reconstruído em cada resolve; um
+  *singleton* é construído uma vez e partilhado. Confunde-os e ou vazas estado
+  entre pedidos ou reconstróis um connection pool caro mil vezes por segundo.
+- **Deteção de ciclos** — se `A` precisa de `B` e `B` precisa de `A`, o
+  resolver ingénuo recorre até a stack rebentar. Um container real deteta o ciclo
+  e devolve um erro *claro* que nomeia a cadeia.
+- **Falhas ruidosas** — uma dependência não registada falha de imediato,
+  nomeando o que faltava, não com um `None`/`nil` que explode três camadas
+  depois.
+
+<Aside type="note" title="A framework paga-se no grafo">
+  Ligar três serviços à mão é fácil. Ligar trinta — onde um request handler
+  precisa de um serviço que precisa de dois repositórios que partilham um
+  connection pool que precisa de config — é onde ligar à mão se torna um pântano
+  de manutenção e um container compensa. O container transforma "constrói tudo
+  na ordem certa, uma vez" numa declaração.
+</Aside>
+
+Código:
+[`examples/part5-container-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 8 testes cada. As factories montam valores string, por isso o
+grafo construído é diretamente verificável e o output é **idêntico nas três
+linguagens** (grafo montado *e* mensagem de erro de ciclo).
+
+## Registar, depois resolver
+
+A API são dois verbos. Fazes `register` de um serviço sob um nome com uma
+**factory** — uma função que o constrói, usando o container para resolver o que
+quer que dependa. Depois fazes `resolve` de um nome e obténs o valor totalmente
+montado.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="container.py"
+c = Container()
+c.register_singleton("config", lambda _c: "Config(env=prod)")
+c.register_singleton("db", lambda c: f"Pool(from {c.resolve('config')})")
+c.register("user_repo", lambda c: f"UserRepo(on {c.resolve('db')})")
+c.register("handler", lambda c: f"Handler(with {c.resolve('user_repo')})")
+
+c.resolve("handler")
+# -> "Handler(with UserRepo(on Pool(from Config(env=prod))))"
+```
+
+Repara que a factory recebe o container (`lambda c: ...`) e chama
+`c.resolve(...)` para as suas próprias dependências. É essa a recursão que monta
+o grafo: resolver `handler` resolve `user_repo`, que resolve `db`, que resolve
+`config`.
+</TabItem>
+<TabItem label="Go">
+```go title="container.go"
+c := New()
+c.RegisterSingleton("config", func(*Container) (string, error) {
+    return "Config(env=prod)", nil
+})
+c.RegisterSingleton("db", func(c *Container) (string, error) {
+    dep, err := c.Resolve("config")
+    return "Pool(from " + dep + ")", err
+})
+c.Register("user_repo", func(c *Container) (string, error) {
+    dep, err := c.Resolve("db")
+    return "UserRepo(on " + dep + ")", err
+})
+c.Register("handler", func(c *Container) (string, error) {
+    dep, err := c.Resolve("user_repo")
+    return "Handler(with " + dep + ")", err
+})
+
+c.Resolve("handler")
+// -> "Handler(with UserRepo(on Pool(from Config(env=prod))))"
+```
+
+A factory do Go devolve `(string, error)`, encaminhando o erro explicitamente —
+uma dependência que falha propaga-se pela cadeia de resolução como um erro Go
+normal.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+let mut c = Container::new();
+c.register_singleton("config", |_| Ok("Config(env=prod)".to_string()));
+c.register_singleton("db", |c| {
+    Ok(format!("Pool(from {})", c.resolve("config")?))
+});
+c.register("user_repo", |c| {
+    Ok(format!("UserRepo(on {})", c.resolve("db")?))
+});
+c.register("handler", |c| {
+    Ok(format!("Handler(with {})", c.resolve("user_repo")?))
+});
+
+c.resolve("handler")?;
+// -> "Handler(with UserRepo(on Pool(from Config(env=prod))))"
+```
+
+O operador `?` do Rust faz o encaminhamento de erros que o Go escreve por
+extenso: se algum `resolve` interno falhar, o `?` faz short-circuit e a
+construção inteira devolve o erro. O tipo da factory é
+`Box<dyn Fn(&Container) -> Result<String, String>>`.
+</TabItem>
+</Tabs>
+
+## O algoritmo de resolve
+
+O `resolve` é onde vivem as três responsabilidades. Por ordem: servir um
+singleton em cache, verificar um ciclo, procurar a factory, corrê-la (recorrendo
+nas dependências), e fazer cache do resultado se for um singleton.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn resolve(&self, name: &str) -> Result<String, String> {
+    // Serve um singleton em cache sem tocar na stack de resolução.
+    if let Some(value) = self.cache.borrow().get(name) {
+        return Ok(value.clone());
+    }
+
+    // Deteção de ciclos: este nome já está na stack de resolução?
+    {
+        let stack = self.resolving.borrow();
+        if stack.iter().any(|n| n == name) {
+            let mut chain = stack.clone();
+            chain.push(name.to_string());
+            return Err(format!("dependency cycle: {}", chain.join(" -> ")));
+        }
+    }
+
+    let registration = self
+        .registrations
+        .get(name)
+        .ok_or_else(|| format!("service not registered: {name}"))?;
+
+    self.resolving.borrow_mut().push(name.to_string());
+    let result = (registration.factory)(self);
+    self.resolving.borrow_mut().pop();
+
+    let value = result?;
+    if registration.singleton {
+        self.cache.borrow_mut().insert(name.to_string(), value.clone());
+    }
+    Ok(value)
+}
+```
+
+O Rust precisa de `RefCell` para a cache e a stack de resolução porque o
+`resolve` recebe `&self` (partilhado) mas tem de as mutar — mutabilidade
+interior, o padrão da lição de Smart Pointers da Parte 1. O `{ }` com scope à
+volta da verificação de ciclo liberta o borrow antes de a factory correr,
+evitando um panic de double-borrow do `RefCell` quando a factory reentra no
+`resolve`.
+</TabItem>
+<TabItem label="Go">
+```go title="container.go"
+func (c *Container) Resolve(name string) (string, error) {
+	if value, ok := c.cache[name]; ok {
+		return value, nil
+	}
+
+	for _, n := range c.resolving {
+		if n == name {
+			chain := append(append([]string{}, c.resolving...), name)
+			return "", fmt.Errorf("dependency cycle: %s", strings.Join(chain, " -> "))
+		}
+	}
+
+	reg, ok := c.registrations[name]
+	if !ok {
+		return "", fmt.Errorf("service not registered: %s", name)
+	}
+
+	c.resolving = append(c.resolving, name)
+	value, err := reg.factory(c)
+	c.resolving = c.resolving[:len(c.resolving)-1]
+	if err != nil {
+		return "", err
+	}
+
+	if reg.singleton {
+		c.cache[name] = value
+	}
+	return value, nil
+}
+```
+
+O Go muta o struct diretamente — sem cerimónia de mutabilidade interior, porque
+não tem borrow checker para satisfazer. O
+`append(append([]string{}, ...), name)` copia a stack antes de acrescentar, para
+a mensagem de erro possuir a sua cadeia independentemente.
+</TabItem>
+<TabItem label="Python">
+```python title="container.py"
+def resolve(self, name: str) -> str:
+    if name in self._cache:
+        return self._cache[name]
+
+    if name in self._resolving:
+        chain = " -> ".join([*self._resolving, name])
+        raise ContainerError(f"dependency cycle: {chain}")
+
+    if name not in self._factories:
+        raise ContainerError(f"service not registered: {name}")
+
+    factory, singleton = self._factories[name]
+    self._resolving.append(name)
+    try:
+        value = factory(self)
+    finally:
+        self._resolving.pop()
+
+    if singleton:
+        self._cache[name] = value
+    return value
+```
+
+O `try/finally` é estrutural: se uma factory levantar exceção (uma dependência
+em falta fundo no grafo), o `finally` ainda faz pop da stack de resolução, por
+isso o container fica num estado consistente e um resolve *posterior* do mesmo
+nome não reporta um ciclo espúrio. Limpeza-em-exceção é o idioma Python para o
+que o `Drop` baseado em scope do Rust dá automaticamente.
+</TabItem>
+</Tabs>
+
+## Lifetimes, medidos com um contador
+
+A distinção transient-vs-singleton é invisível num só resolve — tens de resolver
+duas vezes e contar as execuções da factory. A factory de cada implementação
+incrementa um contador, e os testes fixam o comportamento exatamente:
+
+<Mermaid title="Transient reconstroi; singleton faz cache apos a primeira construcao" code={`flowchart TD
+  subgraph Transient
+    T1["resolve #1 -> factory corre -> instance-1"]
+    T2["resolve #2 -> factory corre -> instance-2"]
+    T3["resolve #3 -> factory corre -> instance-3"]
+  end
+  subgraph Singleton
+    S1["resolve #1 -> factory corre -> instance-1 (em cache)"]
+    S2["resolve #2 -> cache hit -> instance-1"]
+    S3["resolve #3 -> cache hit -> instance-1"]
+  end`} />
+
+```text
+transient:  resolve, resolve, resolve  ->  instance-1, instance-2, instance-3
+singleton:  resolve, resolve, resolve  ->  instance-1, instance-1, instance-1
+                                            (factory correu exatamente uma vez)
+```
+
+O teste do singleton verifica que o contador é **1** após três resolves — a
+factory corre mesmo uma vez. E um teste separado prova o prémio: dois
+consumidores diferentes (`users` e `orders`) que cada um depende do singleton
+`db` recebem ambos `DB#1` — *a mesma instância*, que é a razão inteira pela qual
+os singletons existem (um connection pool, partilhado).
+
+## Deteção de ciclos: transformar um crash numa mensagem
+
+Regista `a` a precisar de `b` e `b` a precisar de `a`, depois resolve `a`. Um
+container ingénuo recorre `a → b → a → b → …` até a call stack rebentar e o
+processo morrer com um backtrace inútil. O nosso segue a stack de resolução e
+apanha a segunda entrada de `a`:
+
+```text
+resolve("a")
+  -> refused: dependency cycle: a -> b -> a
+```
+
+O erro nomeia a cadeia exata, para poderes encontrar e quebrar o ciclo. Um
+self-cycle (`loop` a resolver `loop`) é apanhado da mesma forma. Esta é a
+diferença entre uma framework que te ajuda e uma que só falha: ambas param a
+recursão infinita, mas só uma te diz *onde*.
+
+<Aside type="tip" title="Deteção vs prevenção">
+  Detetamos ciclos no momento do resolve (runtime). Alguns sistemas
+  previnem-nos mais cedo: uma framework DI de compile-time (Dagger, grafos
+  verificados em compilação do Rust) faz um grafo cíclico não compilar. A
+  deteção é mais simples e agnóstica à linguagem; a prevenção é mais forte mas
+  exige mais maquinaria. Ambas batem um stack overflow — o anti-padrão é não
+  fazer nenhuma e distribuir um container que morre opacamente num erro de
+  ligação.
+</Aside>
+
+## Exercícios
+
+**1. Acrescenta lifetimes scoped (nas três).** Além de transient e singleton, os
+containers reais têm um lifetime *scoped*: uma instância por request/scope,
+partilhada dentro dele, descartada depois. Acrescenta `resolve_scope()` que
+começa uma cache de scope fresca. Como difere isto do singleton, e onde usarias
+cada um?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Um scope é uma cache de singleton com um lifetime limitado: criada por request,
+populada no primeiro resolve dentro desse request, deitada fora no fim. Usa-o
+para estado por-request (o utilizador atual, uma transação de BD scoped ao
+request) que deve ser partilhado por tudo o que trata desse único request mas
+nunca vazar para o próximo. Em implementação é uma segunda cache indexada por
+scope; o truque é um teardown disciplinado para as instâncias scoped não
+sobreviverem ao seu scope — o mesmo cuidado de lifetime de recursos que tudo o
+resto na Parte 4/5.
+
+</details>
+
+**2. Deteta ciclos no registo (qualquer linguagem).** O nosso container deteta
+ciclos preguiçosamente, no momento do resolve. Acrescenta um `validate()`
+opcional que percorre todos os registos e reporta cada ciclo *antes* de qualquer
+resolve — uma verificação de arranque. Que algoritmo de grafo precisa isto?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Isto é deteção de ciclos num grafo dirigido — uma pesquisa em profundidade a
+seguir o caminho atual (coloração branco/cinzento/preto), reportando um ciclo
+quando uma aresta leva de volta a um nó cinzento (em progresso). Corrê-lo no
+arranque transforma um bug de ligação latente numa falha de boot imediata com a
+cadeia ofensora, o que é muito melhor do que descobri-lo quando o caminho de
+código específico resolve pela primeira vez em produção. O senão: precisas de
+saber as dependências de cada serviço estaticamente, o que o nosso design de
+factory-closure esconde — por isso este exercício também motiva *declarar*
+dependências em vez de as resolver imperativamente dentro da factory.
+
+</details>
+
+**3. Liga a app real (Rust ou Go).** Substitui as factories de string por tipos
+reais: um `Config`, um `Pool`, um `UserRepo`, um `Handler`, cada um um
+struct/interface real. Regista-os e resolve-os, depois troca `db` por um fake em
+memória re-registando só esse nome — e observa cada consumidor receber o fake sem
+mais nenhuma mudança. O que é que o container te deu?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Trocar um registo (`db` → fake em memória) muda transparentemente o que cada
+consumidor a jusante recebe, com zero edições aos consumidores — o ganho exato de
+testabilidade da lição de DI da Parte 2, agora automatizado pelo container. Essa
+substituição de uma linha é o argumento inteiro para DI: o grafo de objetos é
+descrito num só sítio, por isso remodelá-lo para testes, ambientes ou
+funcionalidades é um re-registo, não um refactor. Reconstruíste, em miniatura, o
+que o Spring, o DI do .NET e o dependency-injector fazem.
+
+</details>
+
+<Quiz
+  question={'Um serviço singleton e um transient têm ambos uma factory que incrementa um contador. Resolves cada um três vezes. Quanto marca o contador?'}
+  options={[
+    { text: 'Singleton: 1 (construído uma vez, depois em cache). Transient: 3 (reconstruído em cada resolve).', correct: true, explanation: 'É exatamente o que os testes verificam. A factory do singleton corre no primeiro resolve e o valor fica em cache, por isso o contador fica em 1; o transient reconstrói de cada vez, por isso sobe até 3. Esta é a diferença observável inteira entre os dois lifetimes.' },
+    { text: 'Ambos marcam 3 — cada resolve corre a factory', correct: false, explanation: 'Isso só é verdade para o transient. Um singleton faz cache após a primeira construção, por isso a sua factory corre exatamente uma vez independentemente de quantas vezes o resolves.' },
+    { text: 'Ambos marcam 1 — resolver é idempotente', correct: false, explanation: 'Só o singleton faz cache. Um transient é definido por reconstruir em cada resolve, por isso o seu contador chega a 3.' },
+    { text: 'Singleton: 3, Transient: 1', correct: false, explanation: 'Isto está ao contrário. O singleton é o que faz cache (contador 1); o transient reconstrói (contador 3).' },
+  ]}
+/>
+
+<Quiz
+  question={'O serviço A depende de B, e B depende de A. O que faz um container bem construído quando resolves A, e porquê?'}
+  options={[
+    { text: 'Deteta o ciclo seguindo a stack de resolução e devolve um erro que nomeia a cadeia (a -> b -> a), em vez de recorrer até a stack rebentar', correct: true, explanation: 'A resolução ingénua recorre a->b->a->b para sempre e rebenta com um stack overflow opaco. Seguir que nomes estão a ser resolvidos deixa o container apanhar a segunda entrada de A e falhar com uma mensagem que te aponta o ciclo a quebrar.' },
+    { text: 'Resolve A com um B nulo para quebrar o loop', correct: false, explanation: 'Injetar null em silêncio produziria um objeto meio-construído que falha misteriosamente depois — pior do que um erro claro. Um container correto recusa e diz-te do ciclo.' },
+    { text: 'Faz cache de A enquanto o constrói, para o segundo pedido de A devolver o valor meio-construído', correct: false, explanation: 'Devolver um objeto parcialmente construído é um bug subtil e perigoso. O container não deve entregar instâncias incompletas; deve reportar o ciclo.' },
+    { text: 'Nada de especial — o stack overflow é a falha correta', correct: false, explanation: 'Um stack overflow sem indicação de que serviços formam o ciclo é exatamente a falha inútil que um container existe para prevenir. Deteção com uma cadeia nomeada é o comportamento certo.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que o resolver Python faz pop da stack de resolução num bloco finally?'}
+  options={[
+    { text: 'Para que se uma factory levantar exceção a meio da resolução, a stack seja na mesma desenrolada — senão um resolve posterior do mesmo nome reportaria falsamente um ciclo', correct: true, explanation: 'O nome é empurrado antes de correr a factory. Se a factory levantar (e.g. uma dependência fundo em falta) e o pop fosse saltado, o nome ficaria na stack, e um resolve independente posterior dele ver-se-ia já "em progresso" e reportaria erradamente um ciclo. O finally garante a limpeza em todos os caminhos de saída.' },
+    { text: 'Para tornar a função mais rápida', correct: false, explanation: 'O finally não tem benefício de performance aqui; é puramente sobre correção sob exceções. A velocidade não é afetada.' },
+    { text: 'Porque o Python exige try/finally à volta de toda a recursão', correct: false, explanation: 'O Python não tem tal exigência. O finally é uma escolha deliberada para garantir a limpeza da stack quando uma factory levanta, não uma regra da linguagem.' },
+    { text: 'Para fazer cache do resultado mesmo quando a factory falha', correct: false, explanation: 'Uma factory falhada não pode ser cacheada — servirias um valor partido para sempre. O finally só faz pop da stack de resolução; a cache acontece em separado, após uma construção bem-sucedida.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="O que é um container de DI, e o que acrescenta face a passar dependências à mão?">
+
+Um container de DI é um registo que sabe como construir cada serviço e monta o
+grafo de objetos a pedido: registas factories indexadas por nome ou tipo, e o
+`resolve` percorre a cadeia de dependências, construindo tudo na ordem certa.
+Face à ligação manual acrescenta três coisas — gestão de lifetimes (singleton,
+scoped, transient, decididos num sítio em vez de espalhados), ordenação
+automática (declaras dependências, o container constrói-as topologicamente), e um
+único ponto para remodelar o grafo para testes ou ambientes trocando um registo.
+O custo é uma camada de indireção e, em alguns containers, resolução em runtime
+que uma abordagem de compile-time apanharia mais cedo. Para um punhado de
+serviços, ligar à mão é mais claro; o container ganha o seu lugar à medida que o
+grafo cresce e os lifetimes se multiplicam — que é precisamente quando ligar à
+mão se torna propenso a erros.
+
+</Interview>
+
+<Interview question="Singleton, scoped, transient — define cada um e dá um uso real.">
+
+Transient significa uma instância fresca de cada vez que é resolvida — certo para
+helpers baratos e sem estado, ou qualquer coisa que não deve ser partilhada (um
+builder, um buffer por-uso). Singleton significa uma instância para a vida
+inteira do container, partilhada por todos — certo para recursos caros,
+thread-safe, sem-estado-ou-cuidadosamente-sincronizados como um connection pool,
+um objeto de config, ou um registry de métricas. Scoped significa uma instância
+por scope lógico, geralmente um web request — partilhada dentro desse request mas
+isolada entre requests, certo para o utilizador atual, uma transação de BD scoped
+ao request, ou um correlation id. O bug clássico é desencontrá-los: um singleton
+que segura estado específico de request vaza os dados de um utilizador para o
+request de outro, e um connection pool transient reconstruído por chamada esgota
+a base de dados. Escolher o lifetime é uma decisão de correção, não um ajuste de
+performance.
+
+</Interview>
+
+<Interview question="Como detetarias um ciclo de dependências, e fá-lo-ias no arranque ou no resolve?">
+
+Um ciclo é detetado seguindo o conjunto de serviços a ser resolvidos no momento —
+o caminho de resolução — e sinalizando quando um serviço pede para resolver algo
+já nesse caminho; o próprio caminho é o ciclo a reportar. Podes fazê-lo
+preguiçosamente no resolve (simples, agnóstico à linguagem, mas o erro só aparece
+quando esse caminho é exercido pela primeira vez) ou avidamente no arranque com
+uma travessia em profundidade completa do grafo de registos (uma falha de boot
+que apanha cada ciclo antes de servir tráfego). Prefiro a verificação de arranque
+para qualquer coisa de longa duração: pagar uns milissegundos no boot para
+garantir que nenhuma ligação cíclica chega a produção é uma boa troca, e o erro é
+muito mais acionável do que um stack overflow às 3 da manhã. A verificação ávida
+precisa de dependências declaradas estaticamente, que é uma razão pela qual
+algumas frameworks favorecem declarações explícitas de dependências em vez de
+resolver imperativamente dentro de factories opacas.
+
+</Interview>
+
+## Desafio
+
+Combina isto com as lições de [routing](/systems-programming-academy/pt/part-5-frameworks/routing-middleware/)
+e [query-builder](/systems-programming-academy/pt/part-5-frameworks/query-builder/)
+numa mini-framework coerente: um container a segurar uma config singleton e um DB
+pool, request handlers resolvidos por request (scoped), cada handler a usar o
+query builder contra o pool, tudo montado no servidor da Parte 4. Acrescenta a
+verificação de ciclos no arranque e um lifetime scoped. Quando conseguires
+registar uma nova funcionalidade acrescentando um handler e um registo — e
+testá-la trocando o registo do DB por um fake — terás construído a espinha
+estrutural de uma web framework real, cada camada dela compreendida a partir dos
+primeiros princípios porque a escreveste.
+
+## Referências & leitura adicional
+
+- Martin Fowler — [Inversion of Control Containers and the Dependency Injection pattern](https://martinfowler.com/articles/injection.html) (o ensaio canónico)
+- Rust — [`shaku`](https://docs.rs/shaku/latest/shaku/) (um container DI verificado em compilação) · a [lição de Smart Pointers](/systems-programming-academy/pt/part-1-foundations/rust/smart-pointers/) para o `RefCell`
+- Go — [`wire`](https://github.com/google/wire) (DI de compile-time via geração de código) · [`dig`](https://github.com/uber-go/dig) (baseado em reflection, runtime)
+- Python — [`dependency-injector`](https://python-dependency-injector.ets-labs.org/) · [`punq`](https://github.com/bobthemighty/punq)
+- Parte 2 — [Repository Pattern & Dependency Injection](/systems-programming-academy/pt/part-2-engineering/repository-pattern/) (a versão ligada à mão que isto automatiza)
+
+<Progress />
