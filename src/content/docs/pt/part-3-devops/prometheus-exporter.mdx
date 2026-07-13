@@ -78,34 +78,17 @@ casca fina. O determinismo (métricas ordenadas, séries ordenadas, uma regra de
 formatação de valores) é o que dá sentido ao diff entre linguagens:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-// BTreeMaps mantêm nomes e séries ordenados => render determinístico.
-#[derive(Default)]
-pub struct Registry {
-    metrics: BTreeMap<String, Metric>,
-}
-
-impl Registry {
-    pub fn inc_counter(&mut self, name: &str, help: &str,
-                       labels: &[(&str, &str)], delta: f64) {
-        let key = label_string(labels);
-        let m = self.metric(name, help, Kind::Counter);
-        *m.series.entry(key).or_insert(0.0) += delta;
-    }
-
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        for (name, metric) in &self.metrics {
-            out.push_str(&format!("# HELP {name} {}\n", metric.help));
-            out.push_str(&format!("# TYPE {name} {}\n", metric.kind.as_str()));
-            for (labels, value) in &metric.series {
-                out.push_str(&format!("{name}{labels} {}\n", format_value(*value)));
-            }
-        }
-        out
-    }
-}
+<TabItem label="Python">
+```python title="exporter.py"
+def render(self) -> str:
+    out: list[str] = []
+    for name in sorted(self._metrics):        # nomes ordenados
+        m = self._metrics[name]
+        out.append(f"# HELP {name} {m.help}")
+        out.append(f"# TYPE {name} {m.kind}")
+        for key in sorted(m.series):          # séries ordenadas
+            out.append(f"{name}{key} {format_value(m.series[key])}")
+    return "\n".join(out) + "\n"
 ```
 </TabItem>
 <TabItem label="Go">
@@ -136,17 +119,34 @@ func (r *Registry) Render() string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="exporter.py"
-def render(self) -> str:
-    out: list[str] = []
-    for name in sorted(self._metrics):        # nomes ordenados
-        m = self._metrics[name]
-        out.append(f"# HELP {name} {m.help}")
-        out.append(f"# TYPE {name} {m.kind}")
-        for key in sorted(m.series):          # séries ordenadas
-            out.append(f"{name}{key} {format_value(m.series[key])}")
-    return "\n".join(out) + "\n"
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// BTreeMaps mantêm nomes e séries ordenados => render determinístico.
+#[derive(Default)]
+pub struct Registry {
+    metrics: BTreeMap<String, Metric>,
+}
+
+impl Registry {
+    pub fn inc_counter(&mut self, name: &str, help: &str,
+                       labels: &[(&str, &str)], delta: f64) {
+        let key = label_string(labels);
+        let m = self.metric(name, help, Kind::Counter);
+        *m.series.entry(key).or_insert(0.0) += delta;
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (name, metric) in &self.metrics {
+            out.push_str(&format!("# HELP {name} {}\n", metric.help));
+            out.push_str(&format!("# TYPE {name} {}\n", metric.kind.as_str()));
+            for (labels, value) in &metric.series {
+                out.push_str(&format!("{name}{labels} {}\n", format_value(*value)));
+            }
+        }
+        out
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -163,6 +163,37 @@ A diferença mais instrutiva neste projeto é o que "servir HTTP" custa em cada
 linguagem:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="exporter.py"
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path != "/metrics":
+            self.send_error(404)
+            return
+        body = demo_registry().render().encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+HTTPServer(("127.0.0.1", port), _Handler).serve_forever()
+```
+O `http.server` funciona e é stdlib, mas é single-threaded e explicitamente não
+endurecido — serviços Python reais correm atrás de uvicorn/gunicorn.
+</TabItem>
+<TabItem label="Go">
+```go title="exporter.go"
+// O servidor http da stdlib: nível de produção, concorrente, três linhas.
+http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprint(w, DemoRegistry().Render())
+})
+http.ListenAndServe("127.0.0.1:"+port, nil)
+```
+É por isto que o Go domina este nicho: o `net/http` é um servidor concorrente de
+produção na biblioteca padrão — uma goroutine por ligação, de graça.
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/main.rs"
 // Feito à mão: accept, ler a cabeça do pedido, escrever uma resposta. ~30
@@ -190,37 +221,6 @@ for stream in listener.incoming() {
 ```
 A stdlib do Rust não tem servidor HTTP — constrói sobre TCP (como aqui) ou usa um
 crate (`hyper`, `axum`). Educativo aqui; em produção usaria o crate.
-</TabItem>
-<TabItem label="Go">
-```go title="exporter.go"
-// O servidor http da stdlib: nível de produção, concorrente, três linhas.
-http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprint(w, DemoRegistry().Render())
-})
-http.ListenAndServe("127.0.0.1:"+port, nil)
-```
-É por isto que o Go domina este nicho: o `net/http` é um servidor concorrente de
-produção na biblioteca padrão — uma goroutine por ligação, de graça.
-</TabItem>
-<TabItem label="Python">
-```python title="exporter.py"
-class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        if self.path != "/metrics":
-            self.send_error(404)
-            return
-        body = demo_registry().render().encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; version=0.0.4")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-HTTPServer(("127.0.0.1", port), _Handler).serve_forever()
-```
-O `http.server` funciona e é stdlib, mas é single-threaded e explicitamente não
-endurecido — serviços Python reais correm atrás de uvicorn/gunicorn.
 </TabItem>
 </Tabs>
 

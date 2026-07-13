@@ -58,37 +58,35 @@ Defaults para variáveis opcionais, parsing tipado com erros precisos, e um segr
 obrigatório que falha cedo:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-impl Config {
-    // O ambiente é um mapa injetado — não estado global.
-    pub fn from_map(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
-        let host = env
-            .get("APP_HOST")
-            .cloned()
-            .unwrap_or_else(|| "localhost".to_string());
+<TabItem label="Python">
+```python title="appconfig.py"
+@dataclass(frozen=True)
+class Config:
+    host: str
+    port: int
+    debug: bool
+    api_key: str = field(repr=False)  # segredo: excluído do repr
 
-        let port = match env.get("APP_PORT") {
-            None => 8080, // default
-            Some(raw) => raw.parse().map_err(|_| ConfigError::Invalid {
-                key: "APP_PORT",
-                value: raw.clone(),
-            })?,
-        };
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> Config:
+        # O ambiente é um mapping injetado — os.environ em produção.
+        host = env.get("APP_HOST", "localhost")
 
-        let debug = matches!(
-            env.get("APP_DEBUG").map(String::as_str),
-            Some("1") | Some("true")
-        );
+        raw_port = env.get("APP_PORT", "8080")
+        try:
+            port = int(raw_port)
+        except ValueError:
+            raise InvalidConfigError(
+                f"invalid value {raw_port!r} for env var APP_PORT"
+            ) from None
 
-        let api_key = env
-            .get("APP_API_KEY")
-            .cloned()
-            .ok_or(ConfigError::Missing("APP_API_KEY"))?; // fail fast
+        debug = env.get("APP_DEBUG", "") in ("1", "true")
 
-        Ok(Config { host, port, debug, api_key })
-    }
-}
+        api_key = env.get("APP_API_KEY")
+        if api_key is None:
+            raise MissingConfigError("missing required env var APP_API_KEY")  # fail fast
+
+        return cls(host=host, port=port, debug=debug, api_key=api_key)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -122,35 +120,37 @@ func Load(getenv func(string) string) (Config, error) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="appconfig.py"
-@dataclass(frozen=True)
-class Config:
-    host: str
-    port: int
-    debug: bool
-    api_key: str = field(repr=False)  # segredo: excluído do repr
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+impl Config {
+    // O ambiente é um mapa injetado — não estado global.
+    pub fn from_map(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
+        let host = env
+            .get("APP_HOST")
+            .cloned()
+            .unwrap_or_else(|| "localhost".to_string());
 
-    @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> Config:
-        # O ambiente é um mapping injetado — os.environ em produção.
-        host = env.get("APP_HOST", "localhost")
+        let port = match env.get("APP_PORT") {
+            None => 8080, // default
+            Some(raw) => raw.parse().map_err(|_| ConfigError::Invalid {
+                key: "APP_PORT",
+                value: raw.clone(),
+            })?,
+        };
 
-        raw_port = env.get("APP_PORT", "8080")
-        try:
-            port = int(raw_port)
-        except ValueError:
-            raise InvalidConfigError(
-                f"invalid value {raw_port!r} for env var APP_PORT"
-            ) from None
+        let debug = matches!(
+            env.get("APP_DEBUG").map(String::as_str),
+            Some("1") | Some("true")
+        );
 
-        debug = env.get("APP_DEBUG", "") in ("1", "true")
+        let api_key = env
+            .get("APP_API_KEY")
+            .cloned()
+            .ok_or(ConfigError::Missing("APP_API_KEY"))?; // fail fast
 
-        api_key = env.get("APP_API_KEY")
-        if api_key is None:
-            raise MissingConfigError("missing required env var APP_API_KEY")  # fail fast
-
-        return cls(host=host, port=port, debug=debug, api_key=api_key)
+        Ok(Config { host, port, debug, api_key })
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -166,6 +166,23 @@ ideia do [modelo de dados](/systems-programming-academy/pt/part-1-foundations/py
 agora a fazer trabalho de segurança:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="appconfig.py"
+# Uma opção de campo chega: repr=False exclui api_key do repr gerado.
+api_key: str = field(repr=False)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="config.go"
+// String() satisfaz fmt.Stringer, logo %v/%s nos logs são seguros por defeito.
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"Config{Host:%s Port:%d Debug:%t APIKey:***REDACTED***}",
+		c.Host, c.Port, c.Debug,
+	)
+}
+```
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 // Debug escrito à mão: tudo EXCETO a api key.
@@ -181,37 +198,16 @@ impl fmt::Debug for Config {
 }
 ```
 </TabItem>
-<TabItem label="Go">
-```go title="config.go"
-// String() satisfaz fmt.Stringer, logo %v/%s nos logs são seguros por defeito.
-func (c Config) String() string {
-	return fmt.Sprintf(
-		"Config{Host:%s Port:%d Debug:%t APIKey:***REDACTED***}",
-		c.Host, c.Port, c.Debug,
-	)
-}
-```
-</TabItem>
-<TabItem label="Python">
-```python title="appconfig.py"
-# Uma opção de campo chega: repr=False exclui api_key do repr gerado.
-api_key: str = field(repr=False)
-```
-</TabItem>
 </Tabs>
 
 E crucialmente, cada módulo tem um **teste que o prova**:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-#[test]
-fn debug_output_redacts_the_secret() {
-    let cfg = Config::from_map(&env(&[("APP_API_KEY", "hunter2")])).unwrap();
-    let printed = format!("{cfg:?}");
-    assert!(printed.contains("***REDACTED***"));
-    assert!(!printed.contains("hunter2")); // o segredo nunca aparece
-}
+<TabItem label="Python">
+```python title="test_appconfig.py"
+def test_repr_excludes_the_secret(self):
+    cfg = Config.from_env({"APP_API_KEY": "hunter2"})
+    self.assertNotIn("hunter2", repr(cfg))  # o segredo nunca aparece
 ```
 </TabItem>
 <TabItem label="Go">
@@ -225,11 +221,15 @@ func TestStringRedactsSecret(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_appconfig.py"
-def test_repr_excludes_the_secret(self):
-    cfg = Config.from_env({"APP_API_KEY": "hunter2"})
-    self.assertNotIn("hunter2", repr(cfg))  # o segredo nunca aparece
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn debug_output_redacts_the_secret() {
+    let cfg = Config::from_map(&env(&[("APP_API_KEY", "hunter2")])).unwrap();
+    let printed = format!("{cfg:?}");
+    assert!(printed.contains("***REDACTED***"));
+    assert!(!printed.contains("hunter2")); // o segredo nunca aparece
+}
 ```
 </TabItem>
 </Tabs>

@@ -60,6 +60,55 @@ loop ends. No sentinel values, no "done" flags, no counting — the channel
 lifecycle *is* the protocol. (Python is the exception, as we'll see.)
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="channels_demo.py"
+_SENTINEL = None
+
+
+def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
+    """Square every number using ``n_workers`` threads fed by a jobs queue.
+
+    Results travel back on a results queue; one ``None`` sentinel per worker
+    replaces Go's ``close(jobs)``.
+
+    >>> sum_squares_pool([1, 2, 3], 2)
+    14
+    """
+    if n_workers < 1:
+        raise ValueError("need at least one worker")
+    jobs: queue.Queue[int | None] = queue.Queue()
+    results: queue.Queue[int] = queue.Queue()
+
+    def worker() -> None:
+        while True:
+            n = jobs.get()
+            if n is _SENTINEL:
+                break
+            results.put(n * n)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+
+    for n in nums:
+        jobs.put(n)
+    for _ in threads:
+        jobs.put(_SENTINEL)  # one shutdown signal per worker
+    for t in threads:
+        t.join()
+
+    total = 0
+    while not results.empty():  # safe: all producers have exited
+        total += results.get()
+    return total
+```
+
+`queue.Queue` has no `close()` — the idiomatic shutdown is a **sentinel**
+(one `None` *per worker*, a classic off-by-one trap: one sentinel stops one
+worker; the rest block forever). Note also that `while not results.empty()`
+is only correct because every producer has already been `join()`ed —
+empty-check-then-get on a live queue is a race.
+</TabItem>
 <TabItem label="Go">
 ```go title="channels.go"
 // SumSquaresPool squares every number using a pool of nWorkers goroutines
@@ -161,55 +210,6 @@ project. Second, "closing" is just **dropping**: there is no `close()`;
 channel disconnection is ownership running out, and the two deliberate
 `drop` calls are load-bearing. Delete `drop(job_tx)` and the program hangs
 forever — the workers wait for jobs that can still theoretically arrive.
-</TabItem>
-<TabItem label="Python">
-```python title="channels_demo.py"
-_SENTINEL = None
-
-
-def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
-    """Square every number using ``n_workers`` threads fed by a jobs queue.
-
-    Results travel back on a results queue; one ``None`` sentinel per worker
-    replaces Go's ``close(jobs)``.
-
-    >>> sum_squares_pool([1, 2, 3], 2)
-    14
-    """
-    if n_workers < 1:
-        raise ValueError("need at least one worker")
-    jobs: queue.Queue[int | None] = queue.Queue()
-    results: queue.Queue[int] = queue.Queue()
-
-    def worker() -> None:
-        while True:
-            n = jobs.get()
-            if n is _SENTINEL:
-                break
-            results.put(n * n)
-
-    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
-    for t in threads:
-        t.start()
-
-    for n in nums:
-        jobs.put(n)
-    for _ in threads:
-        jobs.put(_SENTINEL)  # one shutdown signal per worker
-    for t in threads:
-        t.join()
-
-    total = 0
-    while not results.empty():  # safe: all producers have exited
-        total += results.get()
-    return total
-```
-
-`queue.Queue` has no `close()` — the idiomatic shutdown is a **sentinel**
-(one `None` *per worker*, a classic off-by-one trap: one sentinel stops one
-worker; the rest block forever). Note also that `while not results.empty()`
-is only correct because every producer has already been `join()`ed —
-empty-check-then-get on a live queue is a race.
 </TabItem>
 </Tabs>
 

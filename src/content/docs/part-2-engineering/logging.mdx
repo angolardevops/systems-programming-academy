@@ -66,6 +66,55 @@ Go's answer ships in the standard library (`log/slog`); Python's `logging` gets 
 small JSON formatter; Rust we hand-roll (production Rust uses `tracing`):
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="structlog_demo.py"
+class JsonFormatter(logging.Formatter):
+    """One JSON line per record: level, msg, plus any extra= fields."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _STANDARD_ATTRS:
+                payload[key] = value  # fields passed via extra=
+        return json.dumps(payload)
+
+
+def new_logger(name: str, sink: IO[str], level: int = logging.INFO) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.handlers.clear()
+    logger.propagate = False
+    handler = logging.StreamHandler(sink)  # the sink is injected
+    handler.setFormatter(JsonFormatter())
+    logger.addHandler(handler)
+    return logger
+```
+</TabItem>
+<TabItem label="Go">
+```go title="logging.go"
+// log/slog is the stdlib answer: levelled, structured, pluggable handlers.
+func New(sink io.Writer, level slog.Level) *slog.Logger {
+	handler := slog.NewJSONHandler(sink, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{} // drop time for reproducible tests
+			}
+			return a
+		},
+	})
+	return slog.New(handler)
+}
+
+// Bind a context field: every line through the returned logger carries it.
+func WithRequestID(logger *slog.Logger, id string) *slog.Logger {
+	return logger.With("request_id", id)
+}
+```
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 // Generic over any Write sink — stderr in prod, Vec<u8> in tests.
@@ -100,64 +149,15 @@ impl<W: Write> Logger<W> {
 }
 ```
 </TabItem>
-<TabItem label="Go">
-```go title="logging.go"
-// log/slog is the stdlib answer: levelled, structured, pluggable handlers.
-func New(sink io.Writer, level slog.Level) *slog.Logger {
-	handler := slog.NewJSONHandler(sink, &slog.HandlerOptions{
-		Level: level,
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Attr{} // drop time for reproducible tests
-			}
-			return a
-		},
-	})
-	return slog.New(handler)
-}
-
-// Bind a context field: every line through the returned logger carries it.
-func WithRequestID(logger *slog.Logger, id string) *slog.Logger {
-	return logger.With("request_id", id)
-}
-```
-</TabItem>
-<TabItem label="Python">
-```python title="structlog_demo.py"
-class JsonFormatter(logging.Formatter):
-    """One JSON line per record: level, msg, plus any extra= fields."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
-            "level": record.levelname,
-            "msg": record.getMessage(),
-        }
-        for key, value in record.__dict__.items():
-            if key not in _STANDARD_ATTRS:
-                payload[key] = value  # fields passed via extra=
-        return json.dumps(payload)
-
-
-def new_logger(name: str, sink: IO[str], level: int = logging.INFO) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    logger.handlers.clear()
-    logger.propagate = False
-    handler = logging.StreamHandler(sink)  # the sink is injected
-    handler.setFormatter(JsonFormatter())
-    logger.addHandler(handler)
-    return logger
-```
-</TabItem>
 </Tabs>
 
 Call sites look nearly identical across the three:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust
-log.info("user logged in", &[("user_id", "42")]);
-// {"level":"INFO","msg":"user logged in","user_id":"42"}
+<TabItem label="Python">
+```python
+logger.info("user logged in", extra={"user_id": 42})
+# {"level": "INFO", "msg": "user logged in", "user_id": 42}
 ```
 </TabItem>
 <TabItem label="Go">
@@ -166,10 +166,10 @@ logger.Info("user logged in", "user_id", 42)
 // {"level":"INFO","msg":"user logged in","user_id":42}
 ```
 </TabItem>
-<TabItem label="Python">
-```python
-logger.info("user logged in", extra={"user_id": 42})
-# {"level": "INFO", "msg": "user logged in", "user_id": 42}
+<TabItem label="Rust">
+```rust
+log.info("user logged in", &[("user_id", "42")]);
+// {"level":"INFO","msg":"user logged in","user_id":"42"}
 ```
 </TabItem>
 </Tabs>
@@ -180,16 +180,17 @@ Logs are behaviour — a `WARN` on a failed login is part of the contract. Becau
 the sink is injected, a test captures output and asserts on it:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-#[test]
-fn context_fields_appear_on_every_line() {
-    let mut log = Logger::new(Vec::new(), Level::Info).with_field("request_id", "abc-123");
-    log.info("start", &[]);
-    log.warn("slow query", &[("ms", "250")]);
-    let out = lines(log.into_sink());
-    assert!(out.iter().all(|l| l.contains("\"request_id\":\"abc-123\"")));
-}
+<TabItem label="Python">
+```python title="test_structlog_demo.py"
+def test_context_field_on_every_line(self):
+    sink = io.StringIO()
+    logger = with_request_id(new_logger("t3", sink), "abc-123")
+
+    logger.info("start")
+    logger.warning("slow query", extra={"ms": 250})
+
+    for line in lines_of(sink):
+        self.assertEqual(line["request_id"], "abc-123")
 ```
 </TabItem>
 <TabItem label="Go">
@@ -209,17 +210,16 @@ func TestContextFieldOnEveryLine(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_structlog_demo.py"
-def test_context_field_on_every_line(self):
-    sink = io.StringIO()
-    logger = with_request_id(new_logger("t3", sink), "abc-123")
-
-    logger.info("start")
-    logger.warning("slow query", extra={"ms": 250})
-
-    for line in lines_of(sink):
-        self.assertEqual(line["request_id"], "abc-123")
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn context_fields_appear_on_every_line() {
+    let mut log = Logger::new(Vec::new(), Level::Info).with_field("request_id", "abc-123");
+    log.info("start", &[]);
+    log.warn("slow query", &[("ms", "250")]);
+    let out = lines(log.into_sink());
+    assert!(out.iter().all(|l| l.contains("\"request_id\":\"abc-123\"")));
+}
 ```
 </TabItem>
 </Tabs>

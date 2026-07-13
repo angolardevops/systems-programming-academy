@@ -76,34 +76,17 @@ Determinism (sorted metrics, sorted series, one value-formatting rule) is what
 makes the cross-language diff meaningful:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-// BTreeMaps keep names and series sorted => deterministic render.
-#[derive(Default)]
-pub struct Registry {
-    metrics: BTreeMap<String, Metric>,
-}
-
-impl Registry {
-    pub fn inc_counter(&mut self, name: &str, help: &str,
-                       labels: &[(&str, &str)], delta: f64) {
-        let key = label_string(labels);
-        let m = self.metric(name, help, Kind::Counter);
-        *m.series.entry(key).or_insert(0.0) += delta;
-    }
-
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        for (name, metric) in &self.metrics {
-            out.push_str(&format!("# HELP {name} {}\n", metric.help));
-            out.push_str(&format!("# TYPE {name} {}\n", metric.kind.as_str()));
-            for (labels, value) in &metric.series {
-                out.push_str(&format!("{name}{labels} {}\n", format_value(*value)));
-            }
-        }
-        out
-    }
-}
+<TabItem label="Python">
+```python title="exporter.py"
+def render(self) -> str:
+    out: list[str] = []
+    for name in sorted(self._metrics):        # sorted names
+        m = self._metrics[name]
+        out.append(f"# HELP {name} {m.help}")
+        out.append(f"# TYPE {name} {m.kind}")
+        for key in sorted(m.series):          # sorted series
+            out.append(f"{name}{key} {format_value(m.series[key])}")
+    return "\n".join(out) + "\n"
 ```
 </TabItem>
 <TabItem label="Go">
@@ -134,17 +117,34 @@ func (r *Registry) Render() string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="exporter.py"
-def render(self) -> str:
-    out: list[str] = []
-    for name in sorted(self._metrics):        # sorted names
-        m = self._metrics[name]
-        out.append(f"# HELP {name} {m.help}")
-        out.append(f"# TYPE {name} {m.kind}")
-        for key in sorted(m.series):          # sorted series
-            out.append(f"{name}{key} {format_value(m.series[key])}")
-    return "\n".join(out) + "\n"
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// BTreeMaps keep names and series sorted => deterministic render.
+#[derive(Default)]
+pub struct Registry {
+    metrics: BTreeMap<String, Metric>,
+}
+
+impl Registry {
+    pub fn inc_counter(&mut self, name: &str, help: &str,
+                       labels: &[(&str, &str)], delta: f64) {
+        let key = label_string(labels);
+        let m = self.metric(name, help, Kind::Counter);
+        *m.series.entry(key).or_insert(0.0) += delta;
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (name, metric) in &self.metrics {
+            out.push_str(&format!("# HELP {name} {}\n", metric.help));
+            out.push_str(&format!("# TYPE {name} {}\n", metric.kind.as_str()));
+            for (labels, value) in &metric.series {
+                out.push_str(&format!("{name}{labels} {}\n", format_value(*value)));
+            }
+        }
+        out
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -161,6 +161,37 @@ The most instructive difference in this project is what "serve HTTP" costs in
 each language:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="exporter.py"
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path != "/metrics":
+            self.send_error(404)
+            return
+        body = demo_registry().render().encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+HTTPServer(("127.0.0.1", port), _Handler).serve_forever()
+```
+`http.server` works and is stdlib, but it's single-threaded and explicitly not
+hardened — real Python services run behind uvicorn/gunicorn.
+</TabItem>
+<TabItem label="Go">
+```go title="exporter.go"
+// The stdlib http server: production-grade, concurrent, three lines of wiring.
+http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprint(w, DemoRegistry().Render())
+})
+http.ListenAndServe("127.0.0.1:"+port, nil)
+```
+This is why Go owns this niche: `net/http` is a real, concurrent production
+server in the standard library — one goroutine per connection, for free.
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/main.rs"
 // Hand-rolled: accept, read the request head, write a response. ~30 lines,
@@ -188,37 +219,6 @@ for stream in listener.incoming() {
 ```
 Rust's stdlib has no HTTP server — you build on TCP (as here) or take a crate
 (`hyper`, `axum`). Educational here; in production you'd take the crate.
-</TabItem>
-<TabItem label="Go">
-```go title="exporter.go"
-// The stdlib http server: production-grade, concurrent, three lines of wiring.
-http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprint(w, DemoRegistry().Render())
-})
-http.ListenAndServe("127.0.0.1:"+port, nil)
-```
-This is why Go owns this niche: `net/http` is a real, concurrent production
-server in the standard library — one goroutine per connection, for free.
-</TabItem>
-<TabItem label="Python">
-```python title="exporter.py"
-class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        if self.path != "/metrics":
-            self.send_error(404)
-            return
-        body = demo_registry().render().encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; version=0.0.4")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-HTTPServer(("127.0.0.1", port), _Handler).serve_forever()
-```
-`http.server` works and is stdlib, but it's single-threaded and explicitly not
-hardened — real Python services run behind uvicorn/gunicorn.
 </TabItem>
 </Tabs>
 

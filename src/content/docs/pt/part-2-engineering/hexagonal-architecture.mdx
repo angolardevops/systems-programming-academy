@@ -64,32 +64,27 @@ e manter as regras de negócio legíveis num só lugar sem dependências.
 As regras de negócio vivem na entidade, testáveis em microssegundos:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (mod domain)"
-pub struct Task {
-    pub id: u32,
-    pub title: String,
-    pub done: bool,
-}
+<TabItem label="Python">
+```python title="domain.py"
+@dataclass
+class Task:
+    """A entidade; os seus invariantes vivem aqui, junto aos dados."""
 
-impl Task {
-    /// Regra de negócio: uma tarefa tem de ter título não-vazio.
-    pub fn new(id: u32, title: &str) -> Result<Task, DomainError> {
-        if title.trim().is_empty() {
-            return Err(DomainError::EmptyTitle);
-        }
-        Ok(Task { id, title: title.trim().to_string(), done: false })
-    }
+    id: int
+    title: str
+    done: bool = False
 
-    /// Regra de negócio: completar duas vezes é um erro, não um no-op.
-    pub fn complete(&mut self) -> Result<(), DomainError> {
-        if self.done {
-            return Err(DomainError::AlreadyDone);
-        }
-        self.done = true;
-        Ok(())
-    }
-}
+    @classmethod
+    def new(cls, task_id: int, title: str) -> Task:
+        title = title.strip()
+        if not title:
+            raise EmptyTitleError("a task needs a title")
+        return cls(id=task_id, title=title)
+
+    def complete(self) -> None:
+        if self.done:
+            raise AlreadyDoneError(f"task {self.id} already done")
+        self.done = True
 ```
 </TabItem>
 <TabItem label="Go">
@@ -120,27 +115,32 @@ func (t *Task) Complete() error {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="domain.py"
-@dataclass
-class Task:
-    """A entidade; os seus invariantes vivem aqui, junto aos dados."""
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod domain)"
+pub struct Task {
+    pub id: u32,
+    pub title: String,
+    pub done: bool,
+}
 
-    id: int
-    title: str
-    done: bool = False
+impl Task {
+    /// Regra de negócio: uma tarefa tem de ter título não-vazio.
+    pub fn new(id: u32, title: &str) -> Result<Task, DomainError> {
+        if title.trim().is_empty() {
+            return Err(DomainError::EmptyTitle);
+        }
+        Ok(Task { id, title: title.trim().to_string(), done: false })
+    }
 
-    @classmethod
-    def new(cls, task_id: int, title: str) -> Task:
-        title = title.strip()
-        if not title:
-            raise EmptyTitleError("a task needs a title")
-        return cls(id=task_id, title=title)
-
-    def complete(self) -> None:
-        if self.done:
-            raise AlreadyDoneError(f"task {self.id} already done")
-        self.done = True
+    /// Regra de negócio: completar duas vezes é um erro, não um no-op.
+    pub fn complete(&mut self) -> Result<(), DomainError> {
+        if self.done {
+            return Err(DomainError::AlreadyDone);
+        }
+        self.done = true;
+        Ok(())
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -153,6 +153,57 @@ casos de uso precisam — o adaptador da base de dados conforma-se então a *ela
 invertendo a dependência:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="application.py"
+from domain import Task  # import para dentro — a única direção
+
+
+class TaskRepo(Protocol):
+    """A porta: definida AQUI, na camada que a usa."""
+
+    def next_id(self) -> int: ...
+    def save(self, task: Task) -> None: ...
+    def get(self, task_id: int) -> Task | None: ...
+
+
+class TaskService:
+    def __init__(self, repo: TaskRepo) -> None:
+        self._repo = repo
+
+    def add(self, title: str) -> int:
+        task_id = self._repo.next_id()
+        task = Task.new(task_id, title)  # regra do domínio imposta aqui
+        self._repo.save(task)
+        return task_id
+```
+</TabItem>
+<TabItem label="Go">
+```go title="app/service.go"
+import "academy.example/hexagonal/domain" // import para dentro — a única direção
+
+// TaskRepo é a porta: definida AQUI, na camada que a usa.
+type TaskRepo interface {
+	NextID() int
+	Save(t domain.Task)
+	Get(id int) (domain.Task, bool)
+}
+
+type Service struct{ repo TaskRepo }
+
+func (s *Service) Add(title string) (int, error) {
+	id := s.repo.NextID()
+	task, err := domain.NewTask(id, title)
+	if err != nil {
+		return 0, err
+	}
+	s.repo.Save(task)
+	return id, nil
+}
+```
+
+O Go impõe a regra estruturalmente: se o `domain` importasse o `app` (que
+importa o `domain`), o compilador rejeita o **ciclo de imports**.
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs (mod app)"
 use crate::domain::{DomainError, Task}; // import para dentro — a única direção
@@ -183,57 +234,6 @@ impl<R: TaskRepo> TaskService<R> {
 }
 ```
 </TabItem>
-<TabItem label="Go">
-```go title="app/service.go"
-import "academy.example/hexagonal/domain" // import para dentro — a única direção
-
-// TaskRepo é a porta: definida AQUI, na camada que a usa.
-type TaskRepo interface {
-	NextID() int
-	Save(t domain.Task)
-	Get(id int) (domain.Task, bool)
-}
-
-type Service struct{ repo TaskRepo }
-
-func (s *Service) Add(title string) (int, error) {
-	id := s.repo.NextID()
-	task, err := domain.NewTask(id, title)
-	if err != nil {
-		return 0, err
-	}
-	s.repo.Save(task)
-	return id, nil
-}
-```
-
-O Go impõe a regra estruturalmente: se o `domain` importasse o `app` (que
-importa o `domain`), o compilador rejeita o **ciclo de imports**.
-</TabItem>
-<TabItem label="Python">
-```python title="application.py"
-from domain import Task  # import para dentro — a única direção
-
-
-class TaskRepo(Protocol):
-    """A porta: definida AQUI, na camada que a usa."""
-
-    def next_id(self) -> int: ...
-    def save(self, task: Task) -> None: ...
-    def get(self, task_id: int) -> Task | None: ...
-
-
-class TaskService:
-    def __init__(self, repo: TaskRepo) -> None:
-        self._repo = repo
-
-    def add(self, title: str) -> int:
-        task_id = self._repo.next_id()
-        task = Task.new(task_id, title)  # regra do domínio imposta aqui
-        self._repo.save(task)
-        return task_id
-```
-</TabItem>
 </Tabs>
 
 ## Adaptadores e a raiz de composição
@@ -242,28 +242,20 @@ O adaptador em memória implementa a porta (um de Postgres ficaria ao lado); a
 raiz de composição é o *único* código que toca em todas as camadas:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (mod composition)"
-pub struct App {
-    service: TaskService<InMemoryRepo>,
-}
+<TabItem label="Python">
+```python title="main_app.py"
+class App:
+    def __init__(self) -> None:
+        self._service = TaskService(InMemoryRepo())  # a ligação
 
-impl App {
-    pub fn new() -> Self {
-        App { service: TaskService::new(InMemoryRepo::default()) } // a ligação
-    }
-
-    pub fn complete(&mut self, id: u32) -> String {
-        match self.service.complete(id) {
-            Ok(()) => format!("Task #{id} done."),
-            Err(AppError::NotFound(_)) => format!("No task #{id}."),
-            Err(AppError::Domain(DomainError::AlreadyDone)) => {
-                format!("Task #{id} was already done.")
-            }
-            Err(e) => format!("Unexpected error: {e:?}"),
-        }
-    }
-}
+    def complete(self, task_id: int) -> str:
+        try:
+            self._service.complete(task_id)
+        except NotFoundError:
+            return f"No task #{task_id}."
+        except AlreadyDoneError:
+            return f"Task #{task_id} was already done."
+        return f"Task #{task_id} done."
 ```
 </TabItem>
 <TabItem label="Go">
@@ -288,20 +280,28 @@ func (a *App) Complete(id int) string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="main_app.py"
-class App:
-    def __init__(self) -> None:
-        self._service = TaskService(InMemoryRepo())  # a ligação
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod composition)"
+pub struct App {
+    service: TaskService<InMemoryRepo>,
+}
 
-    def complete(self, task_id: int) -> str:
-        try:
-            self._service.complete(task_id)
-        except NotFoundError:
-            return f"No task #{task_id}."
-        except AlreadyDoneError:
-            return f"Task #{task_id} was already done."
-        return f"Task #{task_id} done."
+impl App {
+    pub fn new() -> Self {
+        App { service: TaskService::new(InMemoryRepo::default()) } // a ligação
+    }
+
+    pub fn complete(&mut self, id: u32) -> String {
+        match self.service.complete(id) {
+            Ok(()) => format!("Task #{id} done."),
+            Err(AppError::NotFound(_)) => format!("No task #{id}."),
+            Err(AppError::Domain(DomainError::AlreadyDone)) => {
+                format!("Task #{id} was already done.")
+            }
+            Err(e) => format!("Unexpected error: {e:?}"),
+        }
+    }
+}
 ```
 </TabItem>
 </Tabs>

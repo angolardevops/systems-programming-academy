@@ -137,3 +137,46 @@
   line-height: 1.7;
 }
 .spa-footer-credit strong { color: var(--sl-color-gray-1); }
+
+/* ==================================================================
+   Reading comfort (requested): wider body, bigger diagrams, softer
+   light theme.
+   ================================================================== */
+
+/* Slightly wider content column for more comfortable line lengths. */
+:root {
+  --sl-content-width: 50rem;
+}
+
+/* Architecture diagrams a bit larger — scale to the content column.
+   Starlight styles <figure> as fit-content, which collapses an SVG sized at
+   width:100%; force full width on the figure and let the SVG fill it (capped),
+   and override Mermaid's inline max-width. */
+.spa-mermaid {
+  display: block;
+  width: 100%;
+  margin: 1.75rem 0;
+  text-align: center;
+}
+.spa-mermaid-out {
+  width: 100%;
+}
+.spa-mermaid-out svg {
+  width: 100% !important;
+  max-width: 880px !important;
+  height: auto !important;
+}
+
+/* Softer light theme: warm off-white paper, gentle charcoal text, and a
+   touch more line height for prose — easier on the eyes for long reads. */
+:root[data-theme='light'] {
+  --sl-color-bg: #faf8f4;
+  --sl-color-bg-nav: #f6f3ee;
+  --sl-color-bg-sidebar: #f4f0e9;
+  --sl-color-text: #37373f;
+  --sl-color-hairline: #e9e3d8;
+  --sl-color-hairline-light: #efeae0;
+}
+:root[data-theme='light'] .sl-markdown-content {
+  line-height: 1.75;
+}

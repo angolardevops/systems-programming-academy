@@ -172,67 +172,60 @@ lock every increment, use an atomic integer (Rust and Go), or **batch** —
 accumulate a thread-local total and merge under the lock once per thread.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-/// Increments a `Mutex`-protected counter from `n_threads` threads,
-/// `iters` times each. Always returns exactly `n_threads * iters`.
-///
-/// Scoped threads can borrow a plain `&Mutex<u64>`; `Arc` is only needed
-/// when threads outlive the creating scope.
-pub fn counter_mutex(n_threads: usize, iters: u64) -> u64 {
-    let counter = Mutex::new(0u64);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                for _ in 0..iters {
-                    *counter.lock().unwrap() += 1;
-                }
-            });
-        }
-    });
-    counter.into_inner().unwrap()
-}
+<TabItem label="Python">
+```python title="threads_demo.py"
+def counter_locked(n_threads: int, iters: int) -> int:
+    """Increment a shared counter under a ``threading.Lock``.
 
-/// Same contract, but lock-free: `fetch_add` on an atomic integer.
-/// One hardware instruction instead of lock/unlock.
-pub fn counter_atomic(n_threads: usize, iters: u64) -> u64 {
-    let counter = AtomicU64::new(0);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                for _ in 0..iters {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-        }
-    });
-    counter.into_inner()
-}
+    Always returns exactly ``n_threads * iters`` — the lock makes the
+    read-modify-write atomic.
+    """
+    counter = 0
+    lock = threading.Lock()
 
-/// Batched variant: each thread accumulates locally and takes the lock
-/// **once** at the end. Contention drops from `n * iters` lock
-/// operations to `n`.
-pub fn counter_batched(n_threads: usize, iters: u64) -> u64 {
-    let counter = Mutex::new(0u64);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                let mut local = 0u64;
-                for _ in 0..iters {
-                    local += 1;
-                }
-                *counter.lock().unwrap() += local;
-            });
-        }
-    });
-    counter.into_inner().unwrap()
-}
+    def work() -> None:
+        nonlocal counter
+        for _ in range(iters):
+            with lock:
+                counter += 1
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
+
+
+def counter_batched(n_threads: int, iters: int) -> int:
+    """Accumulate locally, take the lock once per thread.
+
+    Same contract as :func:`counter_locked` with ``n`` lock acquisitions
+    instead of ``n * iters``.
+    """
+    counter = 0
+    lock = threading.Lock()
+
+    def work() -> None:
+        nonlocal counter
+        local = 0
+        for _ in range(iters):
+            local += 1
+        with lock:
+            counter += local
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
 ```
 
-Note what the type system encodes: `Mutex<u64>` *owns* the data it protects —
-you cannot reach the `u64` without going through `lock()`. In Go and Python
-the mutex and the data are merely adjacent, and the connection lives in your
-head.
+The stdlib has no atomic integer — the batched pattern is Python's answer to
+contention. (`with lock:` is `lock.acquire()`/`release()` with
+exception-safety, the same guarantee Rust gets from the `MutexGuard`
+destructor and Go from `defer mu.Unlock()`.)
 </TabItem>
 <TabItem label="Go">
 ```go title="threads.go"
@@ -305,60 +298,67 @@ func CounterBatched(nGoroutines int, iters uint64) uint64 {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="threads_demo.py"
-def counter_locked(n_threads: int, iters: int) -> int:
-    """Increment a shared counter under a ``threading.Lock``.
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Increments a `Mutex`-protected counter from `n_threads` threads,
+/// `iters` times each. Always returns exactly `n_threads * iters`.
+///
+/// Scoped threads can borrow a plain `&Mutex<u64>`; `Arc` is only needed
+/// when threads outlive the creating scope.
+pub fn counter_mutex(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    *counter.lock().unwrap() += 1;
+                }
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
 
-    Always returns exactly ``n_threads * iters`` — the lock makes the
-    read-modify-write atomic.
-    """
-    counter = 0
-    lock = threading.Lock()
+/// Same contract, but lock-free: `fetch_add` on an atomic integer.
+/// One hardware instruction instead of lock/unlock.
+pub fn counter_atomic(n_threads: usize, iters: u64) -> u64 {
+    let counter = AtomicU64::new(0);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    counter.into_inner()
+}
 
-    def work() -> None:
-        nonlocal counter
-        for _ in range(iters):
-            with lock:
-                counter += 1
-
-    threads = [threading.Thread(target=work) for _ in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return counter
-
-
-def counter_batched(n_threads: int, iters: int) -> int:
-    """Accumulate locally, take the lock once per thread.
-
-    Same contract as :func:`counter_locked` with ``n`` lock acquisitions
-    instead of ``n * iters``.
-    """
-    counter = 0
-    lock = threading.Lock()
-
-    def work() -> None:
-        nonlocal counter
-        local = 0
-        for _ in range(iters):
-            local += 1
-        with lock:
-            counter += local
-
-    threads = [threading.Thread(target=work) for _ in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return counter
+/// Batched variant: each thread accumulates locally and takes the lock
+/// **once** at the end. Contention drops from `n * iters` lock
+/// operations to `n`.
+pub fn counter_batched(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                let mut local = 0u64;
+                for _ in 0..iters {
+                    local += 1;
+                }
+                *counter.lock().unwrap() += local;
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
 ```
 
-The stdlib has no atomic integer — the batched pattern is Python's answer to
-contention. (`with lock:` is `lock.acquire()`/`release()` with
-exception-safety, the same guarantee Rust gets from the `MutexGuard`
-destructor and Go from `defer mu.Unlock()`.)
+Note what the type system encodes: `Mutex<u64>` *owns* the data it protects —
+you cannot reach the `u64` without going through `lock()`. In Go and Python
+the mutex and the data are merely adjacent, and the connection lives in your
+head.
 </TabItem>
 </Tabs>
 

@@ -153,15 +153,16 @@ actions are versioned (`@v4`). A CI that installs "whatever is latest" produces
 unexplainable Friday failures.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
+<TabItem label="Python">
 ```yaml
-# The Rust gate: warnings are errors, formatting is law.
-- run: cargo fmt --check
-- run: cargo clippy -- -D warnings
-- run: cargo test
+# The Python gate: ruff formats and lints, unittest verifies.
+- run: ruff format --check .
+- run: ruff check .
+- run: python -m unittest discover -s . -p 'test_*.py'
 ```
-`-D warnings` is the crucial flag: a lint that would merely warn locally **fails
-the build**, so warnings never accumulate.
+Add `mypy .` here the moment a project adopts
+[type hints](/systems-programming-academy/part-1-foundations/python/type-hints/) — annotations that CI never
+checks are just comments.
 </TabItem>
 <TabItem label="Go">
 ```yaml
@@ -174,16 +175,15 @@ the build**, so warnings never accumulate.
 failing exit code. For concurrent code, add `go test -race` (as the
 [goroutines lesson](/systems-programming-academy/part-1-foundations/go/concurrency/) demonstrated).
 </TabItem>
-<TabItem label="Python">
+<TabItem label="Rust">
 ```yaml
-# The Python gate: ruff formats and lints, unittest verifies.
-- run: ruff format --check .
-- run: ruff check .
-- run: python -m unittest discover -s . -p 'test_*.py'
+# The Rust gate: warnings are errors, formatting is law.
+- run: cargo fmt --check
+- run: cargo clippy -- -D warnings
+- run: cargo test
 ```
-Add `mypy .` here the moment a project adopts
-[type hints](/systems-programming-academy/part-1-foundations/python/type-hints/) — annotations that CI never
-checks are just comments.
+`-D warnings` is the crucial flag: a lint that would merely warn locally **fails
+the build**, so warnings never accumulate.
 </TabItem>
 </Tabs>
 

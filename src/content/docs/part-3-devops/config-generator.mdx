@@ -86,25 +86,22 @@ The most language-flavoured part of the project — how each builds the artifact
 text:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn render_nginx(spec: &Spec) -> String {
-    let mut servers = String::new();
-    for i in 0..spec.replicas {
-        servers.push_str(&format!(
-            "    server 127.0.0.1:{};\n",
-            spec.port + u16::from(i)
-        ));
-    }
-    format!(
-        "upstream {name} {{\n{servers}}}\n\nserver {{\n    listen 80;\n    server_name {domain};\n\n    location / {{\n        proxy_pass http://{name};\n ...",
-        name = spec.name,
-        domain = spec.domain,
+<TabItem label="Python">
+```python title="confgen.py"
+def render_nginx(spec: Spec) -> str:
+    servers = "".join(
+        f"    server 127.0.0.1:{spec.port + i};\n" for i in range(spec.replicas)
     )
-}
+    return f"""upstream {spec.name} {{
+{servers}}}
+
+server {{
+    listen 80;
+    server_name {spec.domain};
+    ..."""
 ```
-`format!` with named arguments; literal braces escape as `{{`. Type-checked
-interpolation — a typo'd name is a compile error.
+Triple-quoted f-strings are the most WYSIWYG of the three — the template looks
+like the artifact. Braces escape as `{{` inside f-strings.
 </TabItem>
 <TabItem label="Go">
 ```go title="confgen.go"
@@ -126,22 +123,25 @@ Raw string literals (backticks) keep the template readable; `%[1]s` indexed verb
 reuse arguments. For bigger templates Go has the stdlib `text/template` engine —
 the industry's YAML-generator workhorse (Helm is built on it).
 </TabItem>
-<TabItem label="Python">
-```python title="confgen.py"
-def render_nginx(spec: Spec) -> str:
-    servers = "".join(
-        f"    server 127.0.0.1:{spec.port + i};\n" for i in range(spec.replicas)
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn render_nginx(spec: &Spec) -> String {
+    let mut servers = String::new();
+    for i in 0..spec.replicas {
+        servers.push_str(&format!(
+            "    server 127.0.0.1:{};\n",
+            spec.port + u16::from(i)
+        ));
+    }
+    format!(
+        "upstream {name} {{\n{servers}}}\n\nserver {{\n    listen 80;\n    server_name {domain};\n\n    location / {{\n        proxy_pass http://{name};\n ...",
+        name = spec.name,
+        domain = spec.domain,
     )
-    return f"""upstream {spec.name} {{
-{servers}}}
-
-server {{
-    listen 80;
-    server_name {spec.domain};
-    ..."""
+}
 ```
-Triple-quoted f-strings are the most WYSIWYG of the three — the template looks
-like the artifact. Braces escape as `{{` inside f-strings.
+`format!` with named arguments; literal braces escape as `{{`. Type-checked
+interpolation — a typo'd name is a compile error.
 </TabItem>
 </Tabs>
 
@@ -151,22 +151,16 @@ A generator's whole contract is its exact output. The **golden test** pins it
 byte for byte:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-// GOLDEN TEST: the exact expected artifact, byte for byte. If a template
-// change is intentional, the golden text is updated in the same commit.
-#[test]
-fn nginx_golden() {
-    let spec = parse_spec(SPEC).unwrap();
-    let expected = "\
-upstream api {
+<TabItem label="Python">
+```python title="test_confgen.py"
+def test_nginx_golden(self) -> None:
+    expected = """upstream api {
     server 127.0.0.1:8080;
     server 127.0.0.1:8081;
 }
 ...
-";
-    assert_eq!(render_nginx(&spec), expected);
-}
+"""
+    self.assertEqual(render_nginx(parse_spec(SPEC)), expected)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -185,16 +179,22 @@ func TestNginxGolden(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_confgen.py"
-def test_nginx_golden(self) -> None:
-    expected = """upstream api {
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+// GOLDEN TEST: the exact expected artifact, byte for byte. If a template
+// change is intentional, the golden text is updated in the same commit.
+#[test]
+fn nginx_golden() {
+    let spec = parse_spec(SPEC).unwrap();
+    let expected = "\
+upstream api {
     server 127.0.0.1:8080;
     server 127.0.0.1:8081;
 }
 ...
-"""
-    self.assertEqual(render_nginx(parse_spec(SPEC)), expected)
+";
+    assert_eq!(render_nginx(&spec), expected);
+}
 ```
 </TabItem>
 </Tabs>

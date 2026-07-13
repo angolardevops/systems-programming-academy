@@ -73,6 +73,40 @@ $ echo $?
 This is Part 1's fan-out/fan-in pattern verbatim — now with a reason to exist:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="healthcheck.py"
+def check_all(targets: list[Target], timeout: float) -> list[Probe]:
+    """Probes every target in parallel — a thread pool doing real ops work."""
+    with ThreadPoolExecutor(max_workers=max(len(targets), 1)) as pool:
+        probes = list(
+            pool.map(lambda t: Probe(name=t.name, up=probe(t.addr, timeout)), targets)
+        )
+    return sorted(probes, key=lambda p: p.name)  # deterministic report order
+```
+Threads are the right tool here despite the GIL: probing is **I/O-bound** — the
+GIL is released while blocked on `connect`.
+</TabItem>
+<TabItem label="Go">
+```go title="healthcheck.go"
+// CheckAll probes every target in parallel — goroutines + WaitGroup.
+func CheckAll(targets []Target, timeout time.Duration) []Probe {
+	probes := make([]Probe, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, t Target) {
+			defer wg.Done()
+			probes[i] = Probe{Name: t.Name, Up: ProbeAddr(t.Addr, timeout)}
+		}(i, t)
+	}
+	wg.Wait()
+	sort.Slice(probes, func(i, j int) bool { return probes[i].Name < probes[j].Name })
+	return probes
+}
+```
+Each goroutine writes a distinct index — no lock needed, the same
+disjoint-writes idea from the [goroutines lesson](/systems-programming-academy/part-1-foundations/go/concurrency/).
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 /// Probes every target in parallel using scoped threads: N targets cost one
@@ -97,40 +131,6 @@ pub fn check_all(targets: &[Target], timeout: Duration) -> Vec<Probe> {
 `thread::scope` (from the [concurrency lesson](/systems-programming-academy/part-1-foundations/rust/concurrency/))
 lets the threads borrow `targets` — no `Arc`, no `'static`.
 </TabItem>
-<TabItem label="Go">
-```go title="healthcheck.go"
-// CheckAll probes every target in parallel — goroutines + WaitGroup.
-func CheckAll(targets []Target, timeout time.Duration) []Probe {
-	probes := make([]Probe, len(targets))
-	var wg sync.WaitGroup
-	for i, t := range targets {
-		wg.Add(1)
-		go func(i int, t Target) {
-			defer wg.Done()
-			probes[i] = Probe{Name: t.Name, Up: ProbeAddr(t.Addr, timeout)}
-		}(i, t)
-	}
-	wg.Wait()
-	sort.Slice(probes, func(i, j int) bool { return probes[i].Name < probes[j].Name })
-	return probes
-}
-```
-Each goroutine writes a distinct index — no lock needed, the same
-disjoint-writes idea from the [goroutines lesson](/systems-programming-academy/part-1-foundations/go/concurrency/).
-</TabItem>
-<TabItem label="Python">
-```python title="healthcheck.py"
-def check_all(targets: list[Target], timeout: float) -> list[Probe]:
-    """Probes every target in parallel — a thread pool doing real ops work."""
-    with ThreadPoolExecutor(max_workers=max(len(targets), 1)) as pool:
-        probes = list(
-            pool.map(lambda t: Probe(name=t.name, up=probe(t.addr, timeout)), targets)
-        )
-    return sorted(probes, key=lambda p: p.name)  # deterministic report order
-```
-Threads are the right tool here despite the GIL: probing is **I/O-bound** — the
-GIL is released while blocked on `connect`.
-</TabItem>
 </Tabs>
 
 **The measured payoff:** against 5 unreachable (firewall-style, non-responding)
@@ -145,29 +145,6 @@ The probe itself is three lines per language — the discipline is that a
 firewalled IP) hangs the agent for the kernel's default of *minutes*:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn probe(addr: &str, timeout: Duration) -> bool {
-    let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr) else {
-        return false; // unresolvable => down
-    };
-    let Some(sock_addr) = addrs.next() else { return false };
-    TcpStream::connect_timeout(&sock_addr, timeout).is_ok()
-}
-```
-</TabItem>
-<TabItem label="Go">
-```go title="healthcheck.go"
-func ProbeAddr(addr string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-```
-</TabItem>
 <TabItem label="Python">
 ```python title="healthcheck.py"
 def probe(addr: str, timeout: float) -> bool:
@@ -183,6 +160,29 @@ def probe(addr: str, timeout: float) -> bool:
         return False
 ```
 </TabItem>
+<TabItem label="Go">
+```go title="healthcheck.go"
+func ProbeAddr(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn probe(addr: &str, timeout: Duration) -> bool {
+    let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr) else {
+        return false; // unresolvable => down
+    };
+    let Some(sock_addr) = addrs.next() else { return false };
+    TcpStream::connect_timeout(&sock_addr, timeout).is_ok()
+}
+```
+</TabItem>
 </Tabs>
 
 ## Testing against real sockets — deterministically
@@ -195,17 +195,15 @@ No mocks. The tests create the network conditions they assert on:
   port → connection refused, instantly and deterministically.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-#[test]
-fn probe_reports_down_for_a_closed_port() {
-    // Bind, learn the port, drop the listener: deterministic "down".
-    let addr = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().to_string()
-    };
-    assert!(!probe(&addr, Duration::from_millis(500)));
-}
+<TabItem label="Python">
+```python title="test_healthcheck.py"
+def down_addr() -> str:
+    """Binds then closes a socket: a deterministic refused port."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    host, port = s.getsockname()
+    s.close()
+    return f"{host}:{port}"
 ```
 </TabItem>
 <TabItem label="Go">
@@ -223,15 +221,17 @@ func downAddr(t *testing.T) string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_healthcheck.py"
-def down_addr() -> str:
-    """Binds then closes a socket: a deterministic refused port."""
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    host, port = s.getsockname()
-    s.close()
-    return f"{host}:{port}"
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn probe_reports_down_for_a_closed_port() {
+    // Bind, learn the port, drop the listener: deterministic "down".
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    assert!(!probe(&addr, Duration::from_millis(500)));
+}
 ```
 </TabItem>
 </Tabs>

@@ -69,6 +69,33 @@ move *is* the builder pattern. `build()` walks the accumulated state once and
 emits the SQL plus the positional params.
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="querybuilder.py"
+def where(self, column: str, op: str, value: str) -> Query:
+    """Add a ``column op ?`` condition, binding ``value`` as a parameter.
+    Multiple calls are joined with ``AND`` in call order."""
+    self._conditions.append(_Condition(column, op, value))
+    return self
+```
+
+Python returns `self`, the direct analogue of Go's pointer approach. The type
+hint `-> Query` is what makes editors autocomplete the next method in the chain
+— a small thing that makes a fluent API pleasant to use.
+</TabItem>
+<TabItem label="Go">
+```go title="query.go"
+// Where adds a "column op ?" condition, binding value as a parameter.
+// Multiple calls are joined with AND in call order.
+func (q *Query) Where(column, op, value string) *Query {
+	q.conditions = append(q.conditions, condition{column, op, value})
+	return q
+}
+```
+
+Go returns the pointer `*Query`, mutating in place and handing the same builder
+back. Idiomatic and allocation-free per call, at the cost of the builder being
+shared mutable state (fine here — you build one query, once).
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 /// Adds a `column op ?` condition, binding `value` as a parameter.
@@ -87,33 +114,6 @@ Rust takes `self` by value and returns it (`mut self -> Self`), so the chain
 *moves* the builder along — no borrows to juggle, and the compiler guarantees
 the builder is used linearly. (`where` is a keyword, hence `where_`.)
 </TabItem>
-<TabItem label="Go">
-```go title="query.go"
-// Where adds a "column op ?" condition, binding value as a parameter.
-// Multiple calls are joined with AND in call order.
-func (q *Query) Where(column, op, value string) *Query {
-	q.conditions = append(q.conditions, condition{column, op, value})
-	return q
-}
-```
-
-Go returns the pointer `*Query`, mutating in place and handing the same builder
-back. Idiomatic and allocation-free per call, at the cost of the builder being
-shared mutable state (fine here — you build one query, once).
-</TabItem>
-<TabItem label="Python">
-```python title="querybuilder.py"
-def where(self, column: str, op: str, value: str) -> Query:
-    """Add a ``column op ?`` condition, binding ``value`` as a parameter.
-    Multiple calls are joined with ``AND`` in call order."""
-    self._conditions.append(_Condition(column, op, value))
-    return self
-```
-
-Python returns `self`, the direct analogue of Go's pointer approach. The type
-hint `-> Query` is what makes editors autocomplete the next method in the chain
-— a small thing that makes a fluent API pleasant to use.
-</TabItem>
 </Tabs>
 
 ## The one rule that matters: values become `?`
@@ -123,20 +123,14 @@ value does **not** get written into the SQL. A `?` placeholder goes into the
 SQL; the value goes into a separate params list.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-if !self.conditions.is_empty() {
-    let clauses: Vec<String> = self
-        .conditions
-        .iter()
-        .map(|c| {
-            params.push(c.value.clone()); // value -> params
-            format!("{} {} ?", c.column, c.op) // SQL gets only '?'
-        })
-        .collect();
-    sql.push_str(" WHERE ");
-    sql.push_str(&clauses.join(" AND "));
-}
+<TabItem label="Python">
+```python title="querybuilder.py"
+if self._conditions:
+    clauses = []
+    for c in self._conditions:
+        params.append(c.value)  # value -> params
+        clauses.append(f"{c.column} {c.op} ?")  # SQL gets only '?'
+    sql += " WHERE " + " AND ".join(clauses)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -151,14 +145,20 @@ if len(q.conditions) > 0 {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="querybuilder.py"
-if self._conditions:
-    clauses = []
-    for c in self._conditions:
-        params.append(c.value)  # value -> params
-        clauses.append(f"{c.column} {c.op} ?")  # SQL gets only '?'
-    sql += " WHERE " + " AND ".join(clauses)
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+if !self.conditions.is_empty() {
+    let clauses: Vec<String> = self
+        .conditions
+        .iter()
+        .map(|c| {
+            params.push(c.value.clone()); // value -> params
+            format!("{} {} ?", c.column, c.op) // SQL gets only '?'
+        })
+        .collect();
+    sql.push_str(" WHERE ");
+    sql.push_str(&clauses.join(" AND "));
+}
 ```
 </TabItem>
 </Tabs>

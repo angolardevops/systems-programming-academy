@@ -59,6 +59,42 @@ O tratamento do pedido é idêntico nos três; só a **linha que consegue a
 concorrência** difere. É essa a experiência toda.
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="mininginx.py — corrotina por ligação"
+async def start_server(docroot: Path, port: int = 0) -> tuple[asyncio.Server, int]:
+    """Arranca o servidor; devolve-o e o porto realmente bound."""
+
+    async def handler(reader, writer) -> None:
+        await handle_connection(reader, writer, docroot)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", port)
+    bound_port = server.sockets[0].getsockname()[1]
+    return server, bound_port
+```
+
+O `asyncio.start_server` agenda uma corrotina por ligação num event loop de
+uma só thread (lição 3). Cada `await` dentro do handler é um ponto de suspensão
+onde outras ligações correm. Uma thread, sem locks precisos.
+</TabItem>
+<TabItem label="Go">
+```go title="main.go — goroutine por ligação"
+// serve aceita ligações para sempre, uma goroutine cada.
+func serve(ln net.Listener, docroot string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go handleConnection(conn, docroot)
+	}
+}
+```
+
+Uma linha — `go handleConnection(conn, docroot)`. O netpoller (lição 3)
+transforma as leituras bloqueantes de cada goroutine em esperas epoll; o
+runtime agenda milhares delas pelos cores. A concorrência é **ilimitada** por
+omissão, que é a postura idiomática do Go e um trade-off real que vamos medir.
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs — thread pool fixo"
 /// Corre o servidor: `n_workers` threads puxam ligações de um channel e
@@ -93,42 +129,6 @@ O channel (lição 2) distribui o trabalho; o `Arc<Mutex<Receiver>>` (lição 1)
 deixa N workers partilharem o único consumidor mpsc. A concorrência é
 **limitada** por `n_workers` — um dial de capacidade deliberado.
 </TabItem>
-<TabItem label="Go">
-```go title="main.go — goroutine por ligação"
-// serve aceita ligações para sempre, uma goroutine cada.
-func serve(ln net.Listener, docroot string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go handleConnection(conn, docroot)
-	}
-}
-```
-
-Uma linha — `go handleConnection(conn, docroot)`. O netpoller (lição 3)
-transforma as leituras bloqueantes de cada goroutine em esperas epoll; o
-runtime agenda milhares delas pelos cores. A concorrência é **ilimitada** por
-omissão, que é a postura idiomática do Go e um trade-off real que vamos medir.
-</TabItem>
-<TabItem label="Python">
-```python title="mininginx.py — corrotina por ligação"
-async def start_server(docroot: Path, port: int = 0) -> tuple[asyncio.Server, int]:
-    """Arranca o servidor; devolve-o e o porto realmente bound."""
-
-    async def handler(reader, writer) -> None:
-        await handle_connection(reader, writer, docroot)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", port)
-    bound_port = server.sockets[0].getsockname()[1]
-    return server, bound_port
-```
-
-O `asyncio.start_server` agenda uma corrotina por ligação num event loop de
-uma só thread (lição 3). Cada `await` dentro do handler é um ponto de suspensão
-onde outras ligações correm. Uma thread, sem locks precisos.
-</TabItem>
 </Tabs>
 
 ## O handler de pedido partilhado
@@ -140,23 +140,27 @@ e rejeita qualquer componente `..` *antes de tocar no sistema de ficheiros* —
 o pedido nunca tem hipótese de escapar do document root.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-/// Mapeia um path de URL para um ficheiro dentro do `docroot`, ou `None` se
-/// tentar escapar. Puramente lexical: qualquer `..` é rejeitado logo.
-pub fn resolve(docroot: &Path, url_path: &str) -> Option<PathBuf> {
-    let path = if url_path == "/" { "/index.html" } else { url_path };
-    let mut resolved = docroot.to_path_buf();
-    for component in path.split('/') {
-        match component {
-            "" | "." => continue,
-            ".." => return None, // tentativa de traversal: nunca sai do docroot
-            c if c.contains('\0') => return None,
-            c => resolved.push(c),
-        }
-    }
-    Some(resolved)
-}
+<TabItem label="Python">
+```python title="mininginx.py"
+def resolve(docroot: Path, url_path: str) -> Path | None:
+    """Mapeia um path de URL para um ficheiro dentro do ``docroot``, ou
+    ``None`` se tentar escapar. Puramente lexical: qualquer ``..`` é rejeitado.
+
+    >>> resolve(Path("/srv/www"), "/") == Path("/srv/www/index.html")
+    True
+    >>> resolve(Path("/srv/www"), "/../etc/passwd") is None
+    True
+    """
+    if url_path == "/":
+        url_path = "/index.html"
+    resolved = docroot
+    for component in url_path.split("/"):
+        if component in ("", "."):
+            continue
+        if component == ".." or "\0" in component:
+            return None  # tentativa de traversal: nunca sai do docroot
+        resolved = resolved / component
+    return resolved
 ```
 </TabItem>
 <TabItem label="Go">
@@ -184,27 +188,23 @@ func resolve(docroot, urlPath string) (string, bool) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="mininginx.py"
-def resolve(docroot: Path, url_path: str) -> Path | None:
-    """Mapeia um path de URL para um ficheiro dentro do ``docroot``, ou
-    ``None`` se tentar escapar. Puramente lexical: qualquer ``..`` é rejeitado.
-
-    >>> resolve(Path("/srv/www"), "/") == Path("/srv/www/index.html")
-    True
-    >>> resolve(Path("/srv/www"), "/../etc/passwd") is None
-    True
-    """
-    if url_path == "/":
-        url_path = "/index.html"
-    resolved = docroot
-    for component in url_path.split("/"):
-        if component in ("", "."):
-            continue
-        if component == ".." or "\0" in component:
-            return None  # tentativa de traversal: nunca sai do docroot
-        resolved = resolved / component
-    return resolved
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Mapeia um path de URL para um ficheiro dentro do `docroot`, ou `None` se
+/// tentar escapar. Puramente lexical: qualquer `..` é rejeitado logo.
+pub fn resolve(docroot: &Path, url_path: &str) -> Option<PathBuf> {
+    let path = if url_path == "/" { "/index.html" } else { url_path };
+    let mut resolved = docroot.to_path_buf();
+    for component in path.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => return None, // tentativa de traversal: nunca sai do docroot
+            c if c.contains('\0') => return None,
+            c => resolved.push(c),
+        }
+    }
+    Some(resolved)
+}
 ```
 </TabItem>
 </Tabs>

@@ -133,6 +133,75 @@ singleton em cache, verificar um ciclo, procurar a factory, corrê-la (recorrend
 nas dependências), e fazer cache do resultado se for um singleton.
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="container.py"
+def resolve(self, name: str) -> str:
+    if name in self._cache:
+        return self._cache[name]
+
+    if name in self._resolving:
+        chain = " -> ".join([*self._resolving, name])
+        raise ContainerError(f"dependency cycle: {chain}")
+
+    if name not in self._factories:
+        raise ContainerError(f"service not registered: {name}")
+
+    factory, singleton = self._factories[name]
+    self._resolving.append(name)
+    try:
+        value = factory(self)
+    finally:
+        self._resolving.pop()
+
+    if singleton:
+        self._cache[name] = value
+    return value
+```
+
+O `try/finally` é estrutural: se uma factory levantar exceção (uma dependência
+em falta fundo no grafo), o `finally` ainda faz pop da stack de resolução, por
+isso o container fica num estado consistente e um resolve *posterior* do mesmo
+nome não reporta um ciclo espúrio. Limpeza-em-exceção é o idioma Python para o
+que o `Drop` baseado em scope do Rust dá automaticamente.
+</TabItem>
+<TabItem label="Go">
+```go title="container.go"
+func (c *Container) Resolve(name string) (string, error) {
+	if value, ok := c.cache[name]; ok {
+		return value, nil
+	}
+
+	for _, n := range c.resolving {
+		if n == name {
+			chain := append(append([]string{}, c.resolving...), name)
+			return "", fmt.Errorf("dependency cycle: %s", strings.Join(chain, " -> "))
+		}
+	}
+
+	reg, ok := c.registrations[name]
+	if !ok {
+		return "", fmt.Errorf("service not registered: %s", name)
+	}
+
+	c.resolving = append(c.resolving, name)
+	value, err := reg.factory(c)
+	c.resolving = c.resolving[:len(c.resolving)-1]
+	if err != nil {
+		return "", err
+	}
+
+	if reg.singleton {
+		c.cache[name] = value
+	}
+	return value, nil
+}
+```
+
+O Go muta o struct diretamente — sem cerimónia de mutabilidade interior, porque
+não tem borrow checker para satisfazer. O
+`append(append([]string{}, ...), name)` copia a stack antes de acrescentar, para
+a mensagem de erro possuir a sua cadeia independentemente.
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 pub fn resolve(&self, name: &str) -> Result<String, String> {
@@ -174,75 +243,6 @@ interior, o padrão da lição de Smart Pointers da Parte 1. O `{ }` com scope �
 volta da verificação de ciclo liberta o borrow antes de a factory correr,
 evitando um panic de double-borrow do `RefCell` quando a factory reentra no
 `resolve`.
-</TabItem>
-<TabItem label="Go">
-```go title="container.go"
-func (c *Container) Resolve(name string) (string, error) {
-	if value, ok := c.cache[name]; ok {
-		return value, nil
-	}
-
-	for _, n := range c.resolving {
-		if n == name {
-			chain := append(append([]string{}, c.resolving...), name)
-			return "", fmt.Errorf("dependency cycle: %s", strings.Join(chain, " -> "))
-		}
-	}
-
-	reg, ok := c.registrations[name]
-	if !ok {
-		return "", fmt.Errorf("service not registered: %s", name)
-	}
-
-	c.resolving = append(c.resolving, name)
-	value, err := reg.factory(c)
-	c.resolving = c.resolving[:len(c.resolving)-1]
-	if err != nil {
-		return "", err
-	}
-
-	if reg.singleton {
-		c.cache[name] = value
-	}
-	return value, nil
-}
-```
-
-O Go muta o struct diretamente — sem cerimónia de mutabilidade interior, porque
-não tem borrow checker para satisfazer. O
-`append(append([]string{}, ...), name)` copia a stack antes de acrescentar, para
-a mensagem de erro possuir a sua cadeia independentemente.
-</TabItem>
-<TabItem label="Python">
-```python title="container.py"
-def resolve(self, name: str) -> str:
-    if name in self._cache:
-        return self._cache[name]
-
-    if name in self._resolving:
-        chain = " -> ".join([*self._resolving, name])
-        raise ContainerError(f"dependency cycle: {chain}")
-
-    if name not in self._factories:
-        raise ContainerError(f"service not registered: {name}")
-
-    factory, singleton = self._factories[name]
-    self._resolving.append(name)
-    try:
-        value = factory(self)
-    finally:
-        self._resolving.pop()
-
-    if singleton:
-        self._cache[name] = value
-    return value
-```
-
-O `try/finally` é estrutural: se uma factory levantar exceção (uma dependência
-em falta fundo no grafo), o `finally` ainda faz pop da stack de resolução, por
-isso o container fica num estado consistente e um resolve *posterior* do mesmo
-nome não reporta um ciclo espúrio. Limpeza-em-exceção é o idioma Python para o
-que o `Drop` baseado em scope do Rust dá automaticamente.
 </TabItem>
 </Tabs>
 

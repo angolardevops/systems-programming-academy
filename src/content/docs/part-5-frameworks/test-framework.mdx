@@ -54,20 +54,16 @@ sides. That message is the difference between a five-second fix and a debugging
 session:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn assert_eq<T: PartialEq + std::fmt::Debug>(actual: T, expected: T) -> Check {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?}, got {actual:?}"))
-    }
-}
+<TabItem label="Python">
+```python title="testkit.py"
+def assert_eq(actual: object, expected: object) -> None:
+    if actual != expected:
+        raise AssertionFail(f"expected {expected!r}, got {actual!r}")
 ```
 
-`Check` is `Result<(), String>`: `Ok` passed, `Err(message)` failed. The generic
-bound `PartialEq + Debug` lets one assertion compare any comparable, printable
-type.
+Python signals failure the Pythonic way — by *raising*. An assertion that passes
+returns `None`; one that fails raises `AssertionFail` with the message. (This is
+exactly how `unittest` and `pytest`'s `assert` rewriting work underneath.)
 </TabItem>
 <TabItem label="Go">
 ```go title="testkit.go"
@@ -83,16 +79,20 @@ func AssertEq[T comparable](actual, expected T) Check {
 constraint `comparable` (Go 1.18+) lets one assertion serve every comparable
 type.
 </TabItem>
-<TabItem label="Python">
-```python title="testkit.py"
-def assert_eq(actual: object, expected: object) -> None:
-    if actual != expected:
-        raise AssertionFail(f"expected {expected!r}, got {actual!r}")
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn assert_eq<T: PartialEq + std::fmt::Debug>(actual: T, expected: T) -> Check {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?}, got {actual:?}"))
+    }
+}
 ```
 
-Python signals failure the Pythonic way — by *raising*. An assertion that passes
-returns `None`; one that fails raises `AssertionFail` with the message. (This is
-exactly how `unittest` and `pytest`'s `assert` rewriting work underneath.)
+`Check` is `Result<(), String>`: `Ok` passed, `Err(message)` failed. The generic
+bound `PartialEq + Debug` lets one assertion compare any comparable, printable
+type.
 </TabItem>
 </Tabs>
 
@@ -110,25 +110,20 @@ runner wraps each test in a catch: a returned failure becomes a `FAILED`, and a
 to kill the process.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-let result = panic::catch_unwind(AssertUnwindSafe(body));
-let outcome = match result {
-    Ok(Ok(())) => Outcome::Pass,
-    Ok(Err(message)) => Outcome::Fail(message),
-    Err(payload) => {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic".to_string());
-        Outcome::Fail(format!("panicked: {msg}"))
-    }
-};
+<TabItem label="Python">
+```python title="testkit.py"
+try:
+    body()
+    outcomes.append(_Outcome(name, False, ""))
+except AssertionFail as e:
+    outcomes.append(_Outcome(name, True, str(e)))
+except Exception as e:  # test isolation is the point
+    outcomes.append(_Outcome(name, True, f"raised: {e!r}"))
 ```
 
-`std::panic::catch_unwind` stops a panicking test from unwinding past the runner;
-the payload is downcast to recover the panic message.
+Python catches the expected `AssertionFail` and, separately, *any* other
+exception — a broad `except` that would be a smell anywhere else but is exactly
+right here: isolating arbitrary test crashes is the runner's job.
 </TabItem>
 <TabItem label="Go">
 ```go title="testkit.go"
@@ -151,20 +146,25 @@ func runOne(tc testCase) (result outcome) {
 Go's `recover()` inside a deferred function catches a panic and converts it to a
 failure — the named return value lets the deferred closure set the outcome.
 </TabItem>
-<TabItem label="Python">
-```python title="testkit.py"
-try:
-    body()
-    outcomes.append(_Outcome(name, False, ""))
-except AssertionFail as e:
-    outcomes.append(_Outcome(name, True, str(e)))
-except Exception as e:  # test isolation is the point
-    outcomes.append(_Outcome(name, True, f"raised: {e!r}"))
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+let result = panic::catch_unwind(AssertUnwindSafe(body));
+let outcome = match result {
+    Ok(Ok(())) => Outcome::Pass,
+    Ok(Err(message)) => Outcome::Fail(message),
+    Err(payload) => {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Outcome::Fail(format!("panicked: {msg}"))
+    }
+};
 ```
 
-Python catches the expected `AssertionFail` and, separately, *any* other
-exception — a broad `except` that would be a smell anywhere else but is exactly
-right here: isolating arbitrary test crashes is the runner's job.
+`std::panic::catch_unwind` stops a panicking test from unwinding past the runner;
+the payload is downcast to recover the panic message.
 </TabItem>
 </Tabs>
 

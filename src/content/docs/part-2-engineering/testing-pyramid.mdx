@@ -68,19 +68,21 @@ A signup flow with three layers, each mapping to a pyramid level:
 ## Level 1 — Unit: every rule of the pure validator
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (unit_tests)"
-#[test]
-fn rejects_missing_at() {
-    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+class UnitValidatorTests(unittest.TestCase):
+    """UNIT level: many tiny tests on the pure validator — instant, no setup."""
 
-#[test]
-fn rejects_bad_domain() {
-    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
-    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
-}
-// ...six unit tests total: one per rule, one per edge.
+    def test_accepts_a_normal_address(self):
+        validate_email("ada@example.com")  # no exception
+
+    def test_rejects_bad_inputs(self):
+        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
+               "@example.com", "a da@x.com"]
+        for email in bad:
+            with self.subTest(email=email):
+                with self.assertRaises(InvalidEmailError):
+                    validate_email(email)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -110,21 +112,19 @@ func TestValidateEmail(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-class UnitValidatorTests(unittest.TestCase):
-    """UNIT level: many tiny tests on the pure validator — instant, no setup."""
+<TabItem label="Rust">
+```rust title="src/lib.rs (unit_tests)"
+#[test]
+fn rejects_missing_at() {
+    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
+}
 
-    def test_accepts_a_normal_address(self):
-        validate_email("ada@example.com")  # no exception
-
-    def test_rejects_bad_inputs(self):
-        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
-               "@example.com", "a da@x.com"]
-        for email in bad:
-            with self.subTest(email=email):
-                with self.assertRaises(InvalidEmailError):
-                    validate_email(email)
+#[test]
+fn rejects_bad_domain() {
+    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
+    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
+}
+// ...six unit tests total: one per rule, one per edge.
 ```
 </TabItem>
 </Tabs>
@@ -139,15 +139,13 @@ The thing unit tests cannot see: after a successful signup, the user is stored
 Real (in-memory) adapters, real service, real interaction:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (integration_tests)"
-#[test]
-fn duplicate_signup_is_rejected_and_not_notified_twice() {
-    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
-    svc.signup("ada@example.com").unwrap();
-    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
-    assert_eq!(svc.notifier().sent.len(), 1); // no second welcome
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_duplicate_rejected_and_not_notified_twice(self):
+    self.service.signup("ada@example.com")
+    with self.assertRaises(DuplicateEmailError):
+        self.service.signup("ada@example.com")
+    self.assertEqual(len(self.notifier.sent), 1)  # no second welcome
 ```
 </TabItem>
 <TabItem label="Go">
@@ -166,13 +164,15 @@ func TestDuplicateSignupRejectedAndNotNotifiedTwice(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-def test_duplicate_rejected_and_not_notified_twice(self):
-    self.service.signup("ada@example.com")
-    with self.assertRaises(DuplicateEmailError):
-        self.service.signup("ada@example.com")
-    self.assertEqual(len(self.notifier.sent), 1)  # no second welcome
+<TabItem label="Rust">
+```rust title="src/lib.rs (integration_tests)"
+#[test]
+fn duplicate_signup_is_rejected_and_not_notified_twice() {
+    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
+    svc.signup("ada@example.com").unwrap();
+    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
+    assert_eq!(svc.notifier().sent.len(), 1); // no second welcome
+}
 ```
 </TabItem>
 </Tabs>
@@ -191,15 +191,14 @@ One test, driving the composition root exactly as a user-facing caller would, an
 asserting only what the user sees — no internals:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (e2e_tests)"
-#[test]
-fn full_signup_flow_through_the_app() {
-    let mut app = App::new();
-    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
-    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
-    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_full_signup_flow_through_the_app(self):
+    app = App()
+    self.assertEqual(app.signup("ada@example.com"),
+                     "Welcome, ada@example.com! Check your inbox.")
+    self.assertEqual(app.signup("ada@example.com"),
+                     "ada@example.com is already registered.")
 ```
 </TabItem>
 <TabItem label="Go">
@@ -215,14 +214,15 @@ func TestFullSignupFlowThroughTheApp(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-def test_full_signup_flow_through_the_app(self):
-    app = App()
-    self.assertEqual(app.signup("ada@example.com"),
-                     "Welcome, ada@example.com! Check your inbox.")
-    self.assertEqual(app.signup("ada@example.com"),
-                     "ada@example.com is already registered.")
+<TabItem label="Rust">
+```rust title="src/lib.rs (e2e_tests)"
+#[test]
+fn full_signup_flow_through_the_app() {
+    let mut app = App::new();
+    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
+    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
+    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
+}
 ```
 </TabItem>
 </Tabs>

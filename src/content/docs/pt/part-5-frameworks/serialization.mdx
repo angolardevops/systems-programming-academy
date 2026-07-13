@@ -52,23 +52,16 @@ naturalmente: Rust um `enum`, Go um struct etiquetado, Python os seus tipos
 nativos.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-#[derive(Clone, Debug, PartialEq)]
-pub enum Json {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Str(String),
-    Array(Vec<Json>),
-    Object(Vec<(String, Json)>), // pares ordenados, não um HashMap
-}
+<TabItem label="Python">
+```python title="jsonkit.py"
+# Um valor JSON é só None / bool / int / str / list / dict.
+# O dict do Python preserva a ordem de inserção desde 3.7, por isso é
+# canónico de graça.
 ```
 
-O `enum` do Rust é o modelo ideal: as seis variantes são um conjunto fechado que
-o compilador verifica exaustivamente, por isso o `match` do encoder não pode
-esquecer um caso. Repara que `Object` é um `Vec` de pares, **não** um `HashMap` —
-preservar a ordem das chaves é o que torna o output canónico.
+O Python não precisa de tipos novos de todo: `None`, `bool`, `int`, `str`,
+`list` e `dict` já são o modelo de valor JSON, e o `dict` preserva a ordem de
+inserção desde 3.7 — por isso a propriedade canónica vem de graça.
 </TabItem>
 <TabItem label="Go">
 ```go title="json.go"
@@ -87,16 +80,23 @@ modela o valor; `Members` é uma slice ordenada, de novo para manter o encoding
 canónico (um `map` de Go tem ordem de iteração *aleatorizada*, o que partiria a
 byte-identidade).
 </TabItem>
-<TabItem label="Python">
-```python title="jsonkit.py"
-# Um valor JSON é só None / bool / int / str / list / dict.
-# O dict do Python preserva a ordem de inserção desde 3.7, por isso é
-# canónico de graça.
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>), // pares ordenados, não um HashMap
+}
 ```
 
-O Python não precisa de tipos novos de todo: `None`, `bool`, `int`, `str`,
-`list` e `dict` já são o modelo de valor JSON, e o `dict` preserva a ordem de
-inserção desde 3.7 — por isso a propriedade canónica vem de graça.
+O `enum` do Rust é o modelo ideal: as seis variantes são um conjunto fechado que
+o compilador verifica exaustivamente, por isso o `match` do encoder não pode
+esquecer um caso. Repara que `Object` é um `Vec` de pares, **não** um `HashMap` —
+preservar a ordem das chaves é o que torna o output canónico.
 </TabItem>
 </Tabs>
 
@@ -106,27 +106,27 @@ O encoder percorre a árvore e emite texto. A parte interessante é o escaping d
 strings — os caracteres perigosos da gramática JSON, que **não** são os do HTML:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+<TabItem label="Python">
+```python title="jsonkit.py"
+def escape_json_string(s: str) -> str:
+    out = ['"']
+    for ch in s:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -159,27 +159,27 @@ func EscapeJSONString(s string) string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="jsonkit.py"
-def escape_json_string(s: str) -> str:
-    out = ['"']
-    for ch in s:
-        if ch == '"':
-            out.append('\\"')
-        elif ch == "\\":
-            out.append("\\\\")
-        elif ch == "\n":
-            out.append("\\n")
-        elif ch == "\r":
-            out.append("\\r")
-        elif ch == "\t":
-            out.append("\\t")
-        elif ord(ch) < 0x20:
-            out.append(f"\\u{ord(ch):04x}")
-        else:
-            out.append(ch)
-    out.append('"')
-    return "".join(out)
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 ```
 </TabItem>
 </Tabs>

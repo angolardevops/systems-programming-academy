@@ -61,6 +61,55 @@ coletor termina. Sem valores sentinela, sem flags "done", sem contagens — o
 ciclo de vida do channel *é* o protocolo. (O Python é a exceção, como veremos.)
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="channels_demo.py"
+_SENTINEL = None
+
+
+def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
+    """Eleva ao quadrado cada número com ``n_workers`` threads e uma fila.
+
+    Os resultados voltam numa fila de resultados; um sentinela ``None`` por
+    worker substitui o ``close(jobs)`` do Go.
+
+    >>> sum_squares_pool([1, 2, 3], 2)
+    14
+    """
+    if n_workers < 1:
+        raise ValueError("need at least one worker")
+    jobs: queue.Queue[int | None] = queue.Queue()
+    results: queue.Queue[int] = queue.Queue()
+
+    def worker() -> None:
+        while True:
+            n = jobs.get()
+            if n is _SENTINEL:
+                break
+            results.put(n * n)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+
+    for n in nums:
+        jobs.put(n)
+    for _ in threads:
+        jobs.put(_SENTINEL)  # um sinal de paragem por worker
+    for t in threads:
+        t.join()
+
+    total = 0
+    while not results.empty():  # seguro: todos os produtores já saíram
+        total += results.get()
+    return total
+```
+
+A `queue.Queue` não tem `close()` — o shutdown idiomático é um **sentinela**
+(um `None` *por worker*, uma armadilha clássica de off-by-one: um sentinela
+pára um worker; os restantes bloqueiam para sempre). Repara também que o
+`while not results.empty()` só está certo porque todos os produtores já foram
+`join()`ados — verificar-vazio-e-tirar numa fila viva é uma race.
+</TabItem>
 <TabItem label="Go">
 ```go title="channels.go"
 // SumSquaresPool eleva ao quadrado cada número usando um pool de nWorkers
@@ -167,55 +216,6 @@ no projeto de servidor web do Rust Book. Segundo, "fechar" é simplesmente
 os dois `drop` deliberados são estruturais. Apaga o `drop(job_tx)` e o
 programa pendura para sempre — os workers esperam por jobs que, tanto quanto
 sabem, ainda podem chegar.
-</TabItem>
-<TabItem label="Python">
-```python title="channels_demo.py"
-_SENTINEL = None
-
-
-def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
-    """Eleva ao quadrado cada número com ``n_workers`` threads e uma fila.
-
-    Os resultados voltam numa fila de resultados; um sentinela ``None`` por
-    worker substitui o ``close(jobs)`` do Go.
-
-    >>> sum_squares_pool([1, 2, 3], 2)
-    14
-    """
-    if n_workers < 1:
-        raise ValueError("need at least one worker")
-    jobs: queue.Queue[int | None] = queue.Queue()
-    results: queue.Queue[int] = queue.Queue()
-
-    def worker() -> None:
-        while True:
-            n = jobs.get()
-            if n is _SENTINEL:
-                break
-            results.put(n * n)
-
-    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
-    for t in threads:
-        t.start()
-
-    for n in nums:
-        jobs.put(n)
-    for _ in threads:
-        jobs.put(_SENTINEL)  # um sinal de paragem por worker
-    for t in threads:
-        t.join()
-
-    total = 0
-    while not results.empty():  # seguro: todos os produtores já saíram
-        total += results.get()
-    return total
-```
-
-A `queue.Queue` não tem `close()` — o shutdown idiomático é um **sentinela**
-(um `None` *por worker*, uma armadilha clássica de off-by-one: um sentinela
-pára um worker; os restantes bloqueiam para sempre). Repara também que o
-`while not results.empty()` só está certo porque todos os produtores já foram
-`join()`ados — verificar-vazio-e-tirar numa fila viva é uma race.
 </TabItem>
 </Tabs>
 

@@ -49,6 +49,31 @@ and store the result for next time.
   S --> V2["return value"]`} />
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ttlcache.py"
+def get_user(cache: TtlCache, user_id: int, backend: Callable[[int], str]) -> str:
+    key = f"user:{user_id}"
+    name = cache.get(key)
+    if name is not None:
+        return name  # served from cache — no backend call
+    name = backend(user_id)
+    cache.put(key, name)
+    return name
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cache.go"
+func GetUser(cache *Cache[string], id int, backend func(int) string) string {
+	key := fmt.Sprintf("user:%d", id)
+	if name, ok := cache.Get(key); ok {
+		return name // served from cache — no backend call
+	}
+	name := backend(id)
+	cache.Put(key, name)
+	return name
+}
+```
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 pub fn get_user<C: Clock>(
@@ -66,31 +91,6 @@ pub fn get_user<C: Clock>(
 }
 ```
 </TabItem>
-<TabItem label="Go">
-```go title="cache.go"
-func GetUser(cache *Cache[string], id int, backend func(int) string) string {
-	key := fmt.Sprintf("user:%d", id)
-	if name, ok := cache.Get(key); ok {
-		return name // served from cache — no backend call
-	}
-	name := backend(id)
-	cache.Put(key, name)
-	return name
-}
-```
-</TabItem>
-<TabItem label="Python">
-```python title="ttlcache.py"
-def get_user(cache: TtlCache, user_id: int, backend: Callable[[int], str]) -> str:
-    key = f"user:{user_id}"
-    name = cache.get(key)
-    if name is not None:
-        return name  # served from cache — no backend call
-    name = backend(user_id)
-    cache.put(key, name)
-    return name
-```
-</TabItem>
 </Tabs>
 
 ## TTL with an injected clock
@@ -100,6 +100,65 @@ passes the real clock; tests pass a fake they advance by hand — so "wait 60
 seconds" costs nothing:
 
 <Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ttlcache.py"
+class TtlCache:
+    def __init__(self, ttl_seconds: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._entries: dict[str, tuple[Any, float]] = {}
+        self._ttl = ttl_seconds
+        self._clock = clock  # injected: time.monotonic in prod, a fake in tests
+        self.hits = 0
+        self.misses = 0
+
+    def put(self, key: str, value: Any) -> None:
+        self._entries[key] = (value, self._clock() + self._ttl)
+
+    def get(self, key: str) -> Any | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        value, expires = entry
+        if self._clock() >= expires:
+            del self._entries[key]  # lazy eviction
+            self.misses += 1
+            return None
+        self.hits += 1
+        return value
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cache.go"
+type Cache[V any] struct {
+	entries map[string]entry[V]
+	ttl     time.Duration
+	now     func() time.Time // injected: time.Now in prod, a fake in tests
+	Hits    int
+	Misses  int
+}
+
+func (c *Cache[V]) Put(key string, value V) {
+	c.entries[key] = entry[V]{value: value, expires: c.now().Add(c.ttl)}
+}
+
+func (c *Cache[V]) Get(key string) (V, bool) {
+	var zero V
+	e, ok := c.entries[key]
+	if !ok {
+		c.Misses++
+		return zero, false
+	}
+	if !c.now().Before(e.expires) {
+		delete(c.entries, key) // lazy eviction
+		c.Misses++
+		return zero, false
+	}
+	c.Hits++
+	return e.value, true
+}
+```
+</TabItem>
 <TabItem label="Rust">
 ```rust title="src/lib.rs"
 pub trait Clock {
@@ -140,65 +199,6 @@ impl<V: Clone, C: Clock> TtlCache<V, C> {
 }
 ```
 </TabItem>
-<TabItem label="Go">
-```go title="cache.go"
-type Cache[V any] struct {
-	entries map[string]entry[V]
-	ttl     time.Duration
-	now     func() time.Time // injected: time.Now in prod, a fake in tests
-	Hits    int
-	Misses  int
-}
-
-func (c *Cache[V]) Put(key string, value V) {
-	c.entries[key] = entry[V]{value: value, expires: c.now().Add(c.ttl)}
-}
-
-func (c *Cache[V]) Get(key string) (V, bool) {
-	var zero V
-	e, ok := c.entries[key]
-	if !ok {
-		c.Misses++
-		return zero, false
-	}
-	if !c.now().Before(e.expires) {
-		delete(c.entries, key) // lazy eviction
-		c.Misses++
-		return zero, false
-	}
-	c.Hits++
-	return e.value, true
-}
-```
-</TabItem>
-<TabItem label="Python">
-```python title="ttlcache.py"
-class TtlCache:
-    def __init__(self, ttl_seconds: float,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self._entries: dict[str, tuple[Any, float]] = {}
-        self._ttl = ttl_seconds
-        self._clock = clock  # injected: time.monotonic in prod, a fake in tests
-        self.hits = 0
-        self.misses = 0
-
-    def put(self, key: str, value: Any) -> None:
-        self._entries[key] = (value, self._clock() + self._ttl)
-
-    def get(self, key: str) -> Any | None:
-        entry = self._entries.get(key)
-        if entry is None:
-            self.misses += 1
-            return None
-        value, expires = entry
-        if self._clock() >= expires:
-            del self._entries[key]  # lazy eviction
-            self.misses += 1
-            return None
-        self.hits += 1
-        return value
-```
-</TabItem>
 </Tabs>
 
 ## Testing expiry — without sleeping
@@ -206,20 +206,16 @@ class TtlCache:
 The whole payoff of the injected clock. The test *advances time by hand*:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-#[test]
-fn entry_expires_after_ttl() {
-    let clock = FakeClock(Cell::new(0));
-    let mut cache = TtlCache::new(60, &clock);
-    cache.put("k", "v".to_string());
+<TabItem label="Python">
+```python title="test_ttlcache.py"
+def test_entry_expires_after_ttl(self):
+    self.cache.put("k", "v")
 
-    clock.0.set(59); // still fresh
-    assert!(cache.get("k").is_some());
+    self.clock.advance(59)  # still fresh
+    self.assertEqual(self.cache.get("k"), "v")
 
-    clock.0.set(60); // TTL reached: stale
-    assert_eq!(cache.get("k"), None);
-}
+    self.clock.advance(1)  # TTL reached: stale
+    self.assertIsNone(self.cache.get("k"))
 ```
 </TabItem>
 <TabItem label="Go">
@@ -241,16 +237,20 @@ func TestEntryExpiresAfterTTL(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_ttlcache.py"
-def test_entry_expires_after_ttl(self):
-    self.cache.put("k", "v")
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn entry_expires_after_ttl() {
+    let clock = FakeClock(Cell::new(0));
+    let mut cache = TtlCache::new(60, &clock);
+    cache.put("k", "v".to_string());
 
-    self.clock.advance(59)  # still fresh
-    self.assertEqual(self.cache.get("k"), "v")
+    clock.0.set(59); // still fresh
+    assert!(cache.get("k").is_some());
 
-    self.clock.advance(1)  # TTL reached: stale
-    self.assertIsNone(self.cache.get("k"))
+    clock.0.set(60); // TTL reached: stale
+    assert_eq!(cache.get("k"), None);
+}
 ```
 </TabItem>
 </Tabs>

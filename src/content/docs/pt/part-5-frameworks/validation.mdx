@@ -104,33 +104,27 @@ O `validate` percorre o schema e recolhe erros. O detalhe estrutural é o que el
 presente é verificada, e todas as falhas aterram numa lista.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn validate(&self, data: &HashMap<String, String>) -> Vec<Error> {
-    let mut errors = Vec::new();
-    for (field, rules) in &self.fields {
-        let value = data.get(field).map(String::as_str).unwrap_or("");
-        let present = !value.is_empty();
-        let required = rules.iter().any(|r| matches!(r, Rule::Required));
+<TabItem label="Python">
+```python title="validator.py"
+def validate(self, data: dict[str, str]) -> list[Error]:
+    errors: list[Error] = []
+    for name, rules in self._fields:
+        value = data.get(name, "")
+        present = value != ""
+        is_req = any(_is_required(r) for r in rules)
 
-        if !present {
-            if required {
-                errors.push(Error { field: field.clone(), message: "is required".into() });
-            }
-            continue; // valor ausente: nada mais a verificar
-        }
+        if not present:
+            if is_req:
+                errors.append(Error(name, "is required"))
+            continue
 
-        for rule in rules {
-            if matches!(rule, Rule::Required) {
-                continue; // já satisfeito (valor presente)
-            }
-            if let Some(message) = rule.check(value) {
-                errors.push(Error { field: field.clone(), message });
-            }
-        }
-    }
-    errors
-}
+        for rule in rules:
+            if _is_required(rule):
+                continue
+            message = rule(value)
+            if message:
+                errors.append(Error(name, message))
+    return errors
 ```
 </TabItem>
 <TabItem label="Go">
@@ -168,27 +162,33 @@ func (s *Schema) Validate(data map[string]string) []Error {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="validator.py"
-def validate(self, data: dict[str, str]) -> list[Error]:
-    errors: list[Error] = []
-    for name, rules in self._fields:
-        value = data.get(name, "")
-        present = value != ""
-        is_req = any(_is_required(r) for r in rules)
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn validate(&self, data: &HashMap<String, String>) -> Vec<Error> {
+    let mut errors = Vec::new();
+    for (field, rules) in &self.fields {
+        let value = data.get(field).map(String::as_str).unwrap_or("");
+        let present = !value.is_empty();
+        let required = rules.iter().any(|r| matches!(r, Rule::Required));
 
-        if not present:
-            if is_req:
-                errors.append(Error(name, "is required"))
-            continue
+        if !present {
+            if required {
+                errors.push(Error { field: field.clone(), message: "is required".into() });
+            }
+            continue; // valor ausente: nada mais a verificar
+        }
 
-        for rule in rules:
-            if _is_required(rule):
-                continue
-            message = rule(value)
-            if message:
-                errors.append(Error(name, message))
-    return errors
+        for rule in rules {
+            if matches!(rule, Rule::Required) {
+                continue; // já satisfeito (valor presente)
+            }
+            if let Some(message) = rule.check(value) {
+                errors.push(Error { field: field.clone(), message });
+            }
+        }
+    }
+    errors
+}
 ```
 </TabItem>
 </Tabs>
@@ -239,9 +239,9 @@ não-ASCII — um bug que passa por testes só-em-inglês e parte exatamente par
 utilizadores cujos nomes têm acentos. Cada implementação conta *caracteres*:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust
-value.chars().count() < *n  // chars(), não len() (que são bytes)
+<TabItem label="Python">
+```python
+len(v) < n  # o len de uma str em Python já são caracteres
 ```
 </TabItem>
 <TabItem label="Go">
@@ -249,9 +249,9 @@ value.chars().count() < *n  // chars(), não len() (que são bytes)
 utf8.RuneCountInString(value) < r.n  // runes, não len() (que são bytes)
 ```
 </TabItem>
-<TabItem label="Python">
-```python
-len(v) < n  # o len de uma str em Python já são caracteres
+<TabItem label="Rust">
+```rust
+value.chars().count() < *n  // chars(), não len() (que são bytes)
 ```
 </TabItem>
 </Tabs>

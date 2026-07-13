@@ -154,15 +154,16 @@ exatamente; as toolchains estão presas (`go-version: '1.23'`, `python-version:
 recente" produz falhas de sexta-feira inexplicáveis.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
+<TabItem label="Python">
 ```yaml
-# O portão Rust: warnings são erros, a formatação é lei.
-- run: cargo fmt --check
-- run: cargo clippy -- -D warnings
-- run: cargo test
+# O portão Python: o ruff formata e linta, o unittest verifica.
+- run: ruff format --check .
+- run: ruff check .
+- run: python -m unittest discover -s . -p 'test_*.py'
 ```
-O `-D warnings` é a flag crucial: um lint que localmente apenas avisaria **falha
-o build**, por isso os warnings nunca se acumulam.
+Acrescente `mypy .` aqui no momento em que um projeto adota
+[type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/) — anotações que o CI
+nunca verifica são apenas comentários.
 </TabItem>
 <TabItem label="Go">
 ```yaml
@@ -176,16 +177,15 @@ lista não-vazia num exit code de falha. Para código concorrente, acrescente
 `go test -race` (como a [lição de goroutines](/systems-programming-academy/pt/part-1-foundations/go/concurrency/)
 demonstrou).
 </TabItem>
-<TabItem label="Python">
+<TabItem label="Rust">
 ```yaml
-# O portão Python: o ruff formata e linta, o unittest verifica.
-- run: ruff format --check .
-- run: ruff check .
-- run: python -m unittest discover -s . -p 'test_*.py'
+# O portão Rust: warnings são erros, a formatação é lei.
+- run: cargo fmt --check
+- run: cargo clippy -- -D warnings
+- run: cargo test
 ```
-Acrescente `mypy .` aqui no momento em que um projeto adota
-[type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/) — anotações que o CI
-nunca verifica são apenas comentários.
+O `-D warnings` é a flag crucial: um lint que localmente apenas avisaria **falha
+o build**, por isso os warnings nunca se acumulam.
 </TabItem>
 </Tabs>
 

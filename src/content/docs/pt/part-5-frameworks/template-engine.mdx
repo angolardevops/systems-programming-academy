@@ -66,15 +66,16 @@ seus equivalentes de entidade. São cinco, e **o `&` tem de ser substituído
 primeiro**:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")   // TEM de ser primeiro
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+<TabItem label="Python">
+```python title="template.py"
+def escape_html(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")   # TEM de ser primeiro
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
         .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
+        .replace("'", "&#39;")
+    )
 ```
 </TabItem>
 <TabItem label="Go">
@@ -89,16 +90,15 @@ func EscapeHTML(s string) string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="template.py"
-def escape_html(s: str) -> str:
-    return (
-        s.replace("&", "&amp;")   # TEM de ser primeiro
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")   // TEM de ser primeiro
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
+        .replace('\'', "&#39;")
+}
 ```
 </TabItem>
 </Tabs>
@@ -129,27 +129,23 @@ pipeline de filtros — `{{ name | trim | upper }}` — aplicados da esquerda pa
 direita. `raw` é um filtro que desativa o escape final.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-fn render_expr(expr: &str, context: &HashMap<String, String>) -> Result<String, String> {
-    let mut parts = expr.split('|').map(str::trim);
-    let var = parts.next().unwrap_or("");
-    if var.is_empty() {
-        return Err("empty expression: {{ }}".to_string());
-    }
-    let mut value = context
-        .get(var)
-        .cloned()
-        .ok_or_else(|| format!("unknown variable: {var}"))?;
+<TabItem label="Python">
+```python title="template.py"
+def _render_expr(expr: str, context: dict[str, str]) -> str:
+    parts = [p.strip() for p in expr.split("|")]
+    var = parts[0]
+    if var == "":
+        raise TemplateError("empty expression: {{ }}")
+    if var not in context:
+        raise TemplateError(f"unknown variable: {var}")
+    value = context[var]
 
-    let filters: Vec<&str> = parts.collect();
-    let raw = filters.contains(&"raw");
-    for filter in &filters {
-        value = apply_filter(filter, value)?;
-    }
+    filters = parts[1:]
+    raw = "raw" in filters
+    for f in filters:
+        value = _apply_filter(f, value)
 
-    Ok(if raw { value } else { escape_html(&value) })
-}
+    return value if raw else escape_html(value)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -189,23 +185,27 @@ func renderExpr(expr string, context map[string]string) (string, error) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="template.py"
-def _render_expr(expr: str, context: dict[str, str]) -> str:
-    parts = [p.strip() for p in expr.split("|")]
-    var = parts[0]
-    if var == "":
-        raise TemplateError("empty expression: {{ }}")
-    if var not in context:
-        raise TemplateError(f"unknown variable: {var}")
-    value = context[var]
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn render_expr(expr: &str, context: &HashMap<String, String>) -> Result<String, String> {
+    let mut parts = expr.split('|').map(str::trim);
+    let var = parts.next().unwrap_or("");
+    if var.is_empty() {
+        return Err("empty expression: {{ }}".to_string());
+    }
+    let mut value = context
+        .get(var)
+        .cloned()
+        .ok_or_else(|| format!("unknown variable: {var}"))?;
 
-    filters = parts[1:]
-    raw = "raw" in filters
-    for f in filters:
-        value = _apply_filter(f, value)
+    let filters: Vec<&str> = parts.collect();
+    let raw = filters.contains(&"raw");
+    for filter in &filters {
+        value = apply_filter(filter, value)?;
+    }
 
-    return value if raw else escape_html(value)
+    Ok(if raw { value } else { escape_html(&value) })
+}
 ```
 </TabItem>
 </Tabs>

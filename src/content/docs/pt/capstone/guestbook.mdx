@@ -147,21 +147,15 @@ como dados de linha — exatamente o que um driver real faz: os valores são
 ligados, nunca executados como SQL.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn execute_insert(&mut self, sql: &str, params: &[String]) {
-    assert_eq!(
-        sql, "INSERT INTO comments (author, body) VALUES (?, ?)",
-        "store only accepts the parameterized comment insert"
-    );
-    assert_eq!(params.len(), 2, "expected two bound params");
-    // Liga params como DADOS. O que quer que esteja neles — incluindo uma
-    // string '; DROP... — é guardado tal e qual como valor; nunca é SQL.
-    self.comments.push(Comment {
-        author: params[0].clone(),
-        body: params[1].clone(),
-    });
-}
+<TabItem label="Python">
+```python title="guestbook.py"
+def execute_insert(self, sql: str, params: list[str]) -> None:
+    if sql != "INSERT INTO comments (author, body) VALUES (?, ?)":
+        raise ValueError("store only accepts the parameterized comment insert")
+    if len(params) != 2:
+        raise ValueError(f"expected two bound params, got {len(params)}")
+    # Liga params como DADOS — o que estiver neles é guardado tal e qual, nunca SQL.
+    self._comments.append(Comment(author=params[0], body=params[1]))
 ```
 </TabItem>
 <TabItem label="Go">
@@ -179,15 +173,21 @@ func (s *Store) ExecuteInsert(sql string, params []string) error {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="guestbook.py"
-def execute_insert(self, sql: str, params: list[str]) -> None:
-    if sql != "INSERT INTO comments (author, body) VALUES (?, ?)":
-        raise ValueError("store only accepts the parameterized comment insert")
-    if len(params) != 2:
-        raise ValueError(f"expected two bound params, got {len(params)}")
-    # Liga params como DADOS — o que estiver neles é guardado tal e qual, nunca SQL.
-    self._comments.append(Comment(author=params[0], body=params[1]))
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn execute_insert(&mut self, sql: &str, params: &[String]) {
+    assert_eq!(
+        sql, "INSERT INTO comments (author, body) VALUES (?, ?)",
+        "store only accepts the parameterized comment insert"
+    );
+    assert_eq!(params.len(), 2, "expected two bound params");
+    // Liga params como DADOS. O que quer que esteja neles — incluindo uma
+    // string '; DROP... — é guardado tal e qual como valor; nunca é SQL.
+    self.comments.push(Comment {
+        author: params[0].clone(),
+        body: params[1].clone(),
+    });
+}
 ```
 </TabItem>
 </Tabs>
@@ -205,21 +205,16 @@ como corpo de comentário, e verifica que a linha existente sobrevive e o payloa
 foi guardado como dados inertes:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (teste)"
-#[test]
-fn sql_injection_payload_is_stored_as_inert_data_table_survives() {
-    let mut store = Store::new();
-    submit(&mut store, "Alice", "first comment"); // uma linha existente
-    // O ataque: um corpo que tenta apagar a tabela.
-    let errors = submit(&mut store, "Mallory", "'; DROP TABLE comments; --");
-    assert!(errors.is_empty());
-    // A "linha existente" ainda lá está — nada foi apagado.
-    assert_eq!(store.all().len(), 2);
-    assert_eq!(store.all()[0].body, "first comment");
-    // O payload foi guardado tal e qual como um valor de string simples.
-    assert_eq!(store.all()[1].body, "'; DROP TABLE comments; --");
-}
+<TabItem label="Python">
+```python title="test_guestbook.py"
+def test_sql_injection_payload_is_stored_as_inert_data_table_survives(self):
+    store = Store()
+    submit(store, "Alice", "first comment")
+    errors = submit(store, "Mallory", "'; DROP TABLE comments; --")
+    self.assertEqual(errors, [])
+    self.assertEqual(len(store.all()), 2)
+    self.assertEqual(store.all()[0].body, "first comment")
+    self.assertEqual(store.all()[1].body, "'; DROP TABLE comments; --")
 ```
 </TabItem>
 <TabItem label="Go">
@@ -240,16 +235,21 @@ func TestSQLInjectionPayloadIsStoredAsInertDataTableSurvives(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_guestbook.py"
-def test_sql_injection_payload_is_stored_as_inert_data_table_survives(self):
-    store = Store()
-    submit(store, "Alice", "first comment")
-    errors = submit(store, "Mallory", "'; DROP TABLE comments; --")
-    self.assertEqual(errors, [])
-    self.assertEqual(len(store.all()), 2)
-    self.assertEqual(store.all()[0].body, "first comment")
-    self.assertEqual(store.all()[1].body, "'; DROP TABLE comments; --")
+<TabItem label="Rust">
+```rust title="src/lib.rs (teste)"
+#[test]
+fn sql_injection_payload_is_stored_as_inert_data_table_survives() {
+    let mut store = Store::new();
+    submit(&mut store, "Alice", "first comment"); // uma linha existente
+    // O ataque: um corpo que tenta apagar a tabela.
+    let errors = submit(&mut store, "Mallory", "'; DROP TABLE comments; --");
+    assert!(errors.is_empty());
+    // A "linha existente" ainda lá está — nada foi apagado.
+    assert_eq!(store.all().len(), 2);
+    assert_eq!(store.all()[0].body, "first comment");
+    // O payload foi guardado tal e qual como um valor de string simples.
+    assert_eq!(store.all()[1].body, "'; DROP TABLE comments; --");
+}
 ```
 </TabItem>
 </Tabs>

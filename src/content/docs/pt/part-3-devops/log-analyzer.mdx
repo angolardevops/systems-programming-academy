@@ -77,25 +77,26 @@ meio, o status é o campo 1 da cauda. Linhas malformadas são *contadas, nunca
 fatais* — um analisador de logs que rebenta com lixo é inútil no terreno:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-pub fn parse_line(line: &str) -> Option<Entry> {
-    let mut parts = line.splitn(3, '"');
-    let _prefix = parts.next()?;
-    let request = parts.next()?; // GET /api/users HTTP/1.1
-    let suffix = parts.next()?; //  200 512
-
-    let path = request.split_whitespace().nth(1)?.to_string();
-    let status: u16 = suffix.split_whitespace().next()?.parse().ok()?;
-    if !(100..=599).contains(&status) {
-        return None;
-    }
-    Some(Entry { path, status })
-}
+<TabItem label="Python">
+```python title="loganalyzer.py"
+def parse_line(line: str) -> Entry | None:
+    parts = line.split('"', 2)
+    if len(parts) != 3:
+        return None
+    req_fields = parts[1].split()
+    suf_fields = parts[2].split()
+    if len(req_fields) < 2 or not suf_fields:
+        return None
+    try:
+        status = int(suf_fields[0])
+    except ValueError:
+        return None
+    if not 100 <= status <= 599:
+        return None
+    return Entry(path=req_fields[1], status=status)
 ```
-`Option` + `?` fazem cada forma malformada cair como `None` sem boilerplate de
-ramos — a [lição de tratamento de erros](/systems-programming-academy/pt/part-1-foundations/rust/error-handling/)
-em ação.
+`Entry | None` documenta o caso malformado na assinatura — o Optional da
+[lição de type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/).
 </TabItem>
 <TabItem label="Go">
 ```go title="loganalyzer.go"
@@ -122,26 +123,25 @@ func ParseLine(line string) (Entry, bool) {
 A forma comma-ok (`Entry, bool`) espelha as pesquisas em maps — malformado é um
 valor, não uma exceção.
 </TabItem>
-<TabItem label="Python">
-```python title="loganalyzer.py"
-def parse_line(line: str) -> Entry | None:
-    parts = line.split('"', 2)
-    if len(parts) != 3:
-        return None
-    req_fields = parts[1].split()
-    suf_fields = parts[2].split()
-    if len(req_fields) < 2 or not suf_fields:
-        return None
-    try:
-        status = int(suf_fields[0])
-    except ValueError:
-        return None
-    if not 100 <= status <= 599:
-        return None
-    return Entry(path=req_fields[1], status=status)
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_line(line: &str) -> Option<Entry> {
+    let mut parts = line.splitn(3, '"');
+    let _prefix = parts.next()?;
+    let request = parts.next()?; // GET /api/users HTTP/1.1
+    let suffix = parts.next()?; //  200 512
+
+    let path = request.split_whitespace().nth(1)?.to_string();
+    let status: u16 = suffix.split_whitespace().next()?.parse().ok()?;
+    if !(100..=599).contains(&status) {
+        return None;
+    }
+    Some(Entry { path, status })
+}
 ```
-`Entry | None` documenta o caso malformado na assinatura — o Optional da
-[lição de type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/).
+`Option` + `?` fazem cada forma malformada cair como `None` sem boilerplate de
+ramos — a [lição de tratamento de erros](/systems-programming-academy/pt/part-1-foundations/rust/error-handling/)
+em ação.
 </TabItem>
 </Tabs>
 

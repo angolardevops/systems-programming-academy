@@ -77,32 +77,30 @@ Split it into layers connected by an **abstraction**:
 The abstraction and its in-memory implementation — the heart of the pattern:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-// Port: a trait describing what the service needs.
-pub trait UserRepository {
-    fn add(&mut self, user: User) -> Result<(), RepoError>;
-    fn get(&self, id: u32) -> Option<User>;
-    fn all(&self) -> Vec<User>;
-}
+<TabItem label="Python">
+```python title="repository.py"
+# Port: a structural Protocol describing what the service needs.
+class UserRepository(Protocol):
+    def add(self, user: User) -> None: ...
+    def get(self, user_id: int) -> User | None: ...
+    def all(self) -> list[User]: ...
 
-// Adapter: an in-memory implementation.
-#[derive(Default)]
-pub struct InMemoryUserRepository {
-    users: std::collections::HashMap<u32, User>,
-}
 
-impl UserRepository for InMemoryUserRepository {
-    fn add(&mut self, user: User) -> Result<(), RepoError> {
-        if self.users.contains_key(&user.id) {
-            return Err(RepoError::DuplicateId(user.id));
-        }
-        self.users.insert(user.id, user);
-        Ok(())
-    }
-    fn get(&self, id: u32) -> Option<User> { self.users.get(&id).cloned() }
-    fn all(&self) -> Vec<User> { self.users.values().cloned().collect() }
-}
+# Adapter: an in-memory implementation (satisfies the Protocol structurally).
+class InMemoryUserRepository:
+    def __init__(self) -> None:
+        self._users: dict[int, User] = {}
+
+    def add(self, user: User) -> None:
+        if user.id in self._users:
+            raise DuplicateIdError(f"duplicate user id {user.id}")
+        self._users[user.id] = user
+
+    def get(self, user_id: int) -> User | None:
+        return self._users.get(user_id)
+
+    def all(self) -> list[User]:
+        return list(self._users.values())
 ```
 </TabItem>
 <TabItem label="Go">
@@ -140,30 +138,32 @@ func (r *InMemoryUserRepo) All() []User {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="repository.py"
-# Port: a structural Protocol describing what the service needs.
-class UserRepository(Protocol):
-    def add(self, user: User) -> None: ...
-    def get(self, user_id: int) -> User | None: ...
-    def all(self) -> list[User]: ...
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Port: a trait describing what the service needs.
+pub trait UserRepository {
+    fn add(&mut self, user: User) -> Result<(), RepoError>;
+    fn get(&self, id: u32) -> Option<User>;
+    fn all(&self) -> Vec<User>;
+}
 
+// Adapter: an in-memory implementation.
+#[derive(Default)]
+pub struct InMemoryUserRepository {
+    users: std::collections::HashMap<u32, User>,
+}
 
-# Adapter: an in-memory implementation (satisfies the Protocol structurally).
-class InMemoryUserRepository:
-    def __init__(self) -> None:
-        self._users: dict[int, User] = {}
-
-    def add(self, user: User) -> None:
-        if user.id in self._users:
-            raise DuplicateIdError(f"duplicate user id {user.id}")
-        self._users[user.id] = user
-
-    def get(self, user_id: int) -> User | None:
-        return self._users.get(user_id)
-
-    def all(self) -> list[User]:
-        return list(self._users.values())
+impl UserRepository for InMemoryUserRepository {
+    fn add(&mut self, user: User) -> Result<(), RepoError> {
+        if self.users.contains_key(&user.id) {
+            return Err(RepoError::DuplicateId(user.id));
+        }
+        self.users.insert(user.id, user);
+        Ok(())
+    }
+    fn get(&self, id: u32) -> Option<User> { self.users.get(&id).cloned() }
+    fn all(&self) -> Vec<User> { self.users.values().cloned().collect() }
+}
 ```
 </TabItem>
 </Tabs>
@@ -174,30 +174,18 @@ The service takes its repository as a constructor argument — **dependency
 injection**. It never mentions a concrete store.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-// Generic over the trait => compile-time DI, zero runtime cost.
-pub struct UserService<R: UserRepository> {
-    repo: R,
-}
+<TabItem label="Python">
+```python title="repository.py"
+class UserService:
+    def __init__(self, repo: UserRepository) -> None:  # inject the dependency
+        self._repo = repo
 
-impl<R: UserRepository> UserService<R> {
-    pub fn new(repo: R) -> Self { UserService { repo } }
+    def register(self, user_id: int, name: str) -> None:
+        self._repo.add(User(id=user_id, name=name))
 
-    pub fn register(&mut self, id: u32, name: &str) -> Result<(), RepoError> {
-        self.repo.add(User { id, name: name.to_string() })
-    }
-
-    pub fn list_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.repo.all().into_iter().map(|u| u.name).collect();
-        names.sort();
-        names
-    }
-}
+    def list_names(self) -> list[str]:
+        return sorted(u.name for u in self._repo.all())
 ```
-
-Rust can also use `Box<dyn UserRepository>` for **runtime** injection; generics give
-**static** dispatch with no vtable — see the [traits lesson](/systems-programming-academy/part-1-foundations/rust/traits/).
 </TabItem>
 <TabItem label="Go">
 ```go title="repository.go"
@@ -224,18 +212,30 @@ func (s *UserService) ListNames() []string {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="repository.py"
-class UserService:
-    def __init__(self, repo: UserRepository) -> None:  # inject the dependency
-        self._repo = repo
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Generic over the trait => compile-time DI, zero runtime cost.
+pub struct UserService<R: UserRepository> {
+    repo: R,
+}
 
-    def register(self, user_id: int, name: str) -> None:
-        self._repo.add(User(id=user_id, name=name))
+impl<R: UserRepository> UserService<R> {
+    pub fn new(repo: R) -> Self { UserService { repo } }
 
-    def list_names(self) -> list[str]:
-        return sorted(u.name for u in self._repo.all())
+    pub fn register(&mut self, id: u32, name: &str) -> Result<(), RepoError> {
+        self.repo.add(User { id, name: name.to_string() })
+    }
+
+    pub fn list_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.repo.all().into_iter().map(|u| u.name).collect();
+        names.sort();
+        names
+    }
+}
 ```
+
+Rust can also use `Box<dyn UserRepository>` for **runtime** injection; generics give
+**static** dispatch with no vtable — see the [traits lesson](/systems-programming-academy/part-1-foundations/rust/traits/).
 </TabItem>
 </Tabs>
 
@@ -245,15 +245,13 @@ Because the service depends on the abstraction, a test injects the in-memory
 adapter — fast, deterministic, no Postgres. The identical test in all three:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (tests)"
-#[test]
-fn registers_and_lists_sorted() {
-    let mut svc = UserService::new(InMemoryUserRepository::default());
-    svc.register(2, "Grace").unwrap();
-    svc.register(1, "Ada").unwrap();
-    assert_eq!(svc.list_names(), vec!["Ada".to_string(), "Grace".to_string()]);
-}
+<TabItem label="Python">
+```python title="test_repository.py"
+def test_registers_and_lists_sorted(self):
+    svc = UserService(InMemoryUserRepository())  # inject the fake
+    svc.register(2, "Grace")
+    svc.register(1, "Ada")
+    self.assertEqual(svc.list_names(), ["Ada", "Grace"])
 ```
 </TabItem>
 <TabItem label="Go">
@@ -270,13 +268,15 @@ func TestRegistersAndListsSorted(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_repository.py"
-def test_registers_and_lists_sorted(self):
-    svc = UserService(InMemoryUserRepository())  # inject the fake
-    svc.register(2, "Grace")
-    svc.register(1, "Ada")
-    self.assertEqual(svc.list_names(), ["Ada", "Grace"])
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn registers_and_lists_sorted() {
+    let mut svc = UserService::new(InMemoryUserRepository::default());
+    svc.register(2, "Grace").unwrap();
+    svc.register(1, "Ada").unwrap();
+    assert_eq!(svc.list_names(), vec!["Ada".to_string(), "Grace".to_string()]);
+}
 ```
 </TabItem>
 </Tabs>

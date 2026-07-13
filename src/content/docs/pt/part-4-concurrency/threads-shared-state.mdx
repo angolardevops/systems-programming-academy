@@ -175,67 +175,60 @@ lock em cada incremento, inteiro atómico (Rust e Go), ou **batching** —
 acumular um total local à thread e fundir sob o lock uma vez por thread.
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs"
-/// Incrementa um contador protegido por `Mutex` a partir de `n_threads`
-/// threads, `iters` vezes cada. Devolve sempre exatamente
-/// `n_threads * iters`.
-///
-/// Threads com scope podem pedir emprestado um simples `&Mutex<u64>`;
-/// `Arc` só é preciso quando as threads sobrevivem ao scope que as criou.
-pub fn counter_mutex(n_threads: usize, iters: u64) -> u64 {
-    let counter = Mutex::new(0u64);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                for _ in 0..iters {
-                    *counter.lock().unwrap() += 1;
-                }
-            });
-        }
-    });
-    counter.into_inner().unwrap()
-}
+<TabItem label="Python">
+```python title="threads_demo.py"
+def counter_locked(n_threads: int, iters: int) -> int:
+    """Incrementa um contador partilhado sob um ``threading.Lock``.
 
-/// Mesmo contrato, mas lock-free: `fetch_add` num inteiro atómico.
-/// Uma instrução de hardware em vez de lock/unlock.
-pub fn counter_atomic(n_threads: usize, iters: u64) -> u64 {
-    let counter = AtomicU64::new(0);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                for _ in 0..iters {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-        }
-    });
-    counter.into_inner()
-}
+    Devolve sempre exatamente ``n_threads * iters`` — o lock torna o
+    read-modify-write atómico.
+    """
+    counter = 0
+    lock = threading.Lock()
 
-/// Variante batched: cada thread acumula localmente e toma o lock
-/// **uma vez** no fim. A contenção cai de `n * iters` operações de lock
-/// para `n`.
-pub fn counter_batched(n_threads: usize, iters: u64) -> u64 {
-    let counter = Mutex::new(0u64);
-    thread::scope(|s| {
-        for _ in 0..n_threads {
-            s.spawn(|| {
-                let mut local = 0u64;
-                for _ in 0..iters {
-                    local += 1;
-                }
-                *counter.lock().unwrap() += local;
-            });
-        }
-    });
-    counter.into_inner().unwrap()
-}
+    def work() -> None:
+        nonlocal counter
+        for _ in range(iters):
+            with lock:
+                counter += 1
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
+
+
+def counter_batched(n_threads: int, iters: int) -> int:
+    """Acumula localmente, toma o lock uma vez por thread.
+
+    Mesmo contrato que :func:`counter_locked` com ``n`` aquisições do lock
+    em vez de ``n * iters``.
+    """
+    counter = 0
+    lock = threading.Lock()
+
+    def work() -> None:
+        nonlocal counter
+        local = 0
+        for _ in range(iters):
+            local += 1
+        with lock:
+            counter += local
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
 ```
 
-Repara no que o sistema de tipos codifica: `Mutex<u64>` *possui* os dados que
-protege — não chegas ao `u64` sem passar por `lock()`. Em Go e Python o mutex
-e os dados são apenas vizinhos, e a ligação vive na tua cabeça.
+A stdlib não tem inteiro atómico — o padrão batched é a resposta do Python à
+contenção. (`with lock:` é `lock.acquire()`/`release()` com segurança perante
+exceções — a mesma garantia que o Rust obtém do destrutor do `MutexGuard` e o
+Go do `defer mu.Unlock()`.)
 </TabItem>
 <TabItem label="Go">
 ```go title="threads.go"
@@ -308,60 +301,67 @@ func CounterBatched(nGoroutines int, iters uint64) uint64 {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="threads_demo.py"
-def counter_locked(n_threads: int, iters: int) -> int:
-    """Incrementa um contador partilhado sob um ``threading.Lock``.
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Incrementa um contador protegido por `Mutex` a partir de `n_threads`
+/// threads, `iters` vezes cada. Devolve sempre exatamente
+/// `n_threads * iters`.
+///
+/// Threads com scope podem pedir emprestado um simples `&Mutex<u64>`;
+/// `Arc` só é preciso quando as threads sobrevivem ao scope que as criou.
+pub fn counter_mutex(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    *counter.lock().unwrap() += 1;
+                }
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
 
-    Devolve sempre exatamente ``n_threads * iters`` — o lock torna o
-    read-modify-write atómico.
-    """
-    counter = 0
-    lock = threading.Lock()
+/// Mesmo contrato, mas lock-free: `fetch_add` num inteiro atómico.
+/// Uma instrução de hardware em vez de lock/unlock.
+pub fn counter_atomic(n_threads: usize, iters: u64) -> u64 {
+    let counter = AtomicU64::new(0);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    counter.into_inner()
+}
 
-    def work() -> None:
-        nonlocal counter
-        for _ in range(iters):
-            with lock:
-                counter += 1
-
-    threads = [threading.Thread(target=work) for _ in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return counter
-
-
-def counter_batched(n_threads: int, iters: int) -> int:
-    """Acumula localmente, toma o lock uma vez por thread.
-
-    Mesmo contrato que :func:`counter_locked` com ``n`` aquisições do lock
-    em vez de ``n * iters``.
-    """
-    counter = 0
-    lock = threading.Lock()
-
-    def work() -> None:
-        nonlocal counter
-        local = 0
-        for _ in range(iters):
-            local += 1
-        with lock:
-            counter += local
-
-    threads = [threading.Thread(target=work) for _ in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return counter
+/// Variante batched: cada thread acumula localmente e toma o lock
+/// **uma vez** no fim. A contenção cai de `n * iters` operações de lock
+/// para `n`.
+pub fn counter_batched(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                let mut local = 0u64;
+                for _ in 0..iters {
+                    local += 1;
+                }
+                *counter.lock().unwrap() += local;
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
 ```
 
-A stdlib não tem inteiro atómico — o padrão batched é a resposta do Python à
-contenção. (`with lock:` é `lock.acquire()`/`release()` com segurança perante
-exceções — a mesma garantia que o Rust obtém do destrutor do `MutexGuard` e o
-Go do `defer mu.Unlock()`.)
+Repara no que o sistema de tipos codifica: `Mutex<u64>` *possui* os dados que
+protege — não chegas ao `u64` sem passar por `lock()`. Em Go e Python o mutex
+e os dados são apenas vizinhos, e a ligação vive na tua cabeça.
 </TabItem>
 </Tabs>
 

@@ -70,19 +70,21 @@ Um fluxo de signup com três camadas, cada uma mapeada a um nível da pirâmide:
 ## Nível 1 — Unitário: cada regra do validador puro
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (unit_tests)"
-#[test]
-fn rejects_missing_at() {
-    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+class UnitValidatorTests(unittest.TestCase):
+    """Nível UNITÁRIO: muitos testes minúsculos no validador puro — instantâneos."""
 
-#[test]
-fn rejects_bad_domain() {
-    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
-    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
-}
-// ...seis testes unitários no total: um por regra, um por limite.
+    def test_accepts_a_normal_address(self):
+        validate_email("ada@example.com")  # sem exceção
+
+    def test_rejects_bad_inputs(self):
+        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
+               "@example.com", "a da@x.com"]
+        for email in bad:
+            with self.subTest(email=email):
+                with self.assertRaises(InvalidEmailError):
+                    validate_email(email)
 ```
 </TabItem>
 <TabItem label="Go">
@@ -112,21 +114,19 @@ func TestValidateEmail(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-class UnitValidatorTests(unittest.TestCase):
-    """Nível UNITÁRIO: muitos testes minúsculos no validador puro — instantâneos."""
+<TabItem label="Rust">
+```rust title="src/lib.rs (unit_tests)"
+#[test]
+fn rejects_missing_at() {
+    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
+}
 
-    def test_accepts_a_normal_address(self):
-        validate_email("ada@example.com")  # sem exceção
-
-    def test_rejects_bad_inputs(self):
-        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
-               "@example.com", "a da@x.com"]
-        for email in bad:
-            with self.subTest(email=email):
-                with self.assertRaises(InvalidEmailError):
-                    validate_email(email)
+#[test]
+fn rejects_bad_domain() {
+    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
+    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
+}
+// ...seis testes unitários no total: um por regra, um por limite.
 ```
 </TabItem>
 </Tabs>
@@ -142,15 +142,13 @@ sai segunda mensagem**. Adaptadores reais (em memória), serviço real, interaç
 real:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (integration_tests)"
-#[test]
-fn duplicate_signup_is_rejected_and_not_notified_twice() {
-    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
-    svc.signup("ada@example.com").unwrap();
-    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
-    assert_eq!(svc.notifier().sent.len(), 1); // sem segunda mensagem
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_duplicate_rejected_and_not_notified_twice(self):
+    self.service.signup("ada@example.com")
+    with self.assertRaises(DuplicateEmailError):
+        self.service.signup("ada@example.com")
+    self.assertEqual(len(self.notifier.sent), 1)  # sem segunda mensagem
 ```
 </TabItem>
 <TabItem label="Go">
@@ -169,13 +167,15 @@ func TestDuplicateSignupRejectedAndNotNotifiedTwice(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-def test_duplicate_rejected_and_not_notified_twice(self):
-    self.service.signup("ada@example.com")
-    with self.assertRaises(DuplicateEmailError):
-        self.service.signup("ada@example.com")
-    self.assertEqual(len(self.notifier.sent), 1)  # sem segunda mensagem
+<TabItem label="Rust">
+```rust title="src/lib.rs (integration_tests)"
+#[test]
+fn duplicate_signup_is_rejected_and_not_notified_twice() {
+    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
+    svc.signup("ada@example.com").unwrap();
+    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
+    assert_eq!(svc.notifier().sent.len(), 1); // sem segunda mensagem
+}
 ```
 </TabItem>
 </Tabs>
@@ -195,15 +195,14 @@ Um teste, a conduzir a raiz de composição exatamente como um chamador viraado 
 utilizador faria, afirmando só o que o utilizador vê — sem internos:
 
 <Tabs syncKey="lang">
-<TabItem label="Rust">
-```rust title="src/lib.rs (e2e_tests)"
-#[test]
-fn full_signup_flow_through_the_app() {
-    let mut app = App::new();
-    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
-    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
-    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
-}
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_full_signup_flow_through_the_app(self):
+    app = App()
+    self.assertEqual(app.signup("ada@example.com"),
+                     "Welcome, ada@example.com! Check your inbox.")
+    self.assertEqual(app.signup("ada@example.com"),
+                     "ada@example.com is already registered.")
 ```
 </TabItem>
 <TabItem label="Go">
@@ -219,14 +218,15 @@ func TestFullSignupFlowThroughTheApp(t *testing.T) {
 }
 ```
 </TabItem>
-<TabItem label="Python">
-```python title="test_signup.py"
-def test_full_signup_flow_through_the_app(self):
-    app = App()
-    self.assertEqual(app.signup("ada@example.com"),
-                     "Welcome, ada@example.com! Check your inbox.")
-    self.assertEqual(app.signup("ada@example.com"),
-                     "ada@example.com is already registered.")
+<TabItem label="Rust">
+```rust title="src/lib.rs (e2e_tests)"
+#[test]
+fn full_signup_flow_through_the_app() {
+    let mut app = App::new();
+    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
+    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
+    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
+}
 ```
 </TabItem>
 </Tabs>
