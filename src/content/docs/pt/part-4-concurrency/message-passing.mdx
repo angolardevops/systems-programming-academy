@@ -1,0 +1,552 @@
+---
+title: Message Passing & Channels
+description: Em vez de trancar estado partilhado, transfere a posse dos valores entre threads — um worker pool construído com channels de Go, mpsc de Rust e queue.Queue de Python, com o throughput de 1M de mensagens medido em cada variante de buffering.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+A [lição anterior](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+terminou com uma regra de design: *partilha resultados, não trabalho a meio*.
+Esta lição é essa regra promovida a arquitetura. Em vez de N threads a mudar um
+sítio atrás de um lock, os valores **viajam** entre threads por um channel —
+cada valor pertence a exatamente uma thread em cada momento, logo não há nada
+para trancar.
+
+O provérbio do Go di-lo: *"Don't communicate by sharing memory; share memory
+by communicating."* O Rust impõe-o: enviar por um channel **move** a posse, e
+usar um valor depois de o enviar é erro de compilação. O Python aproxima-o com
+`queue.Queue` — sem ajuda do compilador, mas com a mesma forma.
+
+Construímos o mesmo **worker pool** nas três linguagens — jobs espalham-se num
+channel, resultados convergem noutro — e depois medimos o que um channel custa
+de facto, empurrando um milhão de inteiros por cada variante de buffering que
+cada linguagem oferece.
+
+<Aside type="note" title="Pré-requisitos">
+  [Threads & Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/) —
+  o benchmark desta lição só faz sentido contra os números daquela.
+</Aside>
+
+Código:
+[`examples/part4-channels-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6–9 testes cada, Go sob `-race`; todos os números medidos
+pelos harnesses incluídos, na mesma máquina.
+
+## A forma: fan out, fan in
+
+<Mermaid title="Worker pool: o channel de jobs espalha, o de resultados converge" code={`flowchart LR
+  P["produtor"] -->|channel de jobs| W1["worker 1"]
+  P -->|channel de jobs| W2["worker 2"]
+  P -->|channel de jobs| W3["worker 3"]
+  W1 -->|channel de resultados| C["coletor"]
+  W2 -->|channel de resultados| C
+  W3 -->|channel de resultados| C
+  P -.->|close jobs| W1`} />
+
+O contrato que torna este padrão composível é o **shutdown por fecho**: o
+produtor fecha o channel de jobs quando termina; cada worker sai quando o
+esgota; o channel de resultados fecha quando o último worker sai; o loop do
+coletor termina. Sem valores sentinela, sem flags "done", sem contagens — o
+ciclo de vida do channel *é* o protocolo. (O Python é a exceção, como veremos.)
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go title="channels.go"
+// SumSquaresPool eleva ao quadrado cada número usando um pool de nWorkers
+// goroutines alimentado por um channel de jobs, e soma os resultados de um
+// channel de resultados.
+//
+// O fecho conduz o shutdown: close(jobs) termina o range de cada worker;
+// quando o último worker acaba, uma goroutine supervisora fecha results,
+// o que termina o range do coletor. Sem sentinelas, sem flags.
+func SumSquaresPool(nums []uint64, nWorkers int) uint64 {
+	if nWorkers < 1 {
+		panic("need at least one worker")
+	}
+	jobs := make(chan uint64)
+	results := make(chan uint64)
+
+	var wg sync.WaitGroup
+	for range nWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs { // termina quando jobs fecha e esvazia
+				results <- n * n
+			}
+		}()
+	}
+
+	go func() {
+		for _, n := range nums {
+			jobs <- n
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results) // seguro: todos os senders terminaram
+	}()
+
+	var sum uint64
+	for r := range results {
+		sum += r
+	}
+	return sum
+}
+```
+
+A subtileza que merece atenção: `close(results)` tem de acontecer depois de
+**todos** os senders acabarem — fechar um channel onde alguém ainda envia dá
+panic. Daí a goroutine supervisora à volta do `wg.Wait()`. Esta coreografia de
+três goroutines (produtor, workers, fechador) é o pool canónico de Go; vais
+escrevê-la cem vezes.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Eleva ao quadrado cada número usando um pool de `n_workers` threads
+/// alimentado por um channel de jobs, e soma os resultados que chegam num
+/// channel de resultados.
+///
+/// O comportamento de fecho conduz o shutdown: fazer drop do `Sender` de
+/// jobs faz o `recv()` de cada worker devolver `Err`, e eles saem; fazer
+/// drop do último `Sender` de resultados termina o iterador do coletor.
+/// Sem valores sentinela, sem flags.
+pub fn sum_squares_pool(nums: Vec<u64>, n_workers: usize) -> u64 {
+    assert!(n_workers > 0, "need at least one worker");
+    let (job_tx, job_rx) = mpsc::channel::<u64>();
+    let (res_tx, res_rx) = mpsc::channel::<u64>();
+    // mpsc = um só consumidor: os workers partilham o único Receiver
+    // atrás de um Mutex.
+    let job_rx = Arc::new(Mutex::new(job_rx));
+
+    thread::scope(|s| {
+        for _ in 0..n_workers {
+            let job_rx = Arc::clone(&job_rx);
+            let res_tx = res_tx.clone();
+            s.spawn(move || {
+                loop {
+                    // Lock só para receber; liberta antes de computar.
+                    let job = job_rx.lock().unwrap().recv();
+                    match job {
+                        Ok(n) => res_tx.send(n * n).unwrap(),
+                        Err(_) => break, // channel de jobs fechado: acabou
+                    }
+                }
+            });
+        }
+        drop(res_tx); // mantém vivos só os clones dos workers
+
+        for n in nums {
+            job_tx.send(n).unwrap();
+        }
+        drop(job_tx); // fecha jobs: workers esvaziam e saem
+
+        res_rx.iter().sum() // termina quando o último worker larga res_tx
+    })
+}
+```
+
+Dois factos específicos do Rust moldam este código. Primeiro, **mpsc**:
+multi-produtor (clona o `Sender` à vontade), consumidor *único* — por isso o
+pool partilha o único `Receiver` de jobs atrás de um `Mutex`, exatamente como
+no projeto de servidor web do Rust Book. Segundo, "fechar" é simplesmente
+**drop**: não há `close()`; a desconexão do channel é a posse a esgotar-se, e
+os dois `drop` deliberados são estruturais. Apaga o `drop(job_tx)` e o
+programa pendura para sempre — os workers esperam por jobs que, tanto quanto
+sabem, ainda podem chegar.
+</TabItem>
+<TabItem label="Python">
+```python title="channels_demo.py"
+_SENTINEL = None
+
+
+def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
+    """Eleva ao quadrado cada número com ``n_workers`` threads e uma fila.
+
+    Os resultados voltam numa fila de resultados; um sentinela ``None`` por
+    worker substitui o ``close(jobs)`` do Go.
+
+    >>> sum_squares_pool([1, 2, 3], 2)
+    14
+    """
+    if n_workers < 1:
+        raise ValueError("need at least one worker")
+    jobs: queue.Queue[int | None] = queue.Queue()
+    results: queue.Queue[int] = queue.Queue()
+
+    def worker() -> None:
+        while True:
+            n = jobs.get()
+            if n is _SENTINEL:
+                break
+            results.put(n * n)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+
+    for n in nums:
+        jobs.put(n)
+    for _ in threads:
+        jobs.put(_SENTINEL)  # um sinal de paragem por worker
+    for t in threads:
+        t.join()
+
+    total = 0
+    while not results.empty():  # seguro: todos os produtores já saíram
+        total += results.get()
+    return total
+```
+
+A `queue.Queue` não tem `close()` — o shutdown idiomático é um **sentinela**
+(um `None` *por worker*, uma armadilha clássica de off-by-one: um sentinela
+pára um worker; os restantes bloqueiam para sempre). Repara também que o
+`while not results.empty()` só está certo porque todos os produtores já foram
+`join()`ados — verificar-vazio-e-tirar numa fila viva é uma race.
+</TabItem>
+</Tabs>
+
+As três versões devolvem exatamente a mesma soma, verificada pelo mesmo teste:
+primeiro correção, depois falamos de velocidade.
+
+## A posse viaja com a mensagem
+
+A ideia profunda — a razão pela qual message passing elimina data races em vez
+de as esconder — é que um valor dentro de um channel não pertence a **nenhuma
+thread** até outra o receber. O Rust torna isto físico:
+
+```rust title="moved.rs — NÃO compila"
+use std::sync::mpsc;
+use std::thread;
+
+fn main() {
+    let (tx, rx) = mpsc::channel();
+    let msg = String::from("hello");
+    thread::spawn(move || {
+        tx.send(msg).unwrap(); // a posse de `msg` move-se para o channel
+        println!("sent {msg}"); // ERRO: já não é nossa
+    });
+    println!("{}", rx.recv().unwrap());
+}
+```
+
+```text
+error[E0382]: borrow of moved value: `msg`
+ --> moved.rs:9:25
+  |
+8 |         tx.send(msg).unwrap(); // a posse de `msg` move-se para o channel
+  |                 --- value moved here
+9 |         println!("sent {msg}"); // ERRO: já não é nossa
+  |                         ^^^ value borrowed here after move
+  |
+  = note: move occurs because `msg` has type `String`, which does not
+          implement the `Copy` trait
+```
+
+Em Go e Python, enviar um ponteiro/referência por um channel e *ficar com uma
+cópia* compila sem queixas — e reintroduz pela porta das traseiras todos os
+bugs de estado partilhado da lição anterior. A disciplina é tua: **trata um
+valor enviado como perdido.** O Rust é a única das três linguagens onde o
+compilador te obriga.
+
+## Bloquear é a funcionalidade (e a armadilha)
+
+Um channel sem buffer não transporta só dados — **sincroniza**: um send espera
+até um receive estar pronto. Esquece o lado recetor e o programa não coxeia;
+pára:
+
+```go title="deadlock.go — compila sem queixas, morre em runtime"
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int) // sem buffer: o send espera por um recetor
+	ch <- 42             // ninguém recebe: bloqueia para sempre
+	fmt.Println(<-ch)
+}
+```
+
+```text
+$ go run deadlock.go
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+	deadlock.go:7 +0x36
+exit status 2
+```
+
+O runtime do Go deteta o deadlock *total* (todas as goroutines adormecidas) e
+rebenta com um stack trace a apontar o send preso — uma gentileza que não
+recebes em deadlocks parciais, quando duas das tuas cinquenta goroutines
+morrem à fome em silêncio. O mesmo erro em Rust (`sync_channel(0)`) ou Python
+(`Queue(maxsize=1)` cheia) bloqueia igual, sem detetor nenhum.
+
+O **buffering** (`make(chan int, 1024)`, `sync_channel(1024)`,
+`Queue(maxsize=1024)`) desacopla os dois lados: os sends completam de imediato
+enquanto há espaço, e bloqueiam quando enche — o que não é um bug mas
+**backpressure**: um buffer cheio é o pipeline a dizer ao produtor "estás a
+correr mais que o consumidor; abranda na origem em vez de comprar RAM."
+Uma fila *ilimitada* (Rust `channel()`, Python `Queue()`) nunca empurra de
+volta; se o consumidor atrasar, a fila cresce até ser a memória a empurrar.
+
+## Os números: quanto custa uma mensagem?
+
+Um milhão de inteiros, um produtor, um consumidor, todas as variantes (a mesma
+máquina Linux de 20 cores; Rust em release):
+
+<Benchmark
+  metric="1M mensagens por um channel, 1 produtor -> 1 consumidor (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust sync_channel(1024)", value: 12.4, unit: "ms" },
+    { label: "Rust channel() ilimitado", value: 24, unit: "ms" },
+    { label: "Go buffered 1024", value: 37, unit: "ms" },
+    { label: "Go sem buffer", value: 162, unit: "ms" },
+    { label: "Python Queue(maxsize=1024)", value: 1158, unit: "ms" },
+    { label: "Rust sync_channel(0) rendezvous", value: 2000, unit: "ms" },
+    { label: "Python Queue() ilimitada", value: 3056, unit: "ms" },
+  ]}
+/>
+
+Três conclusões medidas:
+
+**O buffering ganha nas três linguagens** — 2× em Rust e Python, 4× em Go.
+Cada send para um buffer com espaço evita uma sincronização com o consumidor;
+os dois lados só se encontram quando batem na fronteira do buffer. O
+desacoplamento por lote é o primo, no mundo dos channels, do contador batched
+da lição anterior.
+
+**O channel rendezvous do Rust é 12× mais lento que o channel sem buffer do Go
+(2,0 s vs 162 ms)** — a descoberta dos mutexes da lição passada, repetida em
+maquinaria nova. O `sync_channel(0)` estaciona e acorda uma **thread do SO**
+por cada mensagem (idas futex ao kernel); o Go passa o testemunho entre
+**goroutines em userspace**, muitas vezes sem o kernel dar por isso. A mesma
+primitiva no papel, ~12× de distância na prática — o runtime por baixo é a
+diferença.
+
+**Uma mensagem custa ~12 ns em Rust (buffered), ~37 ns em Go, ~1,2 µs em
+Python.** Channels não são grátis. Para itens de trabalho grosseiros (fazer
+parse de um ficheiro, sondar um host) o custo desaparece; mete inteiros
+individuais num channel num hot loop e o channel *é* a carga — razão pela qual
+pipelines reais agrupam itens em chunks antes de enviar.
+
+<Aside type="tip" title="Regra de design">
+  Channels brilham quando o **trabalho por mensagem esmaga o custo da
+  mensagem**. Envia ficheiros, pedidos, lotes — não bytes nem inteiros.
+</Aside>
+
+## `select`: corrida entre comunicações
+
+O Go tem mais uma primitiva que os outros não têm na stdlib: o `select` espera
+em *vários* channels e fica com o que estiver pronto primeiro —
+
+```go title="channels.go"
+// FirstResponse devolve o channel que entregar primeiro — o select é a
+// corrida do Go entre comunicações. Com um channel pronto e outro que
+// nunca envia, o pronto ganha sempre.
+func FirstResponse(a, b <-chan string) string {
+	select {
+	case v := <-a:
+		return v
+	case v := <-b:
+		return v
+	}
+}
+```
+
+— e é assim que o Go exprime timeouts (`case <-time.After(d)`), cancelamento
+(`case <-ctx.Done()`) e pedidos redundantes. O teste pré-carrega um channel e
+nunca envia no outro, tornando o resultado determinista. O `mpsc` da std do
+Rust não tem `select` (o crate `crossbeam` acrescenta-o); o análogo mais
+próximo do Python é um `get(timeout=...)` bloqueante:
+
+```python title="channels_demo.py"
+def first_response(ready: queue.Queue[str], timeout: float = 1.0) -> str:
+    """Tira o primeiro item disponível — ``get(timeout=...)`` é o análogo
+    mais próximo, na stdlib, do ``select`` de Go com um braço de timeout.
+
+    Levanta ``queue.Empty`` se nada chegar a tempo, obrigando quem chama a
+    decidir o que significa falhar o prazo em vez de bloquear para sempre.
+    """
+    return ready.get(timeout=timeout)
+```
+
+## Exercícios
+
+**1. Parte o shutdown (nas três).** Em cada implementação, remove o passo de
+fecho/drop/sentinela (Go: `close(jobs)`; Rust: `drop(job_tx)`; Python: o loop
+de sentinelas) e corre os testes. O que acontece em cada linguagem, e quanto
+tempo demoras a diagnosticar só pelo sintoma?
+
+<details>
+<summary>Esboço de solução</summary>
+
+As três penduram para sempre — os workers bloqueiam à espera de um próximo job
+que, tanto quanto sabem, ainda pode chegar. O detetor de deadlock do Go *não*
+dispara se qualquer outra goroutine ainda puder correr. A pista de diagnóstico
+é um teste que expira com threads paradas em `recv`/`range`/`get`; a lição é
+que o shutdown de um channel faz parte do protocolo que desenhas, não é um
+detalhe posterior.
+
+</details>
+
+**2. Agrupa as mensagens (Rust ou Go).** O benchmark de throughput envia
+inteiros um a um. Muda-o para enviar chunks `Vec<u64>` / `[]uint64` de 1000 e
+mede outra vez. Quão perto fica o throughput do channel da soma crua da lição
+anterior?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Com chunks de 1000 elementos pagas o custo do channel 1000× menos vezes: ~1000
+sends em vez de 1M. O throughput fica a poucos por cento do loop simples —
+confirmando a regra de design: o overhead do channel é por *mensagem*, por
+isso faz mensagens grossas.
+
+</details>
+
+**3. Limita a fila (Python).** Muda o `throughput` para `Queue(maxsize=1)` e
+cronometra. Depois raciocina: a que variante de Go/Rust corresponde isto, e
+porque é que — relativamente à sua própria base — não é tão lento como o
+rendezvous do Rust?
+
+<details>
+<summary>Esboço de solução</summary>
+
+`maxsize=1` força um passa-a-passa quase em sincronia — o análogo de um
+channel rendezvous (com uma folga de um slot). É dramaticamente mais lento que
+`maxsize=1024`, mas *relativamente* menos catastrófico do que a penalização do
+`sync_channel(0)` do Rust, porque o custo por mensagem do Python já era
+~1,2 µs — o overhead de sincronização tem menos espaço para dominar quando a
+base é lenta.
+
+</details>
+
+<Quiz
+  question={'Porque é que o worker pool não precisa de mutex nos resultados, se N workers escrevem no mesmo channel?'}
+  options={[
+    { text: 'Porque o próprio channel serializa os sends — cada valor pertence a um lado de cada vez, e o channel é o ponto de sincronização', correct: true, explanation: 'É essa a troca: em vez de N threads a mutar uma posição (lock obrigatório), N threads entregam valores a um channel cuja implementação sincroniza internamente. O teu código não tem secção crítica para errar.' },
+    { text: 'Porque os workers nunca correm mesmo ao mesmo tempo', correct: false, explanation: 'Correm em concorrência — é esse o propósito do pool. O channel absorve a concorrência.' },
+    { text: 'Porque a adição é comutativa, logo as races não importam', correct: false, explanation: 'A comutatividade torna a *soma* independente da ordem, mas escritas concorrentes sem sincronização numa posição de memória continuariam a ser uma data race. É o channel que a impede, não a aritmética.' },
+    { text: 'Porque channels só podem ser usados por uma thread', correct: false, explanation: 'Os channels existem precisamente para ser usados por várias threads/goroutines em segurança.' },
+  ]}
+/>
+
+<Quiz
+  question={'O teu pipeline usa uma fila ilimitada entre um produtor rápido e um consumidor lento. Qual é o modo de falha?'}
+  options={[
+    { text: 'A memória cresce sem limite enquanto a fila absorve a diferença de ritmo — até o processo morrer ou a máquina fazer swap', correct: true, explanation: 'Uma fila ilimitada nunca empurra de volta, e um desequilíbrio sustentado acumula. Um buffer limitado converte o desequilíbrio em backpressure: o produtor bloqueia, e o abrandamento propaga-se até à origem, onde pertence.' },
+    { text: 'A fila descarta mensagens quando fica comprida demais', correct: false, explanation: 'Filas ilimitadas não descartam — é esse o problema. Guardam tudo, em RAM, para sempre.' },
+    { text: 'Deadlock: o produtor acaba por bloquear sem recetor', correct: false, explanation: 'O produtor nunca bloqueia numa fila ilimitada — é exatamente por isso que a memória cresce.' },
+    { text: 'Nada: o consumidor acaba por apanhar o atraso', correct: false, explanation: 'Se o desequilíbrio de ritmo é sustentado, o atraso só cresce. Esperar por um período calmo é planeamento de capacidade por oração.' },
+  ]}
+/>
+
+<Quiz
+  question={'Rust: depois de `tx.send(job)`, tentas fazer log de `job` e o compilador recusa (E0382). O que está isto a prevenir?'}
+  options={[
+    { text: 'O uso de um valor que outra thread pode agora possuir e mutar — a data race que terias escrito em Go ou Python sem aviso nenhum', correct: true, explanation: 'A posse moveu-se para o channel; o recetor pode já estar a mutar o valor noutra thread. Lê-lo aqui seria uma race. Go/Python compilam o equivalente de bom grado — aí a disciplina é tua.' },
+    { text: 'Uma fuga de memória: o valor nunca seria libertado', correct: false, explanation: 'A transferência de posse trata da libertação corretamente em qualquer caso; a questão é o acesso com alias entre threads, não fugas.' },
+    { text: 'Enviar o mesmo valor duas vezes por engano', correct: false, explanation: 'Um envio duplo seria um bug (de lógica) diferente; o E0382 dispara em qualquer uso após o move, incluindo uma leitura.' },
+    { text: 'Nada de real — é uma limitação que se contorna com clone()', correct: false, explanation: 'clone() antes do send às vezes é o correto (precisas de uma cópia), mas o erro guarda uma janela de race genuína, não é pedantismo. Se clonares, as duas cópias são independentes — que é exatamente o que torna seguro.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="Estado partilhado com locks versus message passing — como escolhes?">
+
+São duais: locks levam as threads aos dados; channels levam os dados às
+threads. Prefere channels quando o trabalho se decompõe naturalmente num fluxo
+— pipelines, worker pools, pedido/resposta — porque a transferência de posse
+remove a possibilidade de races e a topologia documenta-se a si própria.
+Prefere estado partilhado quando muitos leitores precisam de acesso barato a
+uma estrutura (uma cache, um índice) e copiar ou serializar o acesso por um
+único dono seria o gargalo. A ressalva medida desta lição: uma mensagem custa
+de dezenas de nanossegundos a microssegundos, por isso designs com channels
+querem mensagens grossas. E os dois compõem-se: a arquitetura clássica é dados
+*imutáveis* partilhados mais channels para o fluxo mutável.
+
+</Interview>
+
+<Interview question="O que é backpressure e porque é que filas ilimitadas são perigosas em produção?">
+
+Backpressure é a propagação da lentidão do consumidor para montante até ao
+produtor, forçando o sistema a rejeitar ou abrandar a entrada na borda em vez
+de a acumular no meio. Um buffer limitado fornece-a mecanicamente: buffer
+cheio, produtor bloqueado. Uma fila ilimitada esconde o desequilíbrio — a
+latência e a memória crescem em silêncio até um OOM kill transformar um
+problema de débito numa indisponibilidade. Sistemas de produção limitam todas
+as filas e decidem explicitamente o que acontece no limite: bloquear
+(backpressure), descartar (load shedding) ou recusar (fail fast). "A fila está
+a crescer" devia acordar alguém; uma fila ilimitada nem isso te consegue
+dizer.
+
+</Interview>
+
+<Interview question="Em Go, quando é que fechas um channel, quem o fecha, e o que acontece se errares?">
+
+Regra: **o sender fecha**, e só quando há exatamente um sender (ou um
+coordenador que sabe que todos os senders acabaram — o nosso pool usou o
+wg.Wait numa goroutine supervisora para fechar os resultados). Recetores nunca
+fecham: um send num channel fechado dá panic, logo um recetor a fechar com um
+sender ativo é um crash. Não fechar de todo não vaza nada por si, mas qualquer
+goroutine bloqueada em `range`/`recv` nele espera para sempre — uma fuga de
+goroutines. Fechar duas vezes também dá panic. O padrão que evita os três
+erros: dá a cada channel um dono responsável pelo seu ciclo de vida,
+exatamente como a posse de memória em Rust — razão pela qual o Rust tornou a
+desconexão automática (último `Sender` dropped) em vez de uma API que podes
+chamar mal.
+
+</Interview>
+
+<Interview question="Porque é que o channel rendezvous do Rust mediu ~12x mais lento que o channel sem buffer do Go na mesma experiência?">
+
+Ambos têm de sincronizar produtor e consumidor em cada mensagem, mas pagam
+maquinaria diferente: o `sync_channel(0)` do Rust estaciona uma thread do SO,
+logo cada passagem envolve syscalls futex e scheduling do kernel; o runtime do
+Go estaciona uma *goroutine* e consegue muitas vezes entregar o valor
+diretamente à stack do recetor à espera, tudo em userspace. É a mesma lição
+dos mutexes contendidos: o nome da primitiva diz-te a semântica, o runtime por
+baixo define o preço. Corolários: em Rust, prefere channels com buffer (ou
+crossbeam) em caminhos quentes; em qualquer linguagem, um rendezvous por
+mensagem minúscula é um cheiro de arquitetura — agrupa.
+
+</Interview>
+
+## Desafio
+
+Reconstrói o agente de health-check da Parte 3 sobre o padrão desta lição: um
+channel de jobs com os alvos, um pool fixo de K workers a sondar, um channel
+de resultados para um coletor que imprime o relatório determinista. Depois
+torna K uma flag de linha de comandos e mede 50 alvos com K = 1, 5, 25, 50.
+Ficas com um dial de **concorrência limitada** — a coisa que faltava à versão
+original de espalhar-tudo — e vais ver o cotovelo da curva onde mais workers
+deixam de ajudar. Esse dial (tamanho do pool × limite da fila) é o botão
+central de planeamento de capacidade de todos os servidores que vais gerir,
+incluindo o mini-NGINX para onde estamos a caminhar.
+
+## Referências & leitura adicional
+
+- Blog do Go — [Share Memory By Communicating](https://go.dev/blog/codelab-share) · [Go Concurrency Patterns: Pipelines and cancellation](https://go.dev/blog/pipelines)
+- Rust Book cap. 16.2 — [Using Message Passing to Transfer Data Between Threads](https://doc.rust-lang.org/book/ch16-02-message-passing.html)
+- Docs Python — [`queue` — a synchronized queue class](https://docs.python.org/3/library/queue.html)
+- Hoare — [Communicating Sequential Processes](https://www.cs.cmu.edu/~crary/819-f09/Hoare78.pdf) (o paper de 1978 por trás disto tudo)
+- crossbeam — [`crossbeam::channel`](https://docs.rs/crossbeam/latest/crossbeam/channel/index.html) (select, mpmc — o que o Rust de produção usa)
+
+<Progress />

@@ -263,6 +263,12 @@ export default defineConfig({
               slug: 'part-4-concurrency/threads-shared-state',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Message Passing & Channels',
+              translations: { 'pt-BR': 'Message Passing & Channels' },
+              slug: 'part-4-concurrency/message-passing',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],

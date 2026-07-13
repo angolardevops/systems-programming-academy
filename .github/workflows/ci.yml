@@ -43,6 +43,7 @@ jobs:
           - part3-confgen-rust
           - part3-healthcheck-rust
           - part4-threads-rust
+          - part4-channels-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -78,6 +79,7 @@ jobs:
           - part3-confgen-go
           - part3-healthcheck-go
           - part4-threads-go
+          - part4-channels-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -112,6 +114,7 @@ jobs:
           - part3-confgen-py
           - part3-healthcheck-py
           - part4-threads-py
+          - part4-channels-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}

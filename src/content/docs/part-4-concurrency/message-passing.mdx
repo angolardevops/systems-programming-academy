@@ -1,0 +1,539 @@
+---
+title: Message Passing & Channels
+description: Instead of locking shared state, transfer ownership of values between threads — a worker pool built on Go channels, Rust mpsc, and Python queue.Queue, with 1M-message throughput measured for every buffering flavour.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Benchmark from '../../../components/Benchmark.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+The [previous lesson](/systems-programming-academy/part-4-concurrency/threads-shared-state/)
+ended with a design rule: *share results, not work-in-progress*. This lesson is
+that rule promoted to an architecture. Instead of N threads mutating one place
+behind a lock, values **travel** between threads through a channel — each value
+owned by exactly one thread at any moment, so there is nothing to lock.
+
+Go's proverb states it: *"Don't communicate by sharing memory; share memory by
+communicating."* Rust enforces it: sending through a channel **moves**
+ownership, and using a value after sending it is a compile error. Python
+approximates it with `queue.Queue` — no compiler help, but the same shape.
+
+We build the same **worker pool** in all three languages — jobs fan out on one
+channel, results fan in on another — then measure what a channel actually
+costs by pushing a million integers through every buffering flavour each
+language offers.
+
+<Aside type="note" title="Prerequisites">
+  [Threads & Shared State](/systems-programming-academy/part-4-concurrency/threads-shared-state/) —
+  this lesson's benchmark only makes sense against that one's numbers.
+</Aside>
+
+Code:
+[`examples/part4-channels-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6–9 tests each, Go under `-race`; all numbers measured by
+the included harnesses on the same machine.
+
+## The shape: fan out, fan in
+
+<Mermaid title="Worker pool: jobs channel fans out, results channel fans in" code={`flowchart LR
+  P["producer"] -->|jobs channel| W1["worker 1"]
+  P -->|jobs channel| W2["worker 2"]
+  P -->|jobs channel| W3["worker 3"]
+  W1 -->|results channel| C["collector"]
+  W2 -->|results channel| C
+  W3 -->|results channel| C
+  P -.->|close jobs| W1`} />
+
+The contract that makes this pattern composable is **shutdown by closing**:
+the producer closes the jobs channel when done; each worker exits when it
+drains; the results channel closes when the last worker exits; the collector's
+loop ends. No sentinel values, no "done" flags, no counting — the channel
+lifecycle *is* the protocol. (Python is the exception, as we'll see.)
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go title="channels.go"
+// SumSquaresPool squares every number using a pool of nWorkers goroutines
+// fed by a jobs channel, and sums the results from a results channel.
+//
+// Closing drives shutdown: close(jobs) ends every worker's range loop;
+// when the last worker finishes, a supervisor goroutine closes results,
+// which ends the collector's range. No sentinels, no flags.
+func SumSquaresPool(nums []uint64, nWorkers int) uint64 {
+	if nWorkers < 1 {
+		panic("need at least one worker")
+	}
+	jobs := make(chan uint64)
+	results := make(chan uint64)
+
+	var wg sync.WaitGroup
+	for range nWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs { // ends when jobs is closed and drained
+				results <- n * n
+			}
+		}()
+	}
+
+	go func() {
+		for _, n := range nums {
+			jobs <- n
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results) // safe: all senders are done
+	}()
+
+	var sum uint64
+	for r := range results {
+		sum += r
+	}
+	return sum
+}
+```
+
+The subtlety worth staring at: `close(results)` must happen after **all**
+senders finish — closing a channel that someone still sends on panics. Hence
+the supervisor goroutine wrapping `wg.Wait()`. This three-goroutine choreography
+(producer, workers, closer) is the canonical Go pool; you will write it a
+hundred times.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Squares every number using a pool of `n_workers` threads fed by a jobs
+/// channel, and sums the results arriving on a results channel.
+///
+/// Closing behaviour drives shutdown: dropping the jobs `Sender` makes every
+/// worker's `recv()` return `Err`, so they exit; dropping the last results
+/// `Sender` ends the collector's iterator. No sentinel values, no flags.
+pub fn sum_squares_pool(nums: Vec<u64>, n_workers: usize) -> u64 {
+    assert!(n_workers > 0, "need at least one worker");
+    let (job_tx, job_rx) = mpsc::channel::<u64>();
+    let (res_tx, res_rx) = mpsc::channel::<u64>();
+    // mpsc = single consumer: workers share the one Receiver behind a Mutex.
+    let job_rx = Arc::new(Mutex::new(job_rx));
+
+    thread::scope(|s| {
+        for _ in 0..n_workers {
+            let job_rx = Arc::clone(&job_rx);
+            let res_tx = res_tx.clone();
+            s.spawn(move || {
+                loop {
+                    // Lock only to receive; release before computing.
+                    let job = job_rx.lock().unwrap().recv();
+                    match job {
+                        Ok(n) => res_tx.send(n * n).unwrap(),
+                        Err(_) => break, // jobs channel closed: we are done
+                    }
+                }
+            });
+        }
+        drop(res_tx); // keep only the workers' clones alive
+
+        for n in nums {
+            job_tx.send(n).unwrap();
+        }
+        drop(job_tx); // close jobs: workers drain and exit
+
+        res_rx.iter().sum() // ends when the last worker drops its res_tx
+    })
+}
+```
+
+Two Rust-specific facts shape this code. First, **mpsc**: multi-producer
+(clone the `Sender` freely), *single*-consumer — so the worker pool shares the
+one jobs `Receiver` behind a `Mutex`, exactly like the Rust Book's web-server
+project. Second, "closing" is just **dropping**: there is no `close()`;
+channel disconnection is ownership running out, and the two deliberate
+`drop` calls are load-bearing. Delete `drop(job_tx)` and the program hangs
+forever — the workers wait for jobs that can still theoretically arrive.
+</TabItem>
+<TabItem label="Python">
+```python title="channels_demo.py"
+_SENTINEL = None
+
+
+def sum_squares_pool(nums: Sequence[int], n_workers: int) -> int:
+    """Square every number using ``n_workers`` threads fed by a jobs queue.
+
+    Results travel back on a results queue; one ``None`` sentinel per worker
+    replaces Go's ``close(jobs)``.
+
+    >>> sum_squares_pool([1, 2, 3], 2)
+    14
+    """
+    if n_workers < 1:
+        raise ValueError("need at least one worker")
+    jobs: queue.Queue[int | None] = queue.Queue()
+    results: queue.Queue[int] = queue.Queue()
+
+    def worker() -> None:
+        while True:
+            n = jobs.get()
+            if n is _SENTINEL:
+                break
+            results.put(n * n)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+
+    for n in nums:
+        jobs.put(n)
+    for _ in threads:
+        jobs.put(_SENTINEL)  # one shutdown signal per worker
+    for t in threads:
+        t.join()
+
+    total = 0
+    while not results.empty():  # safe: all producers have exited
+        total += results.get()
+    return total
+```
+
+`queue.Queue` has no `close()` — the idiomatic shutdown is a **sentinel**
+(one `None` *per worker*, a classic off-by-one trap: one sentinel stops one
+worker; the rest block forever). Note also that `while not results.empty()`
+is only correct because every producer has already been `join()`ed —
+empty-check-then-get on a live queue is a race.
+</TabItem>
+</Tabs>
+
+All three return exactly the same sum, verified by the same test: correctness
+first, then we talk speed.
+
+## Ownership travels with the message
+
+The deep idea — the reason message passing eliminates data races rather than
+just hiding them — is that a value in a channel belongs to **no thread** until
+another one receives it. Rust makes this physical:
+
+```rust title="moved.rs — does NOT compile"
+use std::sync::mpsc;
+use std::thread;
+
+fn main() {
+    let (tx, rx) = mpsc::channel();
+    let msg = String::from("hello");
+    thread::spawn(move || {
+        tx.send(msg).unwrap(); // ownership of `msg` moves into the channel
+        println!("sent {msg}"); // ERROR: we no longer own it
+    });
+    println!("{}", rx.recv().unwrap());
+}
+```
+
+```text
+error[E0382]: borrow of moved value: `msg`
+ --> moved.rs:9:25
+  |
+8 |         tx.send(msg).unwrap(); // ownership of `msg` moves into the channel
+  |                 --- value moved here
+9 |         println!("sent {msg}"); // ERROR: we no longer own it
+  |                         ^^^ value borrowed here after move
+  |
+  = note: move occurs because `msg` has type `String`, which does not
+          implement the `Copy` trait
+```
+
+In Go and Python, sending a pointer/reference through a channel and *keeping
+a copy* compiles fine — and reintroduces every shared-state bug from the last
+lesson through the back door. The discipline is on you: **treat a sent value
+as gone.** Rust is the only one of the three where the compiler holds you to
+it.
+
+## Blocking is the feature (and the trap)
+
+An unbuffered channel doesn't just carry data — it **synchronizes**: a send
+waits until a receive is ready. Forget the receiving side and the program
+doesn't limp along; it stops:
+
+```go title="deadlock.go — compiles fine, dies at runtime"
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int) // unbuffered: send waits for a receiver
+	ch <- 42             // nobody is receiving: blocks forever
+	fmt.Println(<-ch)
+}
+```
+
+```text
+$ go run deadlock.go
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+	deadlock.go:7 +0x36
+exit status 2
+```
+
+Go's runtime detects the *total* deadlock (every goroutine asleep) and crashes
+with a stack trace naming the stuck send — a kindness you don't get for
+partial deadlocks, where two of your fifty goroutines quietly starve. The same
+mistake in Rust (`sync_channel(0)`) or Python (`Queue(maxsize=1)` when full)
+blocks just as hard, with no detector at all.
+
+**Buffering** (`make(chan int, 1024)`, `sync_channel(1024)`,
+`Queue(maxsize=1024)`) decouples the two sides: sends complete immediately
+while there's room, and block when full — which is not a bug but
+**backpressure**: a full buffer is the pipeline telling the producer "you are
+outrunning the consumer; slow down at the source instead of buying RAM."
+An *unbounded* queue (Rust `channel()`, Python `Queue()`) never pushes back;
+if the consumer falls behind, the queue grows until memory does the pushing.
+
+## The numbers: what does a message cost?
+
+One million integers, one producer, one consumer, every flavour (same 20-core
+Linux machine; Rust in release mode):
+
+<Benchmark
+  metric="1M messages through a channel, 1 producer -> 1 consumer (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust sync_channel(1024)", value: 12.4, unit: "ms" },
+    { label: "Rust channel() unbounded", value: 24, unit: "ms" },
+    { label: "Go buffered 1024", value: 37, unit: "ms" },
+    { label: "Go unbuffered", value: 162, unit: "ms" },
+    { label: "Python Queue(maxsize=1024)", value: 1158, unit: "ms" },
+    { label: "Rust sync_channel(0) rendezvous", value: 2000, unit: "ms" },
+    { label: "Python Queue() unbounded", value: 3056, unit: "ms" },
+  ]}
+/>
+
+Three measured findings:
+
+**Buffering wins in all three languages** — 2× in Rust and Python, 4× in Go.
+Every send into a non-full buffer avoids a synchronization with the consumer;
+the two sides only meet when the buffer boundary is hit. Batch decoupling is
+the channel-world cousin of the last lesson's batched counter.
+
+**Rust's rendezvous channel is 12× slower than Go's unbuffered channel (2.0 s
+vs 162 ms)** — the mutex finding from last lesson, repeated on new machinery.
+`sync_channel(0)` parks and wakes an **OS thread** for every message (futex
+round-trips through the kernel); Go hands off between **goroutines in
+userspace**, often without the kernel hearing about it. Same primitive on
+paper, ~12× apart in practice — the runtime underneath is the difference.
+
+**A message costs ~12 ns in Rust (buffered), ~37 ns in Go, ~1.2 µs in
+Python.** Channels are not free. For coarse work items (parse a file, probe a
+host) the cost vanishes; put individual integers through a channel in a hot
+loop and the channel *is* the workload — which is why real pipelines batch
+items into chunks before sending.
+
+<Aside type="tip" title="Design rule">
+  Channels shine when the **work per message dwarfs the message cost**. Send
+  files, requests, batches — not bytes and integers.
+</Aside>
+
+## `select`: racing communications
+
+Go has one more primitive the others lack in the stdlib: `select` waits on
+*several* channels and takes whichever is ready first —
+
+```go title="channels.go"
+// FirstResponse returns whichever channel delivers first — the select
+// statement is Go's race between communications. With one ready channel
+// and one that never sends, the ready one always wins.
+func FirstResponse(a, b <-chan string) string {
+	select {
+	case v := <-a:
+		return v
+	case v := <-b:
+		return v
+	}
+}
+```
+
+— which is how Go expresses timeouts (`case <-time.After(d)`), cancellation
+(`case <-ctx.Done()`), and hedged requests. The test pre-loads one channel and
+never sends on the other, so the outcome is deterministic. Rust's std `mpsc`
+has no `select` (the `crossbeam` crate adds it); Python's closest analogue is
+a blocking `get(timeout=...)`:
+
+```python title="channels_demo.py"
+def first_response(ready: queue.Queue[str], timeout: float = 1.0) -> str:
+    """Take the first available item — ``get(timeout=...)`` is the closest
+    stdlib analogue to Go's ``select`` with a timeout arm.
+
+    Raises ``queue.Empty`` if nothing arrives in time, so callers must
+    decide what a missed deadline means instead of blocking forever.
+    """
+    return ready.get(timeout=timeout)
+```
+
+## Exercises
+
+**1. Break the shutdown (all three).** In each implementation, remove the
+close/drop/sentinel step (Go: `close(jobs)`; Rust: `drop(job_tx)`; Python: the
+sentinel loop) and run the tests. What happens in each language, and how long
+does it take you to diagnose it from the symptom alone?
+
+<details>
+<summary>Solution sketch</summary>
+
+All three hang forever — the workers block waiting for a next job that can
+still, as far as they know, arrive. Go's deadlock detector does *not* fire if
+any other goroutine could still run. The diagnostic giveaway is a test that
+times out with threads parked in `recv`/`range`/`get`; the lesson is that
+channel shutdown is part of the protocol you design, not an afterthought.
+
+</details>
+
+**2. Batch the messages (Rust or Go).** The throughput benchmark sends
+integers one at a time. Change it to send `Vec<u64>` / `[]uint64` chunks of
+1000 and measure again. How close does channel throughput get to the raw sum
+from last lesson?
+
+<details>
+<summary>Solution sketch</summary>
+
+With 1000-element chunks you pay the channel cost 1000× less often: ~1000
+sends instead of 1M. Throughput lands within a few percent of the plain loop —
+confirming the design rule: the channel overhead is per-*message*, so make
+messages coarse.
+
+</details>
+
+**3. Bound the queue (Python).** Change `throughput` to
+`Queue(maxsize=1)` and time it. Then reason: which Go/Rust flavour does this
+correspond to, and why is it still not as slow — relative to its own baseline —
+as Rust's rendezvous?
+
+<details>
+<summary>Solution sketch</summary>
+
+`maxsize=1` forces near-lockstep hand-off — the analogue of a rendezvous
+channel (though with one slot of slack). It is dramatically slower than
+`maxsize=1024` but *relatively* less catastrophic than Rust's `sync_channel(0)`
+penalty, because Python's per-message cost was already ~1.2 µs — the
+synchronization overhead has less room to dominate when the baseline is slow.
+
+</details>
+
+<Quiz
+  question={'Why does the worker-pool pattern need no mutex around the results, even though N workers write to the same channel?'}
+  options={[
+    { text: 'Because the channel itself serializes the sends — each value is owned by one side at a time, and the channel is the synchronization point', correct: true, explanation: 'That is the whole trade: instead of N threads mutating one location (lock required), N threads hand values to a channel whose implementation synchronizes internally. Your code contains no critical section to get wrong.' },
+    { text: 'Because the workers never actually run at the same time', correct: false, explanation: 'They do run concurrently — that is the point of the pool. The channel absorbs the concurrency.' },
+    { text: 'Because addition is commutative, so races do not matter', correct: false, explanation: 'Commutativity makes the *sum* order-independent, but unsynchronized concurrent writes to one memory location would still be a data race. The channel prevents that, not the arithmetic.' },
+    { text: 'Because channels are only usable from one thread', correct: false, explanation: 'Channels exist precisely to be used from multiple threads/goroutines safely.' },
+  ]}
+/>
+
+<Quiz
+  question={'Your pipeline uses an unbounded queue between a fast producer and a slow consumer. What is the failure mode?'}
+  options={[
+    { text: 'Memory grows without limit as the queue absorbs the rate difference — until the process dies or the machine swaps', correct: true, explanation: 'An unbounded queue never pushes back, so a sustained rate mismatch accumulates. A bounded buffer converts the mismatch into backpressure: the producer blocks, and the slowdown propagates to the source, where it belongs.' },
+    { text: 'The queue drops messages when it gets too long', correct: false, explanation: 'Unbounded queues do not drop — that is the problem. They keep everything, in RAM, forever.' },
+    { text: 'Deadlock: the producer eventually blocks with no receiver', correct: false, explanation: 'The producer never blocks on an unbounded queue — that is exactly why memory grows instead.' },
+    { text: 'Nothing: the consumer eventually catches up', correct: false, explanation: 'If the rate mismatch is sustained, the backlog only grows. Hoping for a quiet period is capacity planning by prayer.' },
+  ]}
+/>
+
+<Quiz
+  question={'Rust: after `tx.send(job)`, you try to log `job` and the compiler rejects it (E0382). What is this preventing?'}
+  options={[
+    { text: 'Use of a value that another thread may now own and mutate — the data race you would have written in Go or Python without any warning', correct: true, explanation: 'Ownership moved into the channel; the receiver may already be mutating the value on another thread. Reading it here would be a race. Go/Python compile the equivalent happily — the discipline is on you there.' },
+    { text: 'A memory leak: the value would never be freed', correct: false, explanation: 'Ownership transfer handles freeing correctly either way; the issue is aliased access across threads, not leaks.' },
+    { text: 'Sending the same value twice by accident', correct: false, explanation: 'A double send would be a different (logic) bug; E0382 fires on any use after the move, including a read.' },
+    { text: 'Nothing real — it is a limitation you work around with clone()', correct: false, explanation: 'clone() before send is sometimes right (you need a copy), but the error is guarding a genuine race window, not being pedantic. If you clone, the two copies are independent — which is exactly what makes it safe.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Shared state with locks versus message passing — how do you choose?">
+
+They are duals: locks bring threads to the data; channels bring data to the
+threads. Prefer channels when work naturally decomposes into a flow —
+pipelines, worker pools, request/response — because ownership transfer removes
+the possibility of races and the topology documents itself. Prefer shared
+state when many readers need cheap access to one structure (a cache, an index)
+and copying or serializing access through one owner would be the bottleneck.
+The measured caveat from this lesson: a message costs tens of nanoseconds to
+microseconds, so channel designs want coarse messages. And the two compose:
+the classic architecture is shared *immutable* data plus channels for the
+mutable flow.
+
+</Interview>
+
+<Interview question="What is backpressure and why are unbounded queues dangerous in production?">
+
+Backpressure is the propagation of a consumer's slowness upstream to the
+producer, forcing the system to shed or slow input at the edge instead of
+accumulating it in the middle. A bounded buffer provides it mechanically: full
+buffer, blocked producer. An unbounded queue hides the mismatch — latency and
+memory grow silently until an OOM kill turns a throughput problem into an
+outage. Production systems bound every queue and decide explicitly what
+happens at the bound: block (backpressure), drop (load shedding), or reject
+(fail fast). "The queue is growing" should page someone; an unbounded queue
+can't even tell you that.
+
+</Interview>
+
+<Interview question="In Go, when do you close a channel, who closes it, and what happens if you get it wrong?">
+
+Rule: **the sender closes**, and only when there is exactly one sender (or a
+coordinator that knows all senders finished — our pool used wg.Wait in a
+supervisor goroutine to close results). Receivers never close: a send on a
+closed channel panics, so a receiver closing under an active sender is a
+crash. Not closing at all leaks nothing by itself, but any goroutine blocked
+in `range`/`recv` on it waits forever — a goroutine leak. Closing twice also
+panics. The pattern that avoids all three mistakes: give each channel one
+owner responsible for its lifecycle, exactly like memory ownership in Rust —
+which is why Rust made disconnection automatic (last Sender dropped) instead
+of an API you can call wrong.
+
+</Interview>
+
+<Interview question="Why did Rust's rendezvous channel measure ~12x slower than Go's unbuffered channel for the same experiment?">
+
+Both must synchronize producer and consumer on every message, but they pay
+different machinery: Rust's `sync_channel(0)` parks an OS thread, so each
+hand-off involves futex syscalls and kernel scheduling; Go's runtime parks a
+*goroutine* and can often hand the value directly to the waiting receiver's
+stack entirely in userspace. It is the same lesson as contended mutexes: the
+primitive's name tells you the semantics, the runtime underneath sets the
+price. Corollaries: in Rust, prefer buffered channels (or crossbeam) on hot
+paths; in any language, a rendezvous per tiny message is an architecture
+smell — batch.
+
+</Interview>
+
+## Challenge
+
+Rebuild the Part 3 health-check agent on this lesson's pattern: a jobs channel
+of targets, a fixed pool of K workers probing, a results channel into one
+collector that prints the deterministic report. Then make K a command-line
+flag and measure 50 targets with K = 1, 5, 25, 50. You now have a **bounded
+concurrency** dial — the thing the original fan-out-everything version lacked —
+and you will see the elbow in the curve where more workers stop helping. That
+dial (pool size × queue bound) is the core capacity-planning knob of every
+server you will ever run, including the mini-NGINX we are building toward.
+
+## References & further reading
+
+- Go blog — [Share Memory By Communicating](https://go.dev/blog/codelab-share) · [Go Concurrency Patterns: Pipelines and cancellation](https://go.dev/blog/pipelines)
+- Rust Book ch. 16.2 — [Using Message Passing to Transfer Data Between Threads](https://doc.rust-lang.org/book/ch16-02-message-passing.html)
+- Python docs — [`queue` — a synchronized queue class](https://docs.python.org/3/library/queue.html)
+- Hoare — [Communicating Sequential Processes](https://www.cs.cmu.edu/~crary/819-f09/Hoare78.pdf) (the 1978 paper behind all of this)
+- crossbeam — [`crossbeam::channel`](https://docs.rs/crossbeam/latest/crossbeam/channel/index.html) (select, mpmc — what production Rust uses)
+
+<Progress />
