@@ -1,0 +1,12 @@
+[package]
+name = "part5-querybuilder-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a query builder's job is to turn method calls into a SQL
+# string plus a parameter list. No database needed to build or test that — we
+# assert the generated SQL and params directly.
+
+[[bin]]
+name = "querybuilder-demo"
+path = "src/main.rs"

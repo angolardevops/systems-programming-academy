@@ -298,6 +298,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/routing-middleware',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Query Builder & SQL Injection',
+              translations: { 'pt-BR': 'Query Builder & SQL Injection' },
+              slug: 'part-5-frameworks/query-builder',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],

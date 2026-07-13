@@ -1,0 +1,385 @@
+---
+title: "Query Builder: Fluent APIs & SQL Injection"
+description: Build a chainable SQL query builder in Rust, Go, and Python. The builder pattern turns method calls into SQL — and parameterized placeholders make injection structurally impossible. Byte-identical SQL verified across all three.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+The [routing lesson](/systems-programming-academy/part-5-frameworks/routing-middleware/)
+built a framework around control flow. This one builds a framework around
+*constructing a string safely* — which sounds trivial until you realize that
+the most catastrophic, most common web vulnerability in history is exactly a
+string built wrong. We build a **SQL query builder**: a fluent, chainable API
+that turns method calls into SQL.
+
+Two ideas carry the lesson. The **builder pattern** — each method returns the
+builder, so calls chain into a readable sentence. And **parameterized queries**
+— user values never touch the SQL text; they become `?` placeholders and travel
+in a separate list. That second idea is not a nicety. It is the structural
+defence that makes SQL injection *impossible to express* in code that uses the
+builder.
+
+<Aside type="note" title="Why this is a framework concern, not just a helper">
+  ORMs and query builders (SQLAlchemy, Diesel, GORM, activerecord) exist
+  largely because hand-writing SQL with string concatenation is so
+  catastrophically easy to get wrong. By making the *safe* path the *only*
+  path — you literally cannot put a user value anywhere but the params list —
+  the framework removes a whole vulnerability class by construction. That is
+  the highest form of API design: making the wrong thing unrepresentable.
+</Aside>
+
+Code:
+[`examples/part5-querybuilder-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 7–8 tests each. No database required: the builder compiles to
+a `(sql, params)` pair we assert directly, and the generated SQL is **verified
+byte-identical across all three languages**.
+
+## The fluent API
+
+The goal is that a query reads almost like the sentence you would say out loud:
+
+```text
+Query::table("orders")
+    .select(&["id", "total"])
+    .where_("status", "=", "paid")
+    .order_by("total")
+    .limit(10)
+    .build()
+```
+
+compiles to:
+
+```sql
+SELECT id, total FROM orders WHERE status = ? ORDER BY total LIMIT 10
+-- params: ["paid"]
+```
+
+Each method returns the builder so the next call chains onto it — that return-self
+move *is* the builder pattern. `build()` walks the accumulated state once and
+emits the SQL plus the positional params.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Adds a `column op ?` condition, binding `value` as a parameter.
+/// Multiple calls are joined with `AND` in call order.
+pub fn where_(mut self, column: &str, op: &str, value: &str) -> Self {
+    self.conditions.push(Condition {
+        column: column.to_string(),
+        op: op.to_string(),
+        value: value.to_string(),
+    });
+    self
+}
+```
+
+Rust takes `self` by value and returns it (`mut self -> Self`), so the chain
+*moves* the builder along — no borrows to juggle, and the compiler guarantees
+the builder is used linearly. (`where` is a keyword, hence `where_`.)
+</TabItem>
+<TabItem label="Go">
+```go title="query.go"
+// Where adds a "column op ?" condition, binding value as a parameter.
+// Multiple calls are joined with AND in call order.
+func (q *Query) Where(column, op, value string) *Query {
+	q.conditions = append(q.conditions, condition{column, op, value})
+	return q
+}
+```
+
+Go returns the pointer `*Query`, mutating in place and handing the same builder
+back. Idiomatic and allocation-free per call, at the cost of the builder being
+shared mutable state (fine here — you build one query, once).
+</TabItem>
+<TabItem label="Python">
+```python title="querybuilder.py"
+def where(self, column: str, op: str, value: str) -> Query:
+    """Add a ``column op ?`` condition, binding ``value`` as a parameter.
+    Multiple calls are joined with ``AND`` in call order."""
+    self._conditions.append(_Condition(column, op, value))
+    return self
+```
+
+Python returns `self`, the direct analogue of Go's pointer approach. The type
+hint `-> Query` is what makes editors autocomplete the next method in the chain
+— a small thing that makes a fluent API pleasant to use.
+</TabItem>
+</Tabs>
+
+## The one rule that matters: values become `?`
+
+Here is the whole security argument in one method. When you add a `WHERE`, the
+value does **not** get written into the SQL. A `?` placeholder goes into the
+SQL; the value goes into a separate params list.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+if !self.conditions.is_empty() {
+    let clauses: Vec<String> = self
+        .conditions
+        .iter()
+        .map(|c| {
+            params.push(c.value.clone()); // value -> params
+            format!("{} {} ?", c.column, c.op) // SQL gets only '?'
+        })
+        .collect();
+    sql.push_str(" WHERE ");
+    sql.push_str(&clauses.join(" AND "));
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="query.go"
+if len(q.conditions) > 0 {
+	clauses := make([]string, len(q.conditions))
+	for i, c := range q.conditions {
+		params = append(params, c.value) // value -> params
+		clauses[i] = fmt.Sprintf("%s %s ?", c.column, c.op) // SQL gets '?'
+	}
+	sql += " WHERE " + strings.Join(clauses, " AND ")
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="querybuilder.py"
+if self._conditions:
+    clauses = []
+    for c in self._conditions:
+        params.append(c.value)  # value -> params
+        clauses.append(f"{c.column} {c.op} ?")  # SQL gets only '?'
+    sql += " WHERE " + " AND ".join(clauses)
+```
+</TabItem>
+</Tabs>
+
+At execution time the database driver receives the SQL and the params
+*separately* and binds them itself — the value is never parsed as SQL. The
+column and operator are structural and come from your code, not the user; only
+the value is user-controlled, and the value can only ever be a bound parameter.
+
+## Proof: the injection attempt is inert
+
+Every implementation has the same test firing the canonical attack string at a
+value slot:
+
+```text
+value = "'; DROP TABLE users; --"
+
+produces:
+  SQL:    SELECT * FROM users WHERE name = ?
+  params: ["'; DROP TABLE users; --"]
+```
+
+The payload lands in `params` as inert data. The SQL keeps its single `?`, and
+`sql.contains("DROP")` is asserted false. Compare with the naive version this
+defends against:
+
+```python
+# NEVER do this — the classic vulnerability
+sql = f"SELECT * FROM users WHERE name = '{value}'"
+# becomes: SELECT * FROM users WHERE name = ''; DROP TABLE users; --'
+```
+
+<Mermaid title="String interpolation lets the value become code; a placeholder keeps it data" code={`flowchart TD
+  V["user value: '; DROP TABLE users; --"] --> C{how is it combined?}
+  C -->|string interpolation| BAD["value parsed AS SQL -> table dropped"]
+  C -->|placeholder + param| SAFE["value bound as DATA -> literal string compared"]
+  BAD --> X["injection"]
+  SAFE --> OK["safe by construction"]`} />
+
+This is [Bobby Tables](https://xkcd.com/327/) made concrete. The interpolated
+version treats the user's string as SQL syntax; the parameterized version can
+only ever treat it as a value to compare against. Same input, two universes.
+
+## Byte-identical SQL across three languages
+
+As with every cross-language project in this academy, the three builders were
+run on the same query and their output compared:
+
+```text
+Rust:   SELECT id, name, email FROM users WHERE age >= ? AND country = ? ORDER BY name LIMIT 25
+Go:     SELECT id, name, email FROM users WHERE age >= ? AND country = ? ORDER BY name LIMIT 25
+Python: SELECT id, name, email FROM users WHERE age >= ? AND country = ? ORDER BY name LIMIT 25
+```
+
+Identical to the byte. That agreement is what lets the *tests* be shared: the
+same seven assertions (`SELECT * FROM users`, the AND-joining, the injection
+payload staying in params) pass verbatim against all three, which is only
+meaningful because the implementations agree on exactly what SQL to emit.
+
+<Aside type="tip" title="Where real builders go further">
+  Production builders add: identifier quoting (so a column named `order` doesn't
+  break), dialect differences (`LIMIT` vs `TOP` vs `FETCH FIRST`), joins,
+  sub-queries, and compile-time-checked column names (Diesel, sqlx). But every
+  one of them keeps this lesson's non-negotiable core: values are parameters,
+  never interpolated. The rest is features; this is safety.
+</Aside>
+
+## Exercises
+
+**1. Add `insert` (all three).** Extend the builder with
+`table("users").insert({"name": ..., "age": ...})` producing
+`INSERT INTO users (name, age) VALUES (?, ?)` with the values as params. Watch
+the ordering: column order and value order must correspond exactly. How do you
+keep them in lockstep in each language?
+
+<details>
+<summary>Solution sketch</summary>
+
+Iterate the columns and values together from one ordered structure so they
+cannot drift — in Rust a `Vec<(String, String)>`, in Go a slice of pairs, in
+Python an ordered dict (insertion-ordered since 3.7). The trap is using an
+unordered map for the columns and a separate list for the values; they *will*
+misalign. Keeping the pair together is the same discipline that keeps `?` and
+its param aligned in the WHERE clause.
+
+</details>
+
+**2. Support `OR` and grouping (any language).** Add `or_where(...)` and reason
+about precedence: `a AND b OR c` is not `a AND (b OR c)`. How do you let callers
+express grouped conditions without letting them inject raw SQL?
+
+<details>
+<summary>Solution sketch</summary>
+
+Model conditions as a small tree (AND/OR nodes with condition leaves) rather
+than a flat list, and emit parentheses when serializing a nested group. Callers
+build the tree through methods — never by passing a raw clause string — so the
+injection-safety invariant holds: structure comes from method calls, values
+from params. This is the point where a builder starts to become a real
+expression compiler.
+
+</details>
+
+**3. Validate identifiers (all three).** A table or column name *is* interpolated
+(it can't be a `?`), so a malicious column name is a real injection vector.
+Add validation that rejects any identifier not matching `^[A-Za-z_][A-Za-z0-9_]*$`.
+Why is an allowlist regex the right tool here and a denylist the wrong one?
+
+<details>
+<summary>Solution sketch</summary>
+
+Identifiers cannot be parameterized, so they must be *validated* instead — and
+validation must be an allowlist (only known-safe characters permitted), never a
+denylist (trying to enumerate bad characters, which always misses something).
+The regex `^[A-Za-z_][A-Za-z0-9_]*$` admits only plain identifiers, rejecting
+quotes, spaces, semicolons, and comment markers outright. This closes the one
+injection door parameterization can't: the structural parts of the query that
+must come from code, verified to actually look like code.
+
+</details>
+
+<Quiz
+  question={'Why does a parameterized query prevent SQL injection where string interpolation does not?'}
+  options={[
+    { text: 'The value is sent to the database separately from the SQL and bound as data, so it is never parsed as SQL syntax — a semicolon or quote in it is just characters', correct: true, explanation: 'The driver receives "... WHERE name = ?" and the value apart, and binds the value into the prepared statement without re-parsing it. Interpolation instead splices the value into the SQL text, where the parser happily reads its quotes and semicolons as syntax.' },
+    { text: 'The query builder escapes dangerous characters in the value before inserting it', correct: false, explanation: 'That is a different, weaker technique (manual escaping) and is easy to get wrong. Parameterization does not escape and re-insert — it keeps the value out of the SQL text entirely, which is why it is robust.' },
+    { text: 'Parameterized queries run with lower database privileges', correct: false, explanation: 'Privileges are an unrelated (also useful) defence. Parameterization works at any privilege level because it changes how the value is interpreted, not what it is allowed to do.' },
+    { text: 'The ? placeholder is a special character the database ignores', correct: false, explanation: 'The ? is a placeholder the driver replaces with the bound value at execution — it is not ignored. The safety comes from binding the value as data, not from the placeholder being inert.' },
+  ]}
+/>
+
+<Quiz
+  question={'What makes the "return self" idiom the core of the builder pattern?'}
+  options={[
+    { text: 'Returning the builder from each method lets calls chain, so the object is configured step by step in one readable expression', correct: true, explanation: 'Each method mutates (or moves) the builder and hands it back, so .where().order_by().limit() reads as a sentence and builds up state incrementally. Without the return, each call would be a separate statement and the fluency — the whole point — is lost.' },
+    { text: 'It avoids allocating memory for the query', correct: false, explanation: 'Allocation behavior varies by language and is not what defines the pattern — Rust moves, Go/Python return a shared reference. The defining trait is chainability, not allocation.' },
+    { text: 'It makes the builder thread-safe', correct: false, explanation: 'Returning self says nothing about thread safety — a chained builder is typically single-threaded mutable state. Concurrency is orthogonal to the pattern.' },
+    { text: 'It lets the compiler infer the SQL type', correct: false, explanation: 'There is no SQL-type inference happening; build() emits a plain string. The idiom is about API ergonomics — chainable configuration — not typing.' },
+  ]}
+/>
+
+<Quiz
+  question={'A table or column name cannot be a ? placeholder. What is the correct way to keep identifiers safe?'}
+  options={[
+    { text: 'Validate them against an allowlist pattern (e.g. ^[A-Za-z_][A-Za-z0-9_]*$), rejecting anything that is not a plain identifier', correct: true, explanation: 'Identifiers are structural and must be interpolated, so parameterization cannot help — you validate instead, with an allowlist that admits only safe characters. A malicious column name is a genuine injection vector this closes.' },
+    { text: 'Wrap them in a ? placeholder like values', correct: false, explanation: 'Placeholders bind values, not identifiers — you cannot parameterize a table or column name. The database would treat "SELECT * FROM ?" as selecting from a string literal, which is a syntax error.' },
+    { text: 'Escape any quotes in the identifier', correct: false, explanation: 'Escaping is fragile and dialect-specific; an allowlist that rejects non-identifier characters entirely is stronger and simpler. You want to reject bad names, not try to sanitize them.' },
+    { text: 'Nothing — identifiers always come from the developer, never the user', correct: false, explanation: 'Often true, but not always: dynamic sorting or column selection (?sort=name) can route user input into identifiers. Assuming safety there is exactly how identifier-injection bugs happen.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Explain SQL injection and the correct way to prevent it.">
+
+SQL injection happens when user-controlled data is combined with a SQL query in
+a way that lets the data change the query's *structure* — classically by
+building the SQL with string concatenation, so a value like
+`'; DROP TABLE users; --` becomes executable syntax. The correct, robust
+prevention is parameterized (prepared) statements: the query text with `?` (or
+`$1`) placeholders is sent to the database separately from the values, and the
+driver binds the values as data that is never parsed as SQL. Crucially this is
+not escaping — escaping is a weaker, error-prone fallback. For the parts that
+genuinely cannot be parameterized, namely identifiers like table and column
+names, you validate against an allowlist. A query builder or ORM enforces all of
+this by construction, which is why "use parameterized queries, always" is the
+one-line answer and "we build SQL with f-strings" is a red flag.
+
+</Interview>
+
+<Interview question="What is the builder pattern, and when is it the right choice over a constructor or a config struct?">
+
+The builder pattern constructs an object step by step through chained methods,
+each returning the builder, ending in a `build()` that produces the final value.
+It shines when an object has many optional parameters — a constructor with ten
+arguments, most of them defaults, is unreadable and error-prone, while
+`.select(...).where(...).limit(...)` names each choice at the call site and lets
+you omit what you don't need. It also enables validation or transformation at
+`build()` time, and can enforce required-vs-optional distinctions (a
+type-state builder won't compile without the mandatory pieces). The trade-off is
+more code than a plain struct and a moment where the builder is in a partially
+constructed, invalid state — so for a value with two or three required fields, a
+constructor is simpler and better. Query construction is the textbook fit:
+open-ended optional clauses, assembled fluently.
+
+</Interview>
+
+<Interview question="Where do query builders and ORMs still leave you exposed, and how do you cover it?">
+
+They close the value-injection door but not every door. Identifiers routed from
+user input (dynamic `ORDER BY {col}`, tenant table names) are interpolated, not
+parameterized, so they need allowlist validation — a real and often-missed
+vector. Raw-SQL escape hatches (`.raw()`, `text()`) hand you back the loaded gun
+for the cases the builder can't express, and are where injection creeps back in;
+they demand the same parameterization discipline manually. There is also `LIMIT`
+/ `OFFSET` and `IN (...)` list binding, which some drivers handle awkwardly. And
+none of this touches authorization: a perfectly parameterized query can still
+read rows the user shouldn't see if you forget the `WHERE tenant_id = ?`. The
+builder makes the common case safe; the residual risk is exactly the parts that
+step outside it, which is where review and validation focus.
+
+</Interview>
+
+## Challenge
+
+Turn this into a tiny type-safe data layer: define a `User` struct/class,
+generate `SELECT`, `INSERT`, `UPDATE`, and `DELETE` for it, add identifier
+validation, and wire it to a real SQLite database (stdlib in Python, `database/sql`
+in Go, the `rusqlite` crate in Rust) so the `(sql, params)` pairs actually
+execute. Write an integration test that inserts a row whose name is the Bobby
+Tables payload, reads it back intact, and confirms the table still exists — proof
+that the injection is neutralized end to end, not just in the generated string.
+You will have built the safe core that every ORM wraps in features, and you will
+never again be tempted to reach for an f-string in a query.
+
+## References & further reading
+
+- OWASP — [SQL Injection](https://owasp.org/www-community/attacks/SQL_Injection) · [Query Parameterization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html)
+- xkcd 327 — [Exploits of a Mom](https://xkcd.com/327/) ("Bobby Tables")
+- Rust — [`rusqlite` parameters](https://docs.rs/rusqlite/latest/rusqlite/#binding-parameters) · [Diesel](https://diesel.rs/) (compile-time-checked query builder)
+- Go — [`database/sql` and prepared statements](https://go.dev/doc/database/sql-injection)
+- Python — [PEP 249 (DB-API) parameter styles](https://peps.python.org/pep-0249/#paramstyle) · [SQLAlchemy Core](https://docs.sqlalchemy.org/en/20/core/tutorial.html)
+
+<Progress />
