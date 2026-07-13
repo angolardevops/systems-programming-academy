@@ -27,7 +27,7 @@ bar over time.
 | **Part 2 → Real-World Engineering** (7 lessons, EN + PT) | ✅ Planned arc complete & tested |
 | **Part 3 → DevOps Automation** (4 projects × 3 languages, EN + PT) | ✅ Complete, tested & benchmarked |
 | **Part 4 → Concurrency & Parallelism** (3 lessons + mini-NGINX, 3 languages) | ✅ Complete, tested & benchmarked |
-| **Part 5 → Building Frameworks** (routing · query builder · DI container · validation · template engine, 3 languages) | ✅ Complete, tested (5 lessons) |
+| **Part 5 → Building Frameworks** (routing · query builder · DI container · validation · template engine · JSON serialization · test framework, 3 languages) | ✅ Complete, tested (7 lessons) |
 | **Capstone → Secure Guestbook** (composes the frameworks; SQLi + XSS defeated, 3 languages) | ✅ Complete & tested |
 | **Capstone → Running App** (HTTP server + real SQLite; SQLi defeated against actual SQLite, 3 languages) | ✅ Complete & tested |
 
