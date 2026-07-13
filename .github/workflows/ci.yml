@@ -52,6 +52,7 @@ jobs:
           - part5-container-rust
           - part5-validator-rust
           - part5-template-rust
+          - capstone-guestbook-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -95,6 +96,7 @@ jobs:
           - part5-container-go
           - part5-validator-go
           - part5-template-go
+          - capstone-guestbook-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -137,6 +139,7 @@ jobs:
           - part5-container-py
           - part5-validator-py
           - part5-template-py
+          - capstone-guestbook-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}

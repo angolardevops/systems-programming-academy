@@ -324,6 +324,18 @@ export default defineConfig({
             },
           ],
         },
+        {
+          label: 'Capstone',
+          translations: { 'pt-BR': 'Capstone' },
+          items: [
+            {
+              label: 'Secure Guestbook, End to End',
+              translations: { 'pt-BR': 'Guestbook Seguro, End to End' },
+              slug: 'capstone/guestbook',
+              badge: { text: 'Capstone', variant: 'tip' },
+            },
+          ],
+        },
       ],
       components: {
         // Custom footer with the required authorship block.

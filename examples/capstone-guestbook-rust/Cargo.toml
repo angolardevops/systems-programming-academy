@@ -1,0 +1,13 @@
+[package]
+name = "capstone-guestbook-rust"
+version = "0.1.0"
+edition = "2021"
+
+# The capstone: one small app that composes the Part 5 frameworks — validation,
+# parameterized query building, and autoescaped templating — into a guestbook,
+# then proves the two injection defences (SQLi + XSS) end to end. Dependency-free
+# and I/O-free: an in-memory store, so the whole pipeline is directly testable.
+
+[[bin]]
+name = "guestbook-demo"
+path = "src/main.rs"

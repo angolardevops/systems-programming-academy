@@ -1,0 +1,474 @@
+---
+title: "Capstone: A Secure Guestbook, End to End"
+description: The whole academy in one small app. Compose validation, parameterized queries, and autoescaped templating into a guestbook, then attack it with a SQL-injection and an XSS payload — and watch both defences hold. Built and defeated in Rust, Go, and Python.
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+Everything this academy built converges here. Part 1 taught the languages;
+Part 2, engineering discipline; Part 3, real tools; Part 4, concurrency and a
+server; Part 5, the frameworks a web app is made of. The capstone is a single
+small application — a **guestbook** — that composes those framework pieces into
+one coherent pipeline, and then does the thing tutorials almost never do:
+**attacks itself**, and proves it holds.
+
+A guestbook is deceptively perfect for this. It is tiny — anyone leaves a name
+and a message, everyone sees the list — yet it sits on top of the two most
+exploited vulnerability classes in the history of the web: **SQL injection**
+(the message goes into a database) and **cross-site scripting** (the message
+comes back out onto a page). Get either wrong and a comment field becomes a
+data-destroying or account-stealing hole. Get both right, from first principles,
+and you understand the security spine of essentially every web application.
+
+<Aside type="note" title="One principle, defended twice">
+  Both defences are the same idea — *treat untrusted input as data, never as
+  code, and make that the default*. On the way **in**, parameterized queries
+  keep the message out of SQL syntax. On the way **out**, autoescaping keeps it
+  out of HTML syntax. The capstone's whole thesis is that injection is one bug
+  class with two façades, and one principle closes both doors.
+</Aside>
+
+Code:
+[`examples/capstone-guestbook-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 tests each, no I/O (an in-memory store), and the rendered
+page is **byte-identical across all three languages**. Two of those tests are
+the adversarial ones that make this a capstone.
+
+## The pipeline
+
+A submission flows through three stages, each a miniature of a Part 5 lesson:
+
+<Mermaid title="validate -> store (parameterized) -> render (autoescaped)" code={`flowchart LR
+  U["user submits {author, body}"] --> V["validate: accumulate every error"]
+  V -->|errors| R1["reject: show all errors, store nothing"]
+  V -->|clean| S["store: parameterized INSERT (? placeholders)"]
+  S --> DB[("in-memory table")]
+  DB --> T["render: HTML-escape every value"]
+  T --> P["page: untrusted data shown as inert text"]`} />
+
+The three stages, side by side, are the entire application logic:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="guestbook.py"
+def submit(store: Store, author: str, body: str) -> list[str]:
+    """Validate, and if clean, store via a parameterized insert."""
+    errors = validate_submission(author, body)
+    if not errors:
+        sql, params = insert_sql(author.strip(), body.strip())
+        store.execute_insert(sql, params)  # values bound as data
+    return errors
+
+
+def render_page(store: Store) -> str:
+    """Render every stored comment, HTML-escaped."""
+    lines = ['<ul class="guestbook">']
+    for c in store.all():
+        lines.append(
+            f"  <li><strong>{escape_html(c.author)}</strong>: "
+            f"{escape_html(c.body)}</li>"
+        )
+    lines.append("</ul>")
+    return "\n".join(lines)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="guestbook.go"
+func Submit(store *Store, author, body string) []string {
+	errors := ValidateSubmission(author, body)
+	if len(errors) == 0 {
+		sql, params := InsertSQL(strings.TrimSpace(author), strings.TrimSpace(body))
+		_ = store.ExecuteInsert(sql, params) // values bound as data
+	}
+	return errors
+}
+
+func RenderPage(store *Store) string {
+	var b strings.Builder
+	b.WriteString("<ul class=\"guestbook\">\n")
+	for _, c := range store.All() {
+		fmt.Fprintf(&b, "  <li><strong>%s</strong>: %s</li>\n",
+			EscapeHTML(c.Author), EscapeHTML(c.Body))
+	}
+	b.WriteString("</ul>")
+	return b.String()
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn submit(store: &mut Store, author: &str, body: &str) -> Vec<String> {
+    let errors = validate_submission(author, body);
+    if errors.is_empty() {
+        let (sql, params) = insert_sql(author.trim(), body.trim());
+        store.execute_insert(&sql, &params); // values bound as data
+    }
+    errors
+}
+
+pub fn render_page(store: &Store) -> String {
+    let mut html = String::from("<ul class=\"guestbook\">\n");
+    for c in store.all() {
+        html.push_str(&format!(
+            "  <li><strong>{}</strong>: {}</li>\n",
+            escape_html(&c.author),
+            escape_html(&c.body)
+        ));
+    }
+    html.push_str("</ul>");
+    html
+}
+```
+</TabItem>
+</Tabs>
+
+Notice how little application code there is. That is the payoff of the
+frameworks: `validate_submission`, `insert_sql`, and `escape_html` each carry a
+lesson's worth of care, so the app that composes them is short and — crucially —
+**secure by construction**, because the safe path is the only path the pieces
+offer.
+
+## The store: modelling what a database driver does
+
+To prove the SQL-injection defence without a real database, the store is a
+strict stand-in. It accepts **only** the exact parameterized insert and binds
+the params as row data — exactly what a real driver does: the values are bound,
+never executed as SQL.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn execute_insert(&mut self, sql: &str, params: &[String]) {
+    assert_eq!(
+        sql, "INSERT INTO comments (author, body) VALUES (?, ?)",
+        "store only accepts the parameterized comment insert"
+    );
+    assert_eq!(params.len(), 2, "expected two bound params");
+    // Bind params as DATA. Whatever is in them — including a '; DROP...'
+    // string — is stored verbatim as a value; it is never SQL.
+    self.comments.push(Comment {
+        author: params[0].clone(),
+        body: params[1].clone(),
+    });
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="guestbook.go"
+func (s *Store) ExecuteInsert(sql string, params []string) error {
+	if sql != "INSERT INTO comments (author, body) VALUES (?, ?)" {
+		return fmt.Errorf("store only accepts the parameterized comment insert")
+	}
+	if len(params) != 2 {
+		return fmt.Errorf("expected two bound params, got %d", len(params))
+	}
+	// Bind params as DATA — whatever is in them is stored verbatim, never SQL.
+	s.comments = append(s.comments, Comment{Author: params[0], Body: params[1]})
+	return nil
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="guestbook.py"
+def execute_insert(self, sql: str, params: list[str]) -> None:
+    if sql != "INSERT INTO comments (author, body) VALUES (?, ?)":
+        raise ValueError("store only accepts the parameterized comment insert")
+    if len(params) != 2:
+        raise ValueError(f"expected two bound params, got {len(params)}")
+    # Bind params as DATA — whatever is in them is stored verbatim, never SQL.
+    self._comments.append(Comment(author=params[0], body=params[1]))
+```
+</TabItem>
+</Tabs>
+
+This models the real guarantee precisely: the driver receives the SQL and the
+values *separately*. The SQL is fixed template text with `?` holes; the values
+fill the holes as data. A value of `'; DROP TABLE comments; --` is stored as the
+literal characters of a comment body — the database never sees a second
+statement to execute.
+
+## Attack #1 — SQL injection, defeated
+
+The adversarial test seeds a row, submits the classic drop-table payload as a
+comment body, and asserts that the existing row survives and the payload was
+stored as inert data:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (test)"
+#[test]
+fn sql_injection_payload_is_stored_as_inert_data_table_survives() {
+    let mut store = Store::new();
+    submit(&mut store, "Alice", "first comment"); // an existing row
+    // The attack: a body that tries to drop the table.
+    let errors = submit(&mut store, "Mallory", "'; DROP TABLE comments; --");
+    assert!(errors.is_empty());
+    // The "existing row" is still there — nothing was dropped.
+    assert_eq!(store.all().len(), 2);
+    assert_eq!(store.all()[0].body, "first comment");
+    // The payload was stored verbatim as a plain string value.
+    assert_eq!(store.all()[1].body, "'; DROP TABLE comments; --");
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="guestbook_test.go"
+func TestSQLInjectionPayloadIsStoredAsInertDataTableSurvives(t *testing.T) {
+	store := NewStore()
+	Submit(store, "Alice", "first comment")
+	errs := Submit(store, "Mallory", "'; DROP TABLE comments; --")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(store.All()) != 2 {
+		t.Fatalf("table should still have 2 rows, got %d", len(store.All()))
+	}
+	if store.All()[1].Body != "'; DROP TABLE comments; --" {
+		t.Fatalf("payload not stored verbatim: %q", store.All()[1].Body)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_guestbook.py"
+def test_sql_injection_payload_is_stored_as_inert_data_table_survives(self):
+    store = Store()
+    submit(store, "Alice", "first comment")
+    errors = submit(store, "Mallory", "'; DROP TABLE comments; --")
+    self.assertEqual(errors, [])
+    self.assertEqual(len(store.all()), 2)
+    self.assertEqual(store.all()[0].body, "first comment")
+    self.assertEqual(store.all()[1].body, "'; DROP TABLE comments; --")
+```
+</TabItem>
+</Tabs>
+
+The attack is accepted as an ordinary comment — and does nothing. Its dangerous
+characters are just characters in a string field. Contrast the string-built SQL
+this defends against, where `... VALUES ('Mallory', ''); DROP TABLE comments;
+--')` would execute the drop. Parameterization is why the payload is data, not a
+command.
+
+## Attack #2 — XSS, defeated
+
+The second adversarial test submits a `<script>` and asserts the rendered page
+shows it as escaped text, with no live tag anywhere:
+
+```rust title="the assertion, all three languages agree"
+submit(&mut store, "Mallory", "<script>alert(document.cookie)</script>");
+let page = render_page(&store);
+assert!(page.contains("&lt;script&gt;alert(document.cookie)&lt;/script&gt;"));
+assert!(!page.contains("<script>")); // no live script tag anywhere
+```
+
+The browser receiving this page renders the literal text `<script>…`, it does
+not execute anything. Autoescaping turned the attack into inert content.
+
+## The whole thing, byte-identical
+
+Run the demo — two normal comments, then the two attacks — and all three
+languages produce the exact same page:
+
+```html
+<ul class="guestbook">
+  <li><strong>Ana</strong>: Love this academy!</li>
+  <li><strong>Bruno</strong>: The Rust track is superb.</li>
+  <li><strong>Mallory</strong>: &#39;; DROP TABLE comments; --</li>
+  <li><strong>Eve</strong>: &lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;</li>
+</ul>
+```
+
+Four comments stored — the SQL-injection attempt dropped nothing. Both hostile
+payloads appear as harmless escaped text — the XSS executed nothing. The
+end-to-end test asserts exactly this: three rows survive, and the page contains
+the *escaped* forms of both attacks and no live `<script>`. Two attacks, two
+defences, one principle, three languages — identical to the byte.
+
+## What the whole academy was building toward
+
+Step back and see the arc in this one file. The **validation** stops malformed
+input at the door and reports every problem at once (Part 5). The
+**parameterized query** stores hostile input safely (Part 5, and the security
+thread from Part 2). The **autoescaped template** renders it safely (Part 5).
+Underneath, the app is the kind of small, tested, dependency-injected,
+concurrency-aware, benchmark-honest code that Parts 1–4 spent twenty lessons
+teaching how to write. The guestbook is 150 lines. It is also, in miniature,
+every web application — and now you know why each line is the way it is, in
+three languages, from the syscall up.
+
+## Exercises
+
+**1. Mount it on the real server (all three).** Wire the guestbook onto the
+[Part 4 mini-NGINX](/systems-programming-academy/part-4-concurrency/mini-nginx/):
+`GET /` renders the page, `POST /comment` runs `submit` and re-renders (or shows
+the error list). Now it is a running web app you can open in a browser and try
+to hack live. What did you have to add, and what was already handled?
+
+<details>
+<summary>Solution sketch</summary>
+
+You add HTTP glue — routing `GET /` vs `POST /comment`, parsing the form body,
+turning validation errors into a 400 with the error list — but the *security*
+was already handled by the composed frameworks: nothing about serving it over
+HTTP reopens the injection doors, because the defences live in the store and the
+renderer, not in the transport. That separation — transport concerns vs
+domain/security concerns — is the architecture lesson from Part 2 (hexagonal)
+paying off: you extended the outside without touching the safe core.
+
+</details>
+
+**2. Add a second output format (any language).** Render the same comments as
+JSON for an API (`GET /comments.json`). What is the equivalent of autoescaping
+for JSON, and why can you not reuse the HTML escaper?
+
+<details>
+<summary>Solution sketch</summary>
+
+JSON has its own escaping (quotes, backslashes, control characters) and its own
+injection risk if you build it by string concatenation — the fix is to use a
+real JSON encoder that escapes for the *JSON* grammar, exactly as HTML needs an
+HTML escaper. Reusing the HTML escaper would both under-escape (miss `\` and
+control chars) and over-escape (turn `<` into `&lt;` inside a JSON string, which
+is wrong there). This is the context-dependence of escaping from the template
+lesson, made concrete: every output grammar needs its own encoder.
+
+</details>
+
+**3. Store to real SQLite (Rust or Go).** Replace the in-memory store with an
+actual database (`rusqlite` / `database/sql`), executing the same
+`(sql, params)` pair against a real `comments` table. Submit the drop-table
+payload and confirm — against a real SQL engine — that the table still exists
+afterward. What changed in your code, and what deliberately did not?
+
+<details>
+<summary>Solution sketch</summary>
+
+Only the store's internals change — it now calls the driver's prepared-statement
+API with the same `(sql, params)` pair; the pipeline, the validation, the
+rendering, and every test above are untouched. Running the drop-table payload
+against real SQLite and finding the table intact is the proof that the
+parameterized-insert guarantee was never a simulation — the in-memory store
+modelled the real driver's contract faithfully, which is why swapping in the
+real one requires no change to the security-relevant code. That is dependency
+injection (Part 2 and 5) delivering its promise: the boundary was the seam, and
+the seam held.
+
+</details>
+
+<Quiz
+  question={'The guestbook stores a comment whose body is "\'; DROP TABLE comments; --". After submitting it, what is true?'}
+  options={[
+    { text: 'The comments table is intact and the payload is stored as the literal text of one comment body', correct: true, explanation: 'Because the insert is parameterized, the SQL is fixed template text and the payload is bound as a value in the body column. The database never parses it as SQL, so nothing is dropped; it is just an oddly-punctuated comment.' },
+    { text: 'The comments table is dropped', correct: false, explanation: 'That is what happens with string-interpolated SQL. Parameterized inserts send the value separately from the SQL, so the drop statement is never executed — it is stored as data.' },
+    { text: 'The submission is rejected by validation', correct: false, explanation: 'Validation checks length and presence, not content for "SQL-looking" text — and it should not, because that is the wrong layer. The defence is parameterization at the store, which makes the content harmless regardless.' },
+    { text: 'The payload is silently discarded', correct: false, explanation: 'Nothing is discarded — the comment is stored faithfully as data. The point is precisely that hostile-looking input is preserved as content while being powerless as code.' },
+  ]}
+/>
+
+<Quiz
+  question={'A comment containing <script>alert(1)</script> is stored and then shown on the page. Why is this safe in the guestbook?'}
+  options={[
+    { text: 'render_page HTML-escapes every value, so the script is rendered as visible inert text, never parsed as a tag', correct: true, explanation: 'Autoescaping converts < > & and quotes into entities before the value reaches the browser, so the browser displays the literal characters instead of parsing a script element. The stored data is untouched; only its rendering is escaped.' },
+    { text: 'The script is stripped out before storage', correct: false, explanation: 'Nothing is stripped — the comment is stored verbatim. Safety comes at render time via escaping, not by sanitizing at storage time (which would lose data and is a weaker approach).' },
+    { text: 'The validation step rejects HTML tags', correct: false, explanation: 'Validation does not reject tags — a comment legitimately might discuss HTML. The defence is escaping on output, which makes any content safe to display without forbidding it.' },
+    { text: 'Browsers no longer execute inline scripts', correct: false, explanation: 'Browsers absolutely execute inline scripts that reach the DOM as real tags — which is exactly why escaping matters. The safety is that escaping prevents the tag from ever forming.' },
+  ]}
+/>
+
+<Quiz
+  question={'The SQL-injection defence lives in the store and the XSS defence lives in the renderer. Why is that placement the right design?'}
+  options={[
+    { text: 'Each defence sits at the exact boundary it protects — input to the database, output to the page — so composing the app cannot accidentally bypass them', correct: true, explanation: 'Putting the guarantee at the boundary means every path through that boundary is protected, regardless of what the calling code does. The app logic that composes the pieces stays short and cannot reopen the hole, because the safe behavior is intrinsic to the store and the renderer, not something callers must remember.' },
+    { text: 'It makes the code shorter, which is the main goal', correct: false, explanation: 'Brevity is a nice consequence, not the reason. The reason is that boundary-placed defences cannot be bypassed by composition — a correctness/security property, not a line count.' },
+    { text: 'Because validation cannot be trusted to catch attacks', correct: false, explanation: 'Validation is a different concern (well-formedness), and deliberately does not try to detect "attack-looking" content. The design point is that each defence belongs at its own boundary, not that one layer is untrustworthy.' },
+    { text: 'So the defences can be turned off independently', correct: false, explanation: 'You would never want to turn these off. The placement is about guaranteeing they always apply at their boundary, the opposite of making them optional.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Walk me through defending a comment feature against the two classic injection attacks.">
+
+There are two boundaries and one principle. Going into storage, the attack is SQL
+injection, and the defence is parameterized queries: the SQL is fixed text with
+placeholders and the user's message is sent to the database separately, bound as
+a value, so a `'; DROP TABLE ...` message is stored as literal data and never
+executed. Coming out onto the page, the attack is cross-site scripting, and the
+defence is autoescaping: every value is HTML-escaped by default before it reaches
+the browser, so a `<script>` message renders as inert text rather than a live
+tag. The unifying idea is *treat untrusted input as data, not code, and make that
+the default* — and crucially, place each defence at its boundary (the database
+layer and the rendering layer), so the application code that ties them together
+cannot accidentally bypass either. Validation is a third, separate layer for
+well-formedness; it is not where injection is stopped, and pretending otherwise —
+"we block SQL keywords" — is a known-bad approach.
+
+</Interview>
+
+<Interview question="Why not just sanitize or reject dangerous-looking input at the front door instead of these layered defences?">
+
+Because "dangerous-looking" is undefinable and the front door is the wrong place.
+A legitimate comment might contain `DROP TABLE` (someone discussing databases) or
+`<script>` (someone discussing HTML); rejecting them is both wrong and
+insufficient, since attackers trivially evade keyword blocklists with encoding
+and alternate syntax. Sanitizing — stripping or altering input — loses real data
+and still leaves you guessing at every dangerous form. The robust approach makes
+the input *harmless in context* rather than trying to recognize it: parameterize
+so content cannot be SQL, escape so content cannot be HTML. The value is stored
+and shown faithfully, yet powerless as code. This is defense by construction at
+the boundary versus defense by pattern-matching at the perimeter, and the former
+is why frameworks that default to it have made these bugs rare where they are
+used.
+
+</Interview>
+
+<Interview question="This capstone uses an in-memory store. How do you know the SQL-injection defence is real and not an artifact of the fake store?">
+
+Because the store models the real driver's contract exactly at the seam that
+matters: it accepts a fixed SQL string plus a separate params list, and binds the
+params as data — which is precisely the prepared-statement interface a real
+driver exposes. The guarantee under test is "the user value travels as a bound
+parameter, not as SQL text", and that is a property of the *call* (`insert_sql`
+producing `?` placeholders and a params vector), not of the storage backend.
+Swapping the in-memory store for real SQLite changes only the store's internals
+and leaves the pipeline, the produced `(sql, params)`, and the tests unchanged —
+which is itself the proof, and exercise 3 makes it concrete by running the
+payload against a real database. The dependency-injection boundary (Part 2 and 5)
+is what lets the fake and the real store be interchangeable without weakening the
+guarantee — the seam was designed so the security-relevant behavior lives above
+it, in the parameterized call, not below it in the backend.
+
+</Interview>
+
+## Where to go from here
+
+You have reached the end of the built curriculum — twenty foundations lessons,
+seven engineering lessons, four DevOps projects, four concurrency lessons
+crowned by a real server, five framework lessons, and this capstone, each
+executable and tested in Python, Go, and Rust. The natural next steps are the
+exercises that turn these pieces into running systems: mount the guestbook on the
+mini-NGINX, back it with real SQLite, add an API format, put it behind the
+health-check agent. Every one of those is now a composition of things you have
+built and understood rather than imported and trusted — which was the entire
+point.
+
+Build something. Then measure it, test it, and make its safe path the only path.
+
+## References & further reading
+
+- OWASP — [Top Ten](https://owasp.org/www-project-top-ten/) (injection and XSS are perennial entries) · [Query Parameterization](https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html) · [XSS Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- The Part 5 lessons this composes: [Query Builder](/systems-programming-academy/part-5-frameworks/query-builder/) · [Validation](/systems-programming-academy/part-5-frameworks/validation/) · [Template Engine](/systems-programming-academy/part-5-frameworks/template-engine/)
+- [Part 4 · mini-NGINX](/systems-programming-academy/part-4-concurrency/mini-nginx/) — the server to mount this on
+- [Part 2 · Hexagonal Architecture](/systems-programming-academy/part-2-engineering/hexagonal-architecture/) — why boundary-placed defences compose safely
+
+<Progress />
