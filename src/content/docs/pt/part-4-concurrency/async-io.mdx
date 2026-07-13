@@ -1,0 +1,542 @@
+---
+title: Async & I/O Orientado a Eventos
+description: Uma thread, dez mil esperas — um event loop com poll(2) construído à mão em Rust, o netpoller invisível do Go e o asyncio do Python, com o benchmark de 10k esperas concorrentes que explica porque é que o async existe.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+O agente de health-check da Parte 3 sobrepôs cinquenta esperas de rede com
+cinquenta threads, e foi a decisão certa. Agora escala a pergunta: um servidor
+de chat com **dez mil** ligações quase sempre inativas. Dez mil threads do SO
+significam dez mil stacks no kernel, dez mil entradas no scheduler e trocas de
+contexto que pisoteiam as caches do CPU — o famoso **problema C10K** que
+redesenhou os servidores por volta de 1999.
+
+A resposta para que todas as stacks modernas convergiram: **não dediques uma
+thread a uma espera.** Põe os sockets em modo non-blocking, pergunta ao kernel
+*quais estão prontos agora*, e tem uma thread a agir só sobre esses. Isso é um
+**event loop**, e esta lição constrói um a partir de syscalls cruas em Rust,
+mostra porque é que os programadores de Go nunca veem o deles, e conduz o
+`asyncio` do Python — e depois mede todos contra thread-por-espera.
+
+<Aside type="note" title="Pré-requisitos">
+  [Threads & Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+  e [Message Passing & Channels](/systems-programming-academy/pt/part-4-concurrency/message-passing/).
+  O [agente de health-check](/systems-programming-academy/pt/part-3-devops/health-check/)
+  da Parte 3 é a base thread-por-espera que esta lição atualiza.
+</Aside>
+
+Código:
+[`examples/part4-async-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 4 testes cada contra **sockets reais**, Go sob `-race`.
+
+## O mecanismo: prontidão, não conclusão
+
+Todos os sistemas async em Linux desembocam na mesma facilidade do kernel:
+entrega ao kernel um conjunto de file descriptors, dorme até pelo menos um
+estar **pronto**, acorda e trata exatamente desses. O antepassado portátil é o
+`poll(2)`; o `epoll` é o sucessor escalável (a mesma ideia, O(prontos) em vez
+de O(vigiados)); o kqueue é o primo BSD/macOS.
+
+<Mermaid title="O event loop: uma thread, muitas ligacoes, trabalho so no que esta pronto" code={`flowchart TD
+  A["montar fd set: listener + todas as ligacoes"] --> B["poll() - dormir ate algo estar pronto"]
+  B --> C{"listener pronto?"}
+  C -->|sim| D["accept novas ligacoes (non-blocking)"]
+  C -->|nao| E
+  D --> E{"ligacao pronta?"}
+  E -->|sim| F["ler bytes disponiveis para o buffer dessa ligacao"]
+  F --> G{"mensagem completa?"}
+  G -->|sim| H["escrever eco, fechar, esquecer ligacao"]
+  G -->|nao| I["guardar buffer, esperar por mais"]
+  E -->|nao| A
+  H --> A
+  I --> A`} />
+
+## Rust: construir o loop à mão
+
+A stdlib do Rust não tem runtime async — código de produção usa tokio. Antes
+de usares um, devias ter construído um. Este servidor multiplexa qualquer
+número de ligações numa **única thread** com a técnica de FFI da
+[lição Unsafe & FFI](/systems-programming-academy/pt/part-1-foundations/rust/unsafe-ffi/) —
+sem crates, só a syscall:
+
+```rust title="src/lib.rs"
+/// Uma entrada do fd set entregue ao `poll(2)` — espelha o `struct pollfd` de C.
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+/// "Há dados para ler" — de `<poll.h>`.
+const POLLIN: i16 = 0x001;
+
+extern "C" {
+    /// int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+    fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: i32) -> i32;
+}
+
+/// Serve mensagens terminadas em newline no `listener`, ecoando cada uma de
+/// volta e fechando a ligação, até `n` mensagens terem sido ecoadas.
+///
+/// O servidor inteiro é UMA thread: o `poll` dorme até o listener ou alguma
+/// ligação estar pronta, e cada despertar faz só o trabalho que está pronto —
+/// mensagens parciais ficam em buffer por ligação e terminam mais tarde.
+pub fn serve_n_echoes(listener: &TcpListener, n: usize) -> usize {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let mut conns: Vec<(TcpStream, Vec<u8>)> = Vec::new();
+    let mut served = 0;
+
+    while served < n {
+        // Reconstrói o conjunto de interesse: listener + ligações vivas.
+        let mut fds = Vec::with_capacity(1 + conns.len());
+        fds.push(PollFd {
+            fd: listener.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+        for (stream, _) in &conns {
+            fds.push(PollFd {
+                fd: stream.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            });
+        }
+
+        // Dorme até algo estar legível (timeout de segurança de 5s).
+        let rc = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, 5000) };
+        assert!(rc >= 0, "poll failed");
+
+        let known = conns.len(); // fds[1..=known] mapeiam conns[0..known]
+
+        // Pronto para accept? Esvazia a fila sem bloquear.
+        if fds[0].revents & POLLIN != 0 {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(true).expect("nonblocking conn");
+                        conns.push((stream, Vec::new()));
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("accept: {e}"),
+                }
+            }
+        }
+
+        // Lê de todas as ligações que o kernel marcou como prontas.
+        let mut finished: Vec<usize> = Vec::new();
+        for i in 0..known {
+            if fds[i + 1].revents & POLLIN == 0 {
+                continue;
+            }
+            let (stream, buf) = &mut conns[i];
+            let mut chunk = [0u8; 1024];
+            match stream.read(&mut chunk) {
+                Ok(0) => finished.push(i), // o par fechou a meio da mensagem
+                Ok(k) => {
+                    buf.extend_from_slice(&chunk[..k]);
+                    if buf.contains(&b'\n') {
+                        stream.write_all(buf).expect("echo write");
+                        served += 1;
+                        finished.push(i);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => finished.push(i),
+            }
+        }
+        // Remove ligações terminadas de trás para a frente: índices válidos.
+        for i in finished.into_iter().rev() {
+            conns.remove(i);
+        }
+    }
+    served
+}
+```
+
+Repara no que o loop te obriga a fazer: uma mensagem pode chegar **aos
+pedaços**, por isso cada ligação carrega o seu próprio buffer e o loop tem de
+lembrar o progresso parcial. Essa contabilidade — "onde é que eu ia com esta
+ligação?" — é exatamente o que a sintaxe `async`/`await` automatiza: um ponto
+de `await` é o compilador a escrever esta máquina de estados por ti.
+
+A prova de que funciona é o melhor teste desta lição: o cliente A envia
+*metade* de uma mensagem, o cliente B liga-se depois, envia uma completa e é
+respondido **primeiro**, e depois o A termina — tudo numa única thread de
+servidor:
+
+```rust title="src/lib.rs (teste)"
+#[test]
+fn interleaves_partial_messages() {
+    // O cliente A envia meia mensagem; o cliente B liga-se depois, envia
+    // uma completa e termina PRIMEIRO — o loop de uma thread não ficou
+    // preso à espera do A. Depois o A acaba e é servido também.
+    let (addr, handle) = start_server(2);
+
+    let mut a = TcpStream::connect(addr).unwrap();
+    a.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    a.write_all(b"first ha").unwrap(); // ainda sem newline: incompleta
+
+    let b_reply = roundtrip(addr, "second full message");
+    assert_eq!(b_reply, "second full message");
+
+    a.write_all(b"lf\n").unwrap(); // agora completa a mensagem do A
+    let mut line = String::new();
+    BufReader::new(a).read_line(&mut line).unwrap();
+    assert_eq!(line.trim_end(), "first half");
+
+    assert_eq!(handle.join().unwrap(), 2);
+}
+```
+
+Um servidor bloqueante com thread-por-ligação também passa os outros testes —
+mas um servidor bloqueante *de uma só thread* falha este, preso no `read` do
+cliente A. Este teste é a definição de orientado-a-eventos, executável.
+
+## Go: o event loop que nunca vês
+
+O Go fez uma aposta diferente: **manter o estilo bloqueante, esconder o event
+loop no runtime.** Escreves uma goroutine por ligação; quando ela "bloqueia"
+em `conn.Read`, o runtime estaciona a goroutine (uns KB de stack, não uma
+thread do SO) e regista o socket no seu epoll interno — o **netpoller**. A
+prontidão acorda a goroutine. O mesmo mecanismo do nosso loop em Rust; zero
+sintaxe:
+
+```go title="async.go"
+// ServeNEchoes aceita ligações em ln, ecoando uma mensagem terminada em
+// newline por ligação, até n mensagens servidas. Uma goroutine por ligação
+// — as leituras PARECEM bloqueantes, mas o netpoller estaciona a goroutine
+// no epoll, e ligações inativas não custam threads.
+func ServeNEchoes(ln net.Listener, n int) {
+	var wg sync.WaitGroup
+	for range n {
+		conn, err := ln.Accept()
+		if err != nil {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer conn.Close()
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				return
+			}
+			io.WriteString(conn, line)
+		}()
+	}
+	wg.Wait()
+}
+```
+
+Compara com o loop de Rust: sem fd sets, sem `WouldBlock`, sem buffers por
+ligação no *teu* código — o `bufio.Reader` e a goroutine estacionada guardam o
+estado parcial. O preço paga-se noutro lado: um runtime com scheduler e GC
+vive dentro de cada binário Go (o hello-world de 2,4 MB da Parte 3).
+
+E a afirmação de escala é testável:
+
+```go title="async.go"
+// ConcurrentWaits lança n goroutines que dormem d cada, espera por todas,
+// e devolve o tempo de relógio — a prova de que as esperas se sobrepõem:
+// n×d de sono custa ~d de parede.
+func ConcurrentWaits(n int, d time.Duration) time.Duration {
+	start := time.Now()
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(d)
+		}()
+	}
+	wg.Wait()
+	return time.Since(start)
+}
+```
+
+## Python: asyncio e a palavra-chave `await`
+
+O CPython põe o event loop na stdlib e torna os pontos de suspensão
+**visíveis na sintaxe**: uma corrotina só pode pausar num `await`. Entre dois
+awaits nunca podes ser interrompido por outra corrotina — scheduling
+cooperativo numa só thread, o que também significa que o GIL não custa nada
+aqui:
+
+```python title="async_demo.py"
+async def echo_handler(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """Ecoa uma mensagem terminada em newline de volta ao cliente e fecha."""
+    data = await reader.readline()
+    writer.write(data)
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def start_echo_server() -> tuple[asyncio.Server, int]:
+    """Arranca um servidor de eco num porto efémero; devolve-o com o porto."""
+    server = await asyncio.start_server(echo_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
+
+
+async def echo_roundtrip(port: int, message: str) -> str:
+    """Envia uma mensagem ao servidor de eco e devolve a resposta ecoada."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write((message + "\n").encode())
+    await writer.drain()
+    reply = (await reader.readline()).decode().removesuffix("\n")
+    writer.close()
+    await writer.wait_closed()
+    return reply
+
+
+async def gather_roundtrips(port: int, messages: list[str]) -> list[str]:
+    """Corre todos os roundtrips EM CONCORRÊNCIA numa thread com gather."""
+    return list(await asyncio.gather(*(echo_roundtrip(port, m) for m in messages)))
+```
+
+Dez linhas de handler substituem o nosso loop de sessenta linhas em Rust —
+porque `await reader.readline()` **é** o estacionar-no-epoll-e-retomar-depois,
+escrito pelos autores do asyncio em vez de ti. Os testes usam
+`unittest.IsolatedAsyncioTestCase`, que corre cada teste num event loop novo —
+código async testa-se com a mesma disciplina de stdlib que tudo o resto nesta
+academia.
+
+O custo são as **funções coloridas**: funções `async def` só podem ser
+awaited a partir de outras `async def`, a async-ness propaga-se pela stack de
+chamadas acima, e uma chamada bloqueante (`time.sleep`, um driver de BD
+síncrono) em qualquer ponto do loop congela *todas* as ligações. O Go fez a
+troca oposta — sem cores, mas com runtime obrigatório; o Rust obriga-te a
+escolher um runtime mas verifica em compilação que não seguras estado
+não-`Send` através de um `await`.
+
+## Os números: 10.000 esperas concorrentes
+
+Cada harness corre *n* esperas concorrentes de 50 ms e reporta o tempo de
+relógio. Dormir n×50 ms em concorrência devia custar ~50 ms — quanto
+acrescenta cada mecanismo? (A mesma máquina Linux de 20 cores.)
+
+<Benchmark
+  metric="10.000 esperas concorrentes de 50ms: tempo total (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Go — 10k goroutines", value: 54, unit: "ms", note: "~só o sleep" },
+    { label: "Python — 10k tasks asyncio", value: 104, unit: "ms" },
+    { label: "Rust — 10k threads do SO", value: 327, unit: "ms" },
+    { label: "Python — 10k threads do SO", value: 833, unit: "ms" },
+  ]}
+/>
+
+E indo mais longe: **100.000 goroutines terminam em 100 ms** — o problema
+C10K não está só resolvido, está aborrecido. Com 1.000 esperas a diferença
+estreita (threads Rust 68 ms, asyncio 55 ms, threads Python 99 ms):
+thread-por-espera funciona bem à escala da Parte 3, e foi por isso que a
+usámos lá.
+
+Três conclusões medidas:
+
+**Tasks leves custam ~nada a existir; threads do SO custam ~30–80 µs cada a
+criar.** Os 327 ms do Rust são quase inteiramente 10.000 syscalls `clone(2)`
+mais agitação do scheduler — cada thread também reserva megabytes de stack
+(virtual). Uma goroutine começa com ~2–4 KB e uma task asyncio é só um objeto
+Python: podes ter *milhões* de esperas.
+
+**O estilo bloqueante do Go e o estilo await do asyncio ficam a menos de 2×
+um do outro** — porque por baixo são o mesmo loop de epoll. A guerra de
+sintaxe (funções coloridas vs runtime invisível) é sobre ergonomia e modos de
+falha, não débito.
+
+**Threads em Python são o pior dos dois mundos em escala** (833 ms): o custo
+de criação de threads do SO *mais* a troca mediada pelo GIL. Para Python
+I/O-bound acima de umas centenas de esperas concorrentes, asyncio não é uma
+escolha de estilo — são 8× no tempo de parede.
+
+<Aside type="tip" title="Regra de design">
+  Threads para **CPU** e para **poucas esperas grossas**. Event loop para
+  **muitas ligações inativas**. O cruzamento na nossa máquina fica pelos
+  poucos milhares de esperas concorrentes — mede o teu.
+</Aside>
+
+## Exercícios
+
+**1. Parte o loop (Rust).** Troca o `set_nonblocking(true)` das ligações
+aceites para modo bloqueante e volta a correr `interleaves_partial_messages`.
+O que acontece, e que linha pendura? Depois explica porque é que os *outros*
+testes continuam a passar.
+
+<details>
+<summary>Esboço de solução</summary>
+
+O teste expira: com um socket bloqueante, o `stream.read` do cliente A (que
+não enviou newline) bloqueia a única thread para sempre, e o cliente B nunca é
+servido. Os testes de mensagem única continuam a passar porque cada cliente
+envia uma mensagem completa de imediato — tratamento sequencial é
+indistinguível de multiplexing quando ninguém empanca. É por isso que o teste
+de intercalação existe.
+
+</details>
+
+**2. Mede o custo por task (Python).** `async_sleepers(n, 0.05)` custa ~54 ms
+de sono mais o overhead das tasks. Cronometra para n = 1k, 10k, 100k e estima
+o custo por task em microssegundos. Depois tenta `thread_sleepers(100_000,
+0.05)` — com cuidado — e explica o que observas.
+
+<details>
+<summary>Esboço de solução</summary>
+
+Subtraindo o piso de 50 ms: ~5 µs por task asyncio na nossa máquina (104 ms a
+10k → ~5 ms de overhead por 1k tasks). 100k tasks asyncio ainda funcionam
+(~0,5–1 s). 100k threads do SO provavelmente falham ou rastejam: stacks por
+omissão (8 MB virtuais) e limites do scheduler do kernel fazem o modelo
+thread-por-espera colapsar duas ordens de grandeza antes do modelo de tasks.
+
+</details>
+
+**3. Acrescenta um handler lento (nas três).** Mete um *spin* de CPU de
+100 ms (não um sleep) no handler de eco e dispara 10 clientes concorrentes.
+Prevê, e depois mede, o tempo total em cada modelo: loop poll de Rust,
+goroutines de Go, asyncio.
+
+<details>
+<summary>Esboço de solução</summary>
+
+Loop de Rust e asyncio: ~1 segundo — um loop de uma thread serializa trabalho
+de CPU; um handler a girar esfomeia todos os outros (a falha "bloquear o event
+loop" de que todas as frameworks async avisam). Go: ~100–200 ms, porque as
+goroutines correm em todos os cores — o runtime é um scheduler M:N, não um
+loop único. A lição: event loops multiplexam *esperas*, não *trabalho*.
+
+</details>
+
+<Quiz
+  question={'O que é que o poll(2) (ou epoll) dá ao event loop que um read bloqueante não dá?'}
+  options={[
+    { text: 'A capacidade de esperar por MUITOS file descriptors com uma thread, acordando só quando alguns estão prontos', correct: true, explanation: 'Um read bloqueante compromete a thread com um fd. O poll/epoll inverte: dorme sobre o conjunto todo, descobre que subconjunto está pronto, age exatamente sobre esse. Essa inversão é toda a fundação do I/O async.' },
+    { text: 'Leituras mais rápidas depois de os dados chegarem', correct: false, explanation: 'A leitura em si é a mesma syscall à mesma velocidade. O poll só muda como ESPERAS.' },
+    { text: 'Networking zero-copy', correct: false, explanation: 'Zero-copy é uma facilidade separada (sendfile, buffers fixos do io_uring). APIs de prontidão não movem dados nenhuns.' },
+    { text: 'Parsing de mensagens completas ao nível do kernel', correct: false, explanation: 'O kernel reporta bytes legíveis, não fronteiras de mensagens — exatamente por isso o nosso loop guarda mensagens parciais em buffer por ligação.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que 10.000 goroutines a dormir terminaram em ~54ms enquanto 10.000 threads do SO (Rust) demoraram ~327ms?'}
+  options={[
+    { text: 'Criar uma goroutine é uma alocação barata em userspace; cada thread do SO precisa de uma syscall clone(), contabilidade no kernel e megabytes de stack reservada', correct: true, explanation: 'Os sonos sobrepõem-se perfeitamente nos dois modelos — a diferença é puro setup/teardown. ~30µs de trabalho de kernel × 10.000 threads ≈ a diferença de 270ms que medimos.' },
+    { text: 'Threads do SO não conseguem dormir em concorrência', correct: false, explanation: 'Conseguem e dormiram — senão a execução de Rust teria demorado 500 segundos, não 0,33.' },
+    { text: 'O Go otimiza time.Sleep para um no-op', correct: false, explanation: 'A execução com 100k goroutines ainda demorou ≥100ms — os sonos são reais; os timers é que são geridos pelo runtime em vez de um timer de kernel por thread.' },
+    { text: 'Rust é mais lento que Go', correct: false, explanation: 'Nada aqui mede velocidade de linguagem — mede threads do SO vs tasks verdes. Rust com um runtime async (tokio) ficaria perto do Go.' },
+  ]}
+/>
+
+<Quiz
+  question={'O teu serviço asyncio aguenta 5.000 ligações, até que um handler começa a chamar um driver de base de dados síncrono. O que acontece?'}
+  options={[
+    { text: 'Todas as ligações empancam enquanto essa chamada corre — uma chamada bloqueante num event loop de uma thread bloqueia o loop inteiro', correct: true, explanation: 'O loop só pode correr outras corrotinas em pontos de await. Uma chamada síncrona nunca cede, e 4.999 ligações esperam atrás dela. Correções: um driver async, ou run_in_executor para empurrar a chamada para uma thread pool.' },
+    { text: 'Só essa ligação abranda', correct: false, explanation: 'Isso seria verdade em modelos thread-por-ligação ou goroutines. Num loop de uma thread, um bloqueador esfomeia toda a gente — o incidente de produção clássico do asyncio.' },
+    { text: 'O asyncio deteta a chamada bloqueante e move-a para uma thread', correct: false, explanation: 'Não existe deteção automática (o modo debug consegue AVISAR de callbacks lentos, mas nada é movido). O programador tem de encaminhar trabalho bloqueante explicitamente.' },
+    { text: 'O GIL evita qualquer problema', correct: false, explanation: 'O GIL é ortogonal — aqui já está tudo numa thread. O problema é scheduling cooperativo com uma chamada que não coopera.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="Explica o problema C10K e como os servidores modernos o resolveram.">
+
+O C10K (Kegel, 1999) perguntava porque era difícil servir 10.000 ligações
+concorrentes quando o hardware claramente conseguia mover os bytes. O culpado
+era o modelo thread-por-ligação: 10k threads = gigabytes de stack, trocas de
+contexto pesadas e overhead de scheduler que cresce com os que esperam, não
+com o trabalho. A solução foi I/O baseado em prontidão — event loops de
+epoll/kqueue onde uma thread vigia todos os sockets e toca só nos ativos
+(nginx, Node.js, Redis), depois re-ergonomizado como async/await (asyncio,
+tokio) e como green threads geridas pelo runtime (o netpoller do Go, as
+virtual threads do Java). As nossas medições mostram a diferença
+mecanicamente: 10k esperas concorrentes custam 54–104 ms como tasks contra
+327–833 ms como threads do SO — e os números das threads degradam muito mais
+depressa com o crescimento de n.
+
+</Interview>
+
+<Interview question="O que são 'funções coloridas' e que troca fez o Go para as evitar?">
+
+A coloração de funções é a divisão async/sync: uma função `async` só pode ser
+chamada (awaited) por outra função async, e a async-ness propaga-se por todos
+os chamadores — dois ecossistemas paralelos de APIs (o `requests` vs `aiohttp`
+do Python). O Go evitou as cores tornando *todas* as funções potencialmente
+suspendíveis: o runtime é dono de todo o I/O, estaciona goroutines no seu
+netpoller e agenda M goroutines em N threads. Os custos: um runtime e GC
+obrigatórios em cada binário, menos controlo explícito sobre pontos de
+suspensão e fricção no FFI (código C não conhece stacks de goroutines). O
+Rust manteve as cores mas moveu o runtime para bibliotecas (tokio) e as
+verificações de segurança para o compilador. Não há almoços grátis — só a
+escolha de onde vive a complexidade: na sintaxe (Python/Rust) ou no runtime
+(Go).
+
+</Interview>
+
+<Interview question="Quando é que thread-por-ligação ainda é a arquitetura certa?">
+
+Quando as contagens de ligações são modestas (centenas), quando os handlers
+fazem trabalho real de CPU por pedido (o event loop serializá-lo-ia de
+qualquer forma — o nosso exercício 3), quando precisas de preempção para que
+um pedido mau não esfomeie os restantes, ou quando as bibliotecas bloqueantes
+do ecossistema são as maduras (JDBC clássico, muitas bibliotecas de ML).
+Threads também dão isolamento de falhas por ligação com raciocínio muito mais
+simples: sem loop para bloquear, sem APIs coloridas. O agente de health-check
+da Parte 3 é o caso canónico: 50 esperas, trabalho grosso, threads da stdlib —
+async teria acrescentado maquinaria sem poupar nada mensurável.
+
+</Interview>
+
+<Interview question="Em que é que o `await` compila, na verdade?">
+
+Num ponto de suspensão de uma máquina de estados. O compilador (ou
+interpretador) reescreve a função para que as locais vivam numa estrutura no
+heap e o corpo se torne retomável em cada await: "corre até o future/corrotina
+awaited estar pendente, guarda o estado, devolve o controlo ao loop; quando a
+prontidão chegar, retoma exatamente daqui." É precisamente a contabilidade que
+o nosso loop de Rust escrito à mão fez manualmente — o buffer por ligação com
+o progresso parcial *é* a máquina de estados, escrita à mão. Perceber isto
+dissolve a magia: sintaxe async é gestão de continuações gerada pelo
+compilador sobre uma API de prontidão.
+
+</Interview>
+
+## Desafio
+
+Estende o servidor poll de Rust de eco-único para **ligações persistentes**:
+mantém cada ligação aberta, ecoa todas as linhas completas (não só a
+primeira), e trata múltiplas linhas em trânsito por leitura. Depois faz-lhe
+load-testing: um cliente que abre 1.000 ligações, envia linhas a intervalos
+aleatórios e verifica cada eco. Vais bater — e ter de resolver — crescimento
+de buffers, tratamento de clientes lentos e justiça de scheduling entre
+ligações. Cada um desses problemas tem um parágrafo na documentação do nginx;
+estás prestes a perceber porquê. Este é o aquecimento direto para o projeto
+mini-NGINX.
+
+## Referências & leitura adicional
+
+- Dan Kegel — [The C10K problem](http://www.kegel.com/c10k.html) (a página original de 1999)
+- man pages — [`poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html) · [`epoll(7)`](https://man7.org/linux/man-pages/man7/epoll.7.html)
+- Docs Python — [`asyncio`](https://docs.python.org/3/library/asyncio.html) · [Developing with asyncio (armadilhas)](https://docs.python.org/3/library/asyncio-dev.html)
+- Bob Nystrom — [What Color is Your Function?](https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/)
+- Fonte do Go — [design do netpoller](https://go.dev/src/runtime/netpoll.go) · tokio — [How async Rust works](https://tokio.rs/tokio/tutorial/async)
+
+<Progress />

@@ -1,0 +1,12 @@
+[package]
+name = "part4-async-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the event loop calls poll(2) directly through FFI (the
+# technique from the Part 1 Unsafe & FFI lesson) — the same syscall family
+# every async runtime is built on.
+
+[[bin]]
+name = "async-bench"
+path = "src/main.rs"

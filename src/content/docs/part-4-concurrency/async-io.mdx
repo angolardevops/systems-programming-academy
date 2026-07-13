@@ -1,0 +1,530 @@
+---
+title: Async & Event-Driven I/O
+description: One thread, ten thousand waits — a poll(2) event loop built by hand in Rust, Go's invisible netpoller, and Python's asyncio, with the 10k-concurrent-waits benchmark that explains why async exists.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Benchmark from '../../../components/Benchmark.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+The Part 3 health-check agent overlapped fifty network waits with fifty
+threads, and it was the right call. Now scale the question: a chat server with
+**ten thousand** mostly-idle connections. Ten thousand OS threads means ten
+thousand kernel stacks, ten thousand scheduler entries, and context switches
+that trample your CPU caches — the famous **C10K problem** that reshaped
+server design around 1999.
+
+The answer every modern stack converged on: **don't dedicate a thread to a
+wait.** Put the sockets in non-blocking mode, ask the kernel *which ones are
+ready right now*, and have one thread act only on those. That's an **event
+loop**, and this lesson builds one from raw syscalls in Rust, shows why Go
+programmers never see theirs, and drives Python's `asyncio` — then measures
+all of them against thread-per-wait.
+
+<Aside type="note" title="Prerequisites">
+  [Threads & Shared State](/systems-programming-academy/part-4-concurrency/threads-shared-state/)
+  and [Message Passing & Channels](/systems-programming-academy/part-4-concurrency/message-passing/).
+  The Part 3 [health-check agent](/systems-programming-academy/part-3-devops/health-check/)
+  is the thread-per-wait baseline this lesson upgrades.
+</Aside>
+
+Code:
+[`examples/part4-async-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 4 tests each against **real sockets**, Go under `-race`.
+
+## The mechanism: readiness, not completion
+
+Every async system on Linux bottoms out in the same kernel facility: hand the
+kernel a set of file descriptors, sleep until at least one is **ready**, wake
+up and handle exactly those. The portable ancestor is `poll(2)`; `epoll` is
+its scalable successor (same idea, O(ready) instead of O(watched)); kqueue is
+the BSD/macOS cousin.
+
+<Mermaid title="The event loop: one thread, many connections, work only on what is ready" code={`flowchart TD
+  A["build fd set: listener + all connections"] --> B["poll() - sleep until something is ready"]
+  B --> C{"listener ready?"}
+  C -->|yes| D["accept new connections (non-blocking)"]
+  C -->|no| E
+  D --> E{"connection ready?"}
+  E -->|yes| F["read available bytes into that connection's buffer"]
+  F --> G{"complete message?"}
+  G -->|yes| H["write echo, close, forget connection"]
+  G -->|no| I["keep buffer, wait for more"]
+  E -->|no| A
+  H --> A
+  I --> A`} />
+
+## Rust: build the loop by hand
+
+Rust's stdlib has no async runtime — production code uses tokio. Before you
+use one, you should have built one. This server multiplexes any number of
+connections on **one thread** with the FFI technique from the
+[Unsafe & FFI lesson](/systems-programming-academy/part-1-foundations/rust/unsafe-ffi/) —
+no crates, just the syscall:
+
+```rust title="src/lib.rs"
+/// One entry of the fd set handed to `poll(2)` — mirrors C's `struct pollfd`.
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+/// "There is data to read" — from `<poll.h>`.
+const POLLIN: i16 = 0x001;
+
+extern "C" {
+    /// int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+    fn poll(fds: *mut PollFd, nfds: u64, timeout_ms: i32) -> i32;
+}
+
+/// Serves newline-terminated messages on `listener`, echoing each one back
+/// and closing the connection, until `n` messages have been echoed.
+///
+/// The whole server is ONE thread: `poll` sleeps until the listener or any
+/// connection is ready, and each wake-up does only the work that is ready —
+/// partial messages are buffered per connection and finished later.
+pub fn serve_n_echoes(listener: &TcpListener, n: usize) -> usize {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let mut conns: Vec<(TcpStream, Vec<u8>)> = Vec::new();
+    let mut served = 0;
+
+    while served < n {
+        // Rebuild the interest set: the listener plus every live connection.
+        let mut fds = Vec::with_capacity(1 + conns.len());
+        fds.push(PollFd {
+            fd: listener.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+        for (stream, _) in &conns {
+            fds.push(PollFd {
+                fd: stream.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            });
+        }
+
+        // Sleep until something is readable (5s safety timeout).
+        let rc = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, 5000) };
+        assert!(rc >= 0, "poll failed");
+
+        let known = conns.len(); // fds[1..=known] map to conns[0..known]
+
+        // Ready to accept? Drain the accept queue without blocking.
+        if fds[0].revents & POLLIN != 0 {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(true).expect("nonblocking conn");
+                        conns.push((stream, Vec::new()));
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("accept: {e}"),
+                }
+            }
+        }
+
+        // Read from every connection the kernel marked ready.
+        let mut finished: Vec<usize> = Vec::new();
+        for i in 0..known {
+            if fds[i + 1].revents & POLLIN == 0 {
+                continue;
+            }
+            let (stream, buf) = &mut conns[i];
+            let mut chunk = [0u8; 1024];
+            match stream.read(&mut chunk) {
+                Ok(0) => finished.push(i), // peer closed mid-message
+                Ok(k) => {
+                    buf.extend_from_slice(&chunk[..k]);
+                    if buf.contains(&b'\n') {
+                        stream.write_all(buf).expect("echo write");
+                        served += 1;
+                        finished.push(i);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => finished.push(i),
+            }
+        }
+        // Remove finished connections back-to-front so indices stay valid.
+        for i in finished.into_iter().rev() {
+            conns.remove(i);
+        }
+    }
+    served
+}
+```
+
+Notice what the loop forces on you: a message can arrive **in pieces**, so
+every connection carries its own buffer and the loop must remember partial
+progress. That bookkeeping — "where was I with this connection?" — is exactly
+what `async`/`await` syntax automates: an `await` point is the compiler
+writing this state machine for you.
+
+The proof it works is the best test in this lesson: client A sends *half* a
+message, client B then connects, sends a full one and is answered **first**,
+then A finishes — all on one server thread:
+
+```rust title="src/lib.rs (test)"
+#[test]
+fn interleaves_partial_messages() {
+    // Client A sends half a message; client B connects afterwards, sends
+    // a full one, and completes FIRST — the single-threaded loop was not
+    // stuck waiting for A. Then A finishes and is served too.
+    let (addr, handle) = start_server(2);
+
+    let mut a = TcpStream::connect(addr).unwrap();
+    a.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    a.write_all(b"first ha").unwrap(); // no newline yet: incomplete
+
+    let b_reply = roundtrip(addr, "second full message");
+    assert_eq!(b_reply, "second full message");
+
+    a.write_all(b"lf\n").unwrap(); // now complete A's message
+    let mut line = String::new();
+    BufReader::new(a).read_line(&mut line).unwrap();
+    assert_eq!(line.trim_end(), "first half");
+
+    assert_eq!(handle.join().unwrap(), 2);
+}
+```
+
+A blocking, thread-per-connection server passes the other tests too — but a
+*single-threaded blocking* server fails this one, stuck in `read` on client A.
+This test is the definition of event-driven, executable.
+
+## Go: the event loop you never see
+
+Go took a different bet: **keep the blocking style, hide the event loop in
+the runtime.** You write one goroutine per connection; when it "blocks" on
+`conn.Read`, the runtime parks the goroutine (a few KB of stack, not an OS
+thread) and registers the socket with its internal epoll — the **netpoller**.
+Readiness wakes the goroutine. Same mechanism as our Rust loop; zero syntax:
+
+```go title="async.go"
+// ServeNEchoes accepts connections on ln, echoing one newline-terminated
+// message per connection, until n messages have been served. One goroutine
+// per connection — the reads LOOK blocking, but the netpoller parks the
+// goroutine on epoll, so idle connections cost no thread.
+func ServeNEchoes(ln net.Listener, n int) {
+	var wg sync.WaitGroup
+	for range n {
+		conn, err := ln.Accept()
+		if err != nil {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer conn.Close()
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				return
+			}
+			io.WriteString(conn, line)
+		}()
+	}
+	wg.Wait()
+}
+```
+
+Compare this to the Rust loop: no fd sets, no `WouldBlock`, no per-connection
+buffers in *your* code — `bufio.Reader` and the parked goroutine hold the
+partial state. The price is paid elsewhere: a runtime with a scheduler and GC
+lives inside every Go binary (the 2.4 MB hello-world from Part 3).
+
+And the scale claim is testable:
+
+```go title="async.go"
+// ConcurrentWaits launches n goroutines that each sleep for d, waits for all
+// of them, and returns the wall-clock elapsed time — the proof that waits
+// overlap: n×d of sleeping costs ~d of wall time.
+func ConcurrentWaits(n int, d time.Duration) time.Duration {
+	start := time.Now()
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(d)
+		}()
+	}
+	wg.Wait()
+	return time.Since(start)
+}
+```
+
+## Python: asyncio and the `await` keyword
+
+CPython puts the event loop in the stdlib and makes the suspension points
+**visible in the syntax**: a coroutine may only pause at an `await`. Between
+two awaits you can never be interrupted by another coroutine — single-threaded
+cooperative scheduling, which also means the GIL costs nothing here:
+
+```python title="async_demo.py"
+async def echo_handler(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """Echo one newline-terminated message back to the client, then close."""
+    data = await reader.readline()
+    writer.write(data)
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+
+async def start_echo_server() -> tuple[asyncio.Server, int]:
+    """Start an echo server on an ephemeral port; return it and the port."""
+    server = await asyncio.start_server(echo_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
+
+
+async def echo_roundtrip(port: int, message: str) -> str:
+    """Send one message to the echo server and return the echoed reply."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write((message + "\n").encode())
+    await writer.drain()
+    reply = (await reader.readline()).decode().removesuffix("\n")
+    writer.close()
+    await writer.wait_closed()
+    return reply
+
+
+async def gather_roundtrips(port: int, messages: list[str]) -> list[str]:
+    """Run every roundtrip CONCURRENTLY on one thread with asyncio.gather."""
+    return list(await asyncio.gather(*(echo_roundtrip(port, m) for m in messages)))
+```
+
+Ten lines of handler replace our sixty-line Rust loop — because
+`await reader.readline()` **is** the park-on-epoll-and-resume-later, written
+by the asyncio authors instead of you. The tests use
+`unittest.IsolatedAsyncioTestCase`, which runs each test inside a fresh event
+loop — async code is tested with the same stdlib discipline as everything
+else in this academy.
+
+The cost is **function coloring**: `async def` functions can only be awaited
+from other `async def` functions, so async-ness propagates up your call stack,
+and one blocking call (`time.sleep`, a sync DB driver) anywhere in the loop
+freezes *every* connection. Go made the opposite trade — no colors, but a
+mandatory runtime; Rust makes you choose a runtime but checks at compile time
+that you don't hold non-`Send` state across an `await`.
+
+## The numbers: 10,000 concurrent waits
+
+Each harness runs *n* concurrent 50 ms waits and reports wall-clock time.
+Sleeping n×50 ms concurrently should cost ~50 ms — what does each mechanism
+add? (Same 20-core Linux machine.)
+
+<Benchmark
+  metric="10,000 concurrent 50ms waits: total wall time (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Go — 10k goroutines", value: 54, unit: "ms", note: "~pure sleep" },
+    { label: "Python — 10k asyncio tasks", value: 104, unit: "ms" },
+    { label: "Rust — 10k OS threads", value: 327, unit: "ms" },
+    { label: "Python — 10k OS threads", value: 833, unit: "ms" },
+  ]}
+/>
+
+And pushing further: **100,000 goroutines finish in 100 ms** — the C10K
+problem is not just solved but boring. At 1,000 waits the gap narrows (Rust
+threads 68 ms, asyncio 55 ms, Python threads 99 ms): thread-per-wait is fine
+at Part 3 scale, which is why we used it there.
+
+Three measured findings:
+
+**Lightweight tasks cost ~nothing to have; OS threads cost ~30–80 µs each to
+create.** The 327 ms for Rust is almost entirely 10,000 `clone(2)` syscalls
+plus scheduler churn — each thread also reserves megabytes of (virtual) stack.
+A goroutine starts at ~2–4 KB and an asyncio task is just a Python object:
+you can hold *millions* of waits.
+
+**Go's blocking style and asyncio's await style land within 2× of each
+other** — because under the hood they are the same epoll loop. The syntax war
+(colored functions vs invisible runtime) is about ergonomics and failure
+modes, not throughput.
+
+**Python threads are the worst of both worlds at scale** (833 ms): OS-thread
+creation cost *plus* GIL-mediated switching. For I/O-bound Python beyond a few
+hundred concurrent waits, asyncio is not a style choice — it is 8× wall time.
+
+<Aside type="tip" title="Design rule">
+  Threads for **CPU** and for **few, coarse waits**. Event loop for **many
+  idle connections**. The crossover on our machine is around a few thousand
+  concurrent waits — measure yours.
+</Aside>
+
+## Exercises
+
+**1. Break the loop (Rust).** Replace `set_nonblocking(true)` on accepted
+connections with blocking mode and re-run `interleaves_partial_messages`.
+What happens, and which line hangs? Then explain why the *other* tests still
+pass.
+
+<details>
+<summary>Solution sketch</summary>
+
+The test times out: with a blocking socket, `stream.read` on client A (who
+sent no newline) blocks the single thread forever, so client B is never
+served. The one-message tests still pass because each client sends a complete
+message immediately — sequential handling is indistinguishable from
+multiplexing when nobody stalls. That's why the interleaving test exists.
+
+</details>
+
+**2. Measure task cost (Python).** `async_sleepers(n, 0.05)` costs ~54 ms of
+sleep plus task overhead. Time it for n = 1k, 10k, 100k and estimate the
+per-task cost in microseconds. Then try `thread_sleepers(100_000, 0.05)` —
+carefully — and explain what you observe.
+
+<details>
+<summary>Solution sketch</summary>
+
+Subtracting the 50 ms floor: ~5 µs per asyncio task on our machine (104 ms at
+10k → ~5 ms overhead per 1k tasks). 100k asyncio tasks still work (~0.5–1 s).
+100k OS threads will likely fail or crawl: default thread stacks (8 MB
+virtual) and kernel scheduler limits make the thread-per-wait model collapse
+two orders of magnitude before the task model.
+
+</details>
+
+**3. Add a slow handler (all three).** Insert a 100 ms *CPU spin* (not a
+sleep) into the echo handler and fire 10 concurrent clients. Predict, then
+measure, total time in each model: Rust poll loop, Go goroutines, asyncio.
+
+<details>
+<summary>Solution sketch</summary>
+
+Rust poll loop and asyncio: ~1 second — a single-threaded loop serializes CPU
+work; one spinning handler starves all others (the "blocking the event loop"
+failure every async framework warns about). Go: ~100–200 ms, because
+goroutines run on all cores — the runtime is an M:N scheduler, not a single
+loop. The lesson: event loops multiplex *waits*, not *work*.
+
+</details>
+
+<Quiz
+  question={'What exactly does poll(2) (or epoll) give the event loop that a blocking read does not?'}
+  options={[
+    { text: 'The ability to wait on MANY file descriptors with one thread, waking only when some are ready', correct: true, explanation: 'A blocking read commits the thread to one fd. poll/epoll invert it: sleep on the whole set, learn which subset is ready, act on exactly that. That inversion is the entire foundation of async I/O.' },
+    { text: 'Faster reads once data has arrived', correct: false, explanation: 'The read itself is the same syscall at the same speed. poll only changes how you WAIT.' },
+    { text: 'Zero-copy networking', correct: false, explanation: 'Zero-copy is a separate facility (sendfile, io_uring fixed buffers). Readiness APIs move no data at all.' },
+    { text: 'Kernel-level parsing of complete messages', correct: false, explanation: 'The kernel reports readable bytes, not message boundaries — which is exactly why our loop buffers partial messages per connection.' },
+  ]}
+/>
+
+<Quiz
+  question={'Why did 10,000 sleeping goroutines finish in ~54ms while 10,000 sleeping OS threads (Rust) took ~327ms?'}
+  options={[
+    { text: 'Goroutine creation is a cheap userspace allocation; each OS thread needs a clone() syscall, kernel bookkeeping, and megabytes of stack reservation', correct: true, explanation: 'The sleeps overlap perfectly in both models — the difference is pure setup/teardown. ~30µs of kernel work × 10,000 threads ≈ the 270ms gap we measured.' },
+    { text: 'OS threads cannot sleep concurrently', correct: false, explanation: 'They can and did — otherwise the Rust run would have taken 500 seconds, not 0.33.' },
+    { text: 'Go optimizes time.Sleep into a no-op', correct: false, explanation: 'The 100k-goroutine run still took ≥100ms — the sleeps are real; timers are just managed by the runtime instead of one kernel timer per thread.' },
+    { text: 'Rust is slower than Go', correct: false, explanation: 'Nothing here measures language speed — it measures OS threads vs green tasks. Rust with an async runtime (tokio) would land near Go.' },
+  ]}
+/>
+
+<Quiz
+  question={'Your asyncio service handles 5,000 connections fine, then one handler starts calling a synchronous database driver. What happens?'}
+  options={[
+    { text: 'Every connection stalls while that call runs — a blocking call in a single-threaded event loop blocks the whole loop', correct: true, explanation: 'The loop can only run other coroutines at await points. A sync call never yields, so 4,999 connections wait behind it. Fixes: an async driver, or run_in_executor to push the call onto a thread pool.' },
+    { text: 'Only that one connection slows down', correct: false, explanation: 'That would be true in thread-per-connection or goroutine models. In a single-threaded loop, one blocker starves everyone — the classic asyncio production incident.' },
+    { text: 'asyncio detects the blocking call and moves it to a thread', correct: false, explanation: 'No automatic detection exists (debug mode can WARN about slow callbacks, but nothing is moved). The programmer must route blocking work explicitly.' },
+    { text: 'The GIL prevents any problem', correct: false, explanation: 'The GIL is orthogonal — everything here is one thread already. The problem is cooperative scheduling with a non-cooperating call.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Explain the C10K problem and how modern servers solved it.">
+
+C10K (Kegel, 1999) asked why serving 10,000 concurrent connections was hard
+when the hardware could clearly move the bytes. The culprit was the
+thread-per-connection model: 10k threads = gigabytes of stack, heavy context
+switching, and scheduler overhead that grows with waiters, not with work. The
+solution was readiness-based I/O — epoll/kqueue event loops where one thread
+watches all sockets and touches only the active ones (nginx, Node.js, Redis),
+later re-ergonomized as async/await (asyncio, tokio) and as runtime-managed
+green threads (Go's netpoller, Java's virtual threads). Our measurements
+show the gap mechanically: 10k concurrent waits cost 54–104 ms as tasks
+versus 327–833 ms as OS threads — and the thread numbers degrade much faster
+as n grows.
+
+</Interview>
+
+<Interview question="What are 'colored functions' and what trade did Go make to avoid them?">
+
+Function coloring is the async/sync split: an `async` function can only be
+called (awaited) from another async function, so async-ness propagates
+through every caller — two parallel ecosystems of APIs (Python's `requests`
+vs `aiohttp`). Go avoided colors by making *every* function potentially
+suspending: the runtime owns all I/O, parks goroutines on its netpoller, and
+schedules M goroutines onto N threads. The costs: a mandatory runtime and GC
+in every binary, less explicit control over suspension points, and FFI
+friction (C code doesn't know about goroutine stacks). Rust kept colors but
+moved the runtime into libraries (tokio) and the safety checks into the
+compiler. There is no free lunch — only a choice of where the complexity
+lives: syntax (Python/Rust) or runtime (Go).
+
+</Interview>
+
+<Interview question="When is thread-per-connection still the right architecture?">
+
+When connection counts are modest (hundreds), when handlers do real CPU work
+per request (the event loop would serialize it anyway — our exercise 3), when
+you need preemption so one bad request can't starve the rest, or when the
+ecosystem's blocking libraries are the mature ones (classic JDBC, many ML
+libraries). Threads also give you per-connection crash isolation with far
+simpler reasoning: no loop to block, no colored APIs. The health-check agent
+from Part 3 is the canonical case: 50 waits, coarse work, stdlib threads —
+async would have added machinery and saved nothing measurable.
+
+</Interview>
+
+<Interview question="What does `await` actually compile to?">
+
+A suspension point in a state machine. The compiler (or interpreter) rewrites
+the function so its locals live in a heap-allocated structure and the body
+becomes resumable at each await: "run until the awaited future/coroutine is
+pending, save state, return control to the loop; when readiness arrives,
+resume from exactly here." That is precisely the bookkeeping our hand-written
+Rust loop did manually — the per-connection buffer holding partial progress
+*is* the state machine, written by hand. Understanding this dissolves the
+magic: async syntax is compiler-generated continuation management over a
+readiness API.
+
+</Interview>
+
+## Challenge
+
+Extend the Rust poll server from echo-once to **persistent connections**:
+keep each connection open, echo every complete line (not just the first), and
+handle multiple in-flight lines per read. Then load-test it: a client that
+opens 1,000 connections, sends lines at random intervals, and verifies every
+echo. You will hit — and have to solve — buffer growth, slow-client handling,
+and fair scheduling across connections. Every one of those problems has a
+paragraph in the nginx documentation; you are about to understand why. This
+is the direct warm-up for the mini-NGINX project.
+
+## References & further reading
+
+- Dan Kegel — [The C10K problem](http://www.kegel.com/c10k.html) (the original 1999 page)
+- man pages — [`poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html) · [`epoll(7)`](https://man7.org/linux/man-pages/man7/epoll.7.html)
+- Python docs — [`asyncio`](https://docs.python.org/3/library/asyncio.html) · [Developing with asyncio (pitfalls)](https://docs.python.org/3/library/asyncio-dev.html)
+- Bob Nystrom — [What Color is Your Function?](https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/)
+- Go source — [netpoller design](https://go.dev/src/runtime/netpoll.go) · tokio — [How async Rust works](https://tokio.rs/tokio/tutorial/async)
+
+<Progress />

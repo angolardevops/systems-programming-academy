@@ -44,6 +44,7 @@ jobs:
           - part3-healthcheck-rust
           - part4-threads-rust
           - part4-channels-rust
+          - part4-async-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -80,6 +81,7 @@ jobs:
           - part3-healthcheck-go
           - part4-threads-go
           - part4-channels-go
+          - part4-async-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -115,6 +117,7 @@ jobs:
           - part3-healthcheck-py
           - part4-threads-py
           - part4-channels-py
+          - part4-async-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}

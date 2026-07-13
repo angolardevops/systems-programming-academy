@@ -269,6 +269,12 @@ export default defineConfig({
               slug: 'part-4-concurrency/message-passing',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Async & Event-Driven I/O',
+              translations: { 'pt-BR': 'Async & I/O Orientado a Eventos' },
+              slug: 'part-4-concurrency/async-io',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],
