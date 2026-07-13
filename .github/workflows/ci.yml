@@ -45,6 +45,7 @@ jobs:
           - part4-threads-rust
           - part4-channels-rust
           - part4-async-rust
+          - part4-mininginx-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -82,6 +83,7 @@ jobs:
           - part4-threads-go
           - part4-channels-go
           - part4-async-go
+          - part4-mininginx-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -118,6 +120,7 @@ jobs:
           - part4-threads-py
           - part4-channels-py
           - part4-async-py
+          - part4-mininginx-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
