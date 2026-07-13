@@ -352,6 +352,12 @@ export default defineConfig({
               slug: 'capstone/running-app',
               badge: { text: 'Live app', variant: 'tip' },
             },
+            {
+              label: 'The Three Languages, Compared',
+              translations: { 'pt-BR': 'As Três Linguagens, Comparadas' },
+              slug: 'capstone/three-languages',
+              badge: { text: 'Synthesis', variant: 'note' },
+            },
           ],
         },
       ],

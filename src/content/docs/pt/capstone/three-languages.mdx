@@ -1,0 +1,297 @@
+---
+title: "As Três Linguagens: Uma Comparação Medida"
+description: "Noventa páginas a ensinar Python, Go e Rust umas contra as outras produziram números reais — tempos de arranque, memória, débito, o custo de um lock. A síntese do que as medições dizem de facto, e como escolher, ancorado inteiramente nos dados da própria academia."
+difficulty: intermediate
+estimatedMinutes: 22
+languages: [python, go, rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={22} languages={["python", "go", "rust"]} />
+
+Esta academia ensinou três linguagens não em paralelo mas **umas contra as
+outras** — o mesmo programa, construído de três formas, medido na mesma máquina.
+Essa estrutura foi a pedagogia inteira: um trade-off que consegues *ver num
+número* é compreendido de uma forma que um parágrafo nunca entrega. Esta reflexão
+final reúne esses números num só sítio e faz a pergunta que todo o engenheiro
+acaba por enfrentar: **que linguagem, e porquê?**
+
+Todos os valores abaixo foram medidos numa lição anterior, na mesma máquina Linux
+de 20 cores, e estão ligados à sua origem. Nada aqui é sensação; são os dados da
+própria academia, sintetizados.
+
+<Aside type="caution" title="Os números são verdadeiros, os rankings não">
+  Estas medições são honestas para o que mediram — cargas específicas, uma
+  máquina, uma tarde. São inúteis como ranking universal. "Rust é o mais rápido" é
+  a lição errada; "eis exatamente o que cada escolha custa neste tipo de trabalho,
+  por isso mede o teu" é a certa. Lê os números como prova de *como pensar*, não
+  como uma tabela classificativa.
+</Aside>
+
+## Arranque e footprint: o que pagas para existir
+
+Antes de fazer trabalho nenhum, um programa paga para arrancar e para ocupar
+memória. Para uma CLI invocada milhares de vezes num pipeline, ou um sidecar que
+corres às centenas, este é muitas vezes o número que decide.
+
+<Benchmark
+  metric="Arranque a frio (input vazio) — do projeto log-analyzer (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust (binário nativo)", value: 2, unit: "ms" },
+    { label: "Go (binário nativo)", value: 3, unit: "ms" },
+    { label: "Python (boot do interpretador)", value: 26, unit: "ms" },
+  ]}
+/>
+
+<Benchmark
+  metric="Memória residente sob carga — do servidor mini-NGINX (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust", value: 2.3, unit: "MB" },
+    { label: "Go", value: 10.5, unit: "MB" },
+    { label: "Python", value: 22.2, unit: "MB" },
+  ]}
+/>
+
+A forma repete-se em todo o lado onde a academia mediu memória (o
+[exporter](/systems-programming-academy/pt/part-3-devops/prometheus-exporter/)
+registou 2.0 / 7.6 / 21.3 MB para a mesma carga). O Rust não carrega runtime nem
+garbage collector, por isso o seu chão é o SO e umas threads. O runtime e o GC do
+Go custam um punhado de megabytes mas compram conveniência enorme. O interpretador
+do Python são dezenas de megabytes antes de o teu código correr. Nada disto importa
+para um serviço de longa duração onde o arranque amortiza a nada — e tudo isto
+decide um cold start de function-as-a-service ou um container limitado em memória.
+
+## Débito: o custo do mesmo trabalho
+
+O [analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/)
+fez parse de 500.000 linhas de trabalho idêntico, verificado byte-idêntico nas
+três:
+
+<Benchmark
+  metric="Parse de 500k linhas de log (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust (release)", value: 98, unit: "ms" },
+    { label: "Go (compilado)", value: 131, unit: "ms" },
+    { label: "Python 3.12 (CPython)", value: 736, unit: "ms" },
+  ]}
+/>
+
+Rust e Go ficam a ~30% um do outro; o Python é ~7× mais lento neste trabalho de
+texto CPU-bound. Esse rácio — linguagens compiladas agrupadas, o CPython cerca de
+uma ordem de grandeza atrás no cálculo cru — aguentou em todo o lado onde a
+academia mediu computação pura. É também exatamente por isso que o ecossistema do
+Python empurra os hot loops para C (NumPy, o motor `re`, extensões nativas): Python
+idiomático chama código nativo rápido em vez de iterar em bytecode.
+
+## Concorrência: onde os runtimes mais divergem
+
+A [lição de threads](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+martelou um contador partilhado — quatro threads, um milhão de incrementos cada — e
+os números contaram três histórias diferentes:
+
+<Benchmark
+  metric="4 threads × 1M incrementos de um contador partilhado (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust — mutex por incremento", value: 356, unit: "ms" },
+    { label: "Go — mutex por incremento", value: 112, unit: "ms" },
+    { label: "Go — atómico", value: 49, unit: "ms" },
+    { label: "Rust — atómico", value: 51, unit: "ms" },
+    { label: "batched (ambos, lock uma vez)", value: 0.3, unit: "ms" },
+  ]}
+/>
+
+Duas descobertas moldaram o arco de concorrência inteiro. **Os atómicos custam o
+mesmo em Rust e Go (~50 ms)** porque ambos compilam para a mesma instrução de CPU —
+a esse nível a linguagem é irrelevante, estás a medir coerência de cache. Mas **o
+mutex contendido do Go bateu o do Rust por 3×**, porque o lock do Go está integrado
+com o seu scheduler em userspace enquanto o `std::sync::Mutex` do Rust faz chamadas
+futex ao kernel sob contenção brutal. O mesmo nome de primitiva, maquinaria
+diferente por baixo — a lição recorrente da Parte 4.
+
+E o Python? O GIL significa que quatro threads CPU-bound correm *mais lento* do que
+uma ([medido](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/):
+60 ms vs 54 ms). Threads em Python paralelizam I/O, nunca CPU — o que não é um bug a
+corrigir mas uma arquitetura à volta da qual desenhar (multiprocessing, ou código
+nativo que liberta o GIL).
+
+O [servidor mini-NGINX](/systems-programming-academy/pt/part-4-concurrency/mini-nginx/)
+juntou tudo sob carga HTTP real:
+
+<Benchmark
+  metric="20k pedidos HTTP, concorrência 50 (maior é melhor)"
+  lowerIsBetter={false}
+  rows={[
+    { label: "Go (goroutine por ligação)", value: 71143, unit: "req/s" },
+    { label: "Rust (thread pool)", value: 53373, unit: "req/s" },
+    { label: "Python (asyncio, 1 core)", value: 12948, unit: "req/s" },
+  ]}
+/>
+
+O modelo goroutine-por-ligação do Go — concorrência barata, multicore por omissão —
+é feito de propósito para servidores e ganhou o débito. O Rust usou uma **fração da
+memória** (2.3 vs 10.5 MB) mas o seu thread pool de lock partilhado contendeu. O
+event loop de um core do Python serializou tudo, o preço do GIL para trabalho
+CPU-ish. Três modelos, três formas, cada um melhor nalgum sítio.
+
+## O que o compilador compra, numa imagem
+
+Para além dos números, a academia mostrou um eixo qualitativo: **quando é que
+descobres que estavas errado?**
+
+<Mermaid title="Quando cada linguagem apanha o bug classico de concorrencia" code={`flowchart TD
+  BUG["data race: duas threads mutam estado partilhado sem sincronizacao"]
+  BUG --> RUST["Rust: erro de compilacao (E0499) - o bug nunca existe"]
+  BUG --> GO["Go: compila & corre errado; race detector encontra SE um teste bater nele"]
+  BUG --> PY["Python: o GIL estreita a janela; ainda um bug latente, sem detetor"]`} />
+
+A [lição de threads](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+demonstrou isto concretamente: o mesmo contador com race é um **erro de compilação**
+em Rust, perde silenciosamente 65% dos seus incrementos em Go (apanhado só pelo `go
+test -race`), e é um bug latente silencioso em Python. Este é o trade-off mais fundo
+dos três: o Rust move a falha para tempo de compilação ao custo de lutar com o borrow
+checker; o Go e o Python adiam-na para runtime por escrita mais rápida. Nenhum é
+grátis; ambos estão certos para riscos diferentes.
+
+## Então: que linguagem?
+
+A resposta honesta que a academia ganha é um conjunto de **condições**, não um
+vencedor.
+
+<Mermaid title="Um esboco de decisao, ancorado nas medicoes" code={`flowchart TD
+  Q["o que domina o teu problema?"]
+  Q -->|"velocidade de iteracao, glue, dados/ML, scripts"| PY["Python: velocidade de escrita imbativel; empurra hot loops p/ nativo"]
+  Q -->|"servidores, concorrencia, equipas, deploys simples"| GO["Go: concorrencia barata, compilacao rapida, um binario, facil de ler"]
+  Q -->|"limites de memoria/latencia, safety-critical, sistemas"| RUST["Rust: sem GC, sem runtime, races impossiveis - a custo de compilacao"]`} />
+
+- O **Python** ganha quando *o teu* tempo é o gargalo, não o do CPU: exploração,
+  dados e ML, automação, glue. A sua penalização de 7× no cálculo é irrelevante
+  quando o hot path é código nativo ou o programa corre uma vez. É a linguagem mais
+  rápida de *escrever*, que é muitas vezes o número que importa.
+- O **Go** ganha para serviços em rede e equipas: as goroutines fizeram o servidor
+  mais rápido aqui, as compilações são quase instantâneas, o deployment é um único
+  binário estático, e a linguagem é deliberadamente pequena o suficiente para uma
+  equipa inteira a ler da mesma forma. Troca controlo de pico por produtividade e
+  teve o melhor débito no teste de servidor desta academia.
+- O **Rust** ganha onde os limites da máquina apertam: a menor memória, sem pausas de
+  GC, e um compilador que torna classes inteiras de bugs — data races,
+  use-after-free — *impossíveis* em vez de meramente detetáveis. Pagas em tempos de
+  compilação e em aprender a satisfazer o borrow checker, e acima de certa contenção
+  as suas primitivas mais simples precisam de mais cuidado (o resultado do mutex).
+
+A meta-lição por baixo das três: **o runtime por baixo de uma primitiva define o seu
+preço, e a única forma de saber o teu custo é medir a tua carga.** O mesmo `Mutex`, o
+mesmo `INSERT`, o mesmo `for` significam coisas diferentes em linguagens diferentes,
+e o método inteiro desta academia — constrói de três formas, verifica byte-idêntico,
+depois mede — é a habilidade reutilizável. As linguagens foram o assunto; medir
+trade-offs foi o objetivo.
+
+## Quiz
+
+<Quiz
+  question={'A academia mediu atómicos a custar ~50 ms tanto em Rust como Go, mas um mutex contendido a custar 356 ms em Rust vs 112 ms em Go. O que ensina este par de resultados?'}
+  options={[
+    { text: 'O nome da primitiva esconde o runtime por baixo: atómicos compilam para a mesma instrução de CPU (logo a linguagem é irrelevante), mas as implementações de mutex diferem (a do Go integra com o seu scheduler; a do Rust faz chamadas ao kernel sob contenção)', correct: true, explanation: 'É a lição recorrente da Parte 4. Onde ambas as linguagens emitem a mesma instrução de hardware, empatam. Onde o runtime faz o trabalho — estacionar uma goroutine em userspace vs uma syscall futex — divergem. Não podes raciocinar sobre o custo de uma primitiva só pelo nome; tens de saber a maquinaria por baixo.' },
+    { text: 'O Rust é simplesmente mais lento em concorrência do que o Go', correct: false, explanation: 'O resultado dos atómicos (um empate) refuta isso diretamente. O Rust não é "mais lento em concorrência" — o seu mutex da std trata a contenção brutal de forma diferente, e crates como o parking_lot ou um design diferente fecham a distância. A descoberta é sobre maquinaria específica, não um ranking geral.' },
+    { text: 'Mutexes são sempre mais lentos que atómicos', correct: false, explanation: 'Verdade para uma palavra sob contenção, mas não uma lei geral — um mutex a proteger uma invariante de vários campos é necessário onde um atómico não pode ajudar. E o batching tornou o mutex 1000× mais barato, mostrando que o custo era a contenção, não o lock em si.' },
+    { text: 'As medições devem estar erradas, já que a mesma operação devia custar o mesmo', correct: false, explanation: 'As medições são consistentes e explicadas: instruções de hardware idênticas empatam, operações mediadas pelo runtime divergem. Esperar "mesma operação, mesmo custo" entre linguagens é exatamente a suposição que a academia te ensina a largar.' },
+  ]}
+/>
+
+<Quiz
+  question={'Para um trabalho CPU-bound que tem de caber num orçamento de memória minúsculo e nunca pausar, para que linguagem apontam os números da academia, e porquê?'}
+  options={[
+    { text: 'Rust — a menor memória residente (2.3 MB vs 10.5 vs 22.2), sem garbage collector logo sem pausas de GC, e débito de linguagem compilada; o custo são os tempos de compilação e aprender o borrow checker', correct: true, explanation: 'As propriedades de memória e sem-GC endereçam diretamente "orçamento minúsculo, nunca pausar", e o Rust igualou o Go no cálculo cru. Essas são exatamente as condições onde os trade-offs do Rust compensam — e a academia é explícita que são trade-offs, não vitórias grátis.' },
+    { text: 'Python — porque é a mais fácil de escrever', correct: false, explanation: 'A velocidade de escrita é a força do Python, mas as restrições aqui são memória, pausas e débito de CPU — o maior footprint do Python (22 MB), o overhead do interpretador, e a penalização de 7× no cálculo tornam-no o encaixe errado para exatamente estes requisitos.' },
+    { text: 'Go — porque teve o melhor débito de servidor', correct: false, explanation: 'O Go ganhou o teste de servidor, mas esta pergunta é trabalho CPU limitado em memória e sensível a pausas. O GC do Go introduz pausas e o seu footprint é ~4× o do Rust. Ótimo para serviços; não a escolha quando as restrições que apertam são memória e ausência de pausas.' },
+    { text: 'Não pode ser respondido sem mais benchmarks', correct: false, explanation: 'A academia mediu exatamente estas dimensões — memória, comportamento de GC, cálculo — por isso os requisitos mapeiam diretamente nos dados. Medir a tua carga específica é sempre sensato, mas as restrições indicadas já apontam claramente para o Rust.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que "Rust é a linguagem mais rápida" é a conclusão errada desta academia?'}
+  options={[
+    { text: 'Porque os números são específicos da carga: o Go bateu o Rust no débito de servidor, as três empatam onde emitem a mesma instrução, e a velocidade de escrita do Python é uma vantagem real que os benchmarks de CPU não capturam — "mais rápido" depende inteiramente do que medes', correct: true, explanation: 'Os próprios dados da academia contradizem um ranking simples: o Go ganhou o teste de débito do mini-NGINX, os atómicos empataram, e "rápido de correr" ignora "rápido de escrever", que é decisivo para exploração e trabalho de glue. A habilidade ensinável é casar os trade-offs de uma linguagem com uma carga, não coroar uma.' },
+    { text: 'Porque o Rust foi na verdade o mais lento em todos os testes', correct: false, explanation: 'O Rust liderou vários testes (memória, velocidade do log-analyzer, empate nos atómicos). O ponto não é que o Rust seja lento — é que nenhuma linguagem ganha todas as dimensões, por isso "mais rápido" não tem significado sem "em quê, sob que restrições".' },
+    { text: 'Porque a velocidade nunca importa em sistemas reais', correct: false, explanation: 'A velocidade importa muitas vezes imenso — a academia mediu-a precisamente porque importa. O ponto é que é um eixo entre vários (memória, segurança, velocidade de escrita, deployment), e qual eixo aperta depende do problema.' },
+    { text: 'Porque benchmarks são inerentemente sem significado', correct: false, explanation: 'A academia apoia-se em benchmarks por todo o lado e trata-os como prova. São significativos para o que medem; o erro é sobre-generalizar uma medição específica num ranking universal.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="Como escolherias entre Python, Go e Rust para um serviço novo?">
+
+Identificando a restrição que aperta, depois casando-a com os trade-offs medidos de
+cada linguagem. Se o gargalo é tempo de engenharia — exploração, trabalho de dados,
+requisitos a mudar — a velocidade de escrita do Python ganha, e a sua penalização de
+cálculo é irrelevante quando os hot paths são nativos ou o programa não é limitado
+por débito. Se é um serviço em rede construído por uma equipa que precisa de andar
+depressa e fazer deploy simples, a concorrência barata de goroutines do Go, as
+compilações quase instantâneas, e o único binário estático são difíceis de bater —
+produziu o melhor débito de servidor em testes que corri. Se as restrições que
+apertam são footprint de memória, previsibilidade de latência (sem pausas de GC), ou
+eliminar classes inteiras de bugs em tempo de compilação, o modelo sem-runtime e
+sem-GC do Rust e o seu borrow checker pagam o seu custo de aprendizagem. Crucialmente
+não responderia por reputação — nomearia a restrição, estimaria contra trade-offs
+conhecidos (linguagens compiladas agrupam-se no cálculo, o CPython fica ~7× atrás, o
+Rust segura a menor memória, o Go domina a concorrência fácil), e se a decisão for
+renhida ou de alto risco, prototiparia o hot path em dois candidatos e mediria. As
+linguagens são ferramentas com custos mensuráveis; a escolha profissional é casar
+custo com restrição, não preferência.
+
+</Interview>
+
+<Interview question="Qual é a ideia mais transferível de comparar linguagens desta forma?">
+
+Que o custo de uma primitiva é definido pelo runtime por baixo dela, não pelo seu
+nome, por isso tens de medir a tua carga real em vez de raciocinar a partir de
+rótulos. O mesmo `Mutex`, `INSERT`, ou loop `for` compila para maquinaria diferente
+em linguagens diferentes — um park em userspace vs uma syscall futex, um parâmetro
+ligado vs bytecode interpretado — e a única forma fiável de saber a diferença é
+construir a mesma coisa de mais do que uma forma, verificar que os outputs são
+idênticos, e cronometrá-los. Esse método — trabalho idêntico, verificado byte-a-byte,
+depois medido — é mais valioso do que qualquer número individual que produz, porque
+os números envelhecem e as cargas diferem mas a disciplina de ancorar uma decisão em
+prova medida, nos teus inputs e no teu hardware, transfere-se para todas as questões
+de performance que alguma vez enfrentarás. As linguagens foram o currículo; o hábito
+de medir trade-offs é a habilidade.
+
+</Interview>
+
+## O fim
+
+Chegaste ao fim da estrada. Vinte lições de fundamentos, sete lições de engenharia,
+quatro projetos de DevOps, quatro lições de concorrência e um servidor real, sete
+lições de frameworks, um capstone que derrota dois ataques, uma app a correr em
+SQLite real, e agora esta síntese — tudo executável, tudo testado, tudo em Python, Go
+e Rust, da syscall à página servida. Não aprendeste três linguagens. Aprendeste a
+*ver os trade-offs entre elas*, em números em que podes confiar porque os mediste tu
+próprio.
+
+Agora vai construir algo, na linguagem que as suas restrições exigirem — e mede-o.
+
+<Aside type="tip" title="Autor">
+  Construído por **Walter Angolar**. Se esta academia te serviu, o maior elogio é
+  estender um dos seus projetos e medir o resultado. Fala comigo no
+  [LinkedIn](https://www.linkedin.com/in/walter-angolar-02a96b24/) ou no
+  [GitHub](https://github.com/angolardevops/systems-programming-academy).
+</Aside>
+
+## Referências & leitura adicional
+
+- As lições cujos números isto sintetiza: [Analisador de Logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/) · [Exporter](/systems-programming-academy/pt/part-3-devops/prometheus-exporter/) · [Threads](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/) · [Channels](/systems-programming-academy/pt/part-4-concurrency/message-passing/) · [mini-NGINX](/systems-programming-academy/pt/part-4-concurrency/mini-nginx/)
+- [Gotchas de benchmarking](https://github.com/sharkdp/hyperfine) — hyperfine, para timing honesto de CLIs · [Brendan Gregg sobre performance de sistemas](https://www.brendangregg.com/systems-performance-2nd-edition-book.html)
+- As três filosofias de design: [The Zen of Python](https://peps.python.org/pep-0020/) · [Go Proverbs](https://go-proverbs.github.io/) · [A fearless concurrency do Rust](https://doc.rust-lang.org/book/ch16-00-concurrency.html)
+
+<Progress />
