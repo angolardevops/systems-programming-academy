@@ -334,6 +334,12 @@ export default defineConfig({
               slug: 'capstone/guestbook',
               badge: { text: 'Capstone', variant: 'tip' },
             },
+            {
+              label: 'Running It for Real: HTTP + SQLite',
+              translations: { 'pt-BR': 'A Correr a Sério: HTTP + SQLite' },
+              slug: 'capstone/running-app',
+              badge: { text: 'Live app', variant: 'tip' },
+            },
           ],
         },
       ],

@@ -1,0 +1,391 @@
+---
+title: "Running It for Real: HTTP + SQLite"
+description: Promote the in-memory capstone to a real running web app — a concurrent HTTP server backed by a real SQLite database, in Rust, Go, and Python. The SQL-injection proof now runs against an actual SQL engine, and three live servers render byte-identical pages.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+The [capstone](/systems-programming-academy/capstone/guestbook/) proved both
+injection defences against an *in-memory* store. This lesson removes the
+scaffolding: the same guestbook, now a **real running web app** — a concurrent
+HTTP server (the [Part 4 mini-NGINX](/systems-programming-academy/part-4-concurrency/mini-nginx/)
+model) backed by a **real SQLite database**. You start it, open a browser, and
+try to hack it. The SQL-injection payload now runs against an actual SQL engine,
+so the proof is no longer "our stand-in stored it as data" but "SQLite itself
+did, and the table survived."
+
+<Aside type="caution" title="This is where dependency-free ends — on purpose">
+  Every lesson until now was dependency-free, so the *ideas* stood alone with
+  nothing imported to trust. A real database is the deliberate exception: this
+  app depends on real SQLite (`rusqlite` bundled in Rust, `modernc.org/sqlite` in
+  Go, the stdlib `sqlite3` in Python). Real applications have real dependencies;
+  the discipline is not "never depend on anything", it is "understand the thing
+  you depend on" — which you now do, because you built the parameterized-query
+  and autoescaping guarantees yourself before reaching for the engine that
+  enforces them.
+</Aside>
+
+Code:
+[`examples/app-guestbook-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 end-to-end tests each over **real sockets and a real
+temp-file SQLite database**, and three live servers render byte-identical pages.
+
+## The shape: HTTP in, SQLite out
+
+<Mermaid title="A real request: parse -> route -> validate -> SQLite -> autoescaped HTML" code={`flowchart LR
+  C["browser: POST /comment"] --> H["HTTP server (pool/goroutines/asyncio)"]
+  H --> R{route}
+  R -->|GET /| RD["render page from SQLite (autoescaped)"]
+  R -->|POST /comment| V["validate"]
+  V -->|errors| E["400 + error list"]
+  V -->|ok| I["parameterized INSERT into SQLite"]
+  I --> RE["303 redirect to /"]
+  RD --> C
+  RE --> C`} />
+
+Two routes make a working guestbook: `GET /` renders the page from the database,
+`POST /comment` validates and inserts, then redirects (the Post/Redirect/Get
+pattern, so a refresh doesn't re-submit). The concurrency model is each
+language's natural one, straight from Part 4.
+
+## Real SQLite, parameterized
+
+The storage layer is the heart of the upgrade. The insert is parameterized —
+the driver binds the values — so the payload is stored by *real SQLite* as data.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="guestbook_app.py"
+def open_db(path: str) -> sqlite3.Connection:
+    """Open (or create) the database and ensure the comments table exists."""
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS comments ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL, body TEXT NOT NULL)"
+    )
+    conn.commit()
+    return conn
+
+
+def insert_comment(conn: sqlite3.Connection, author: str, body: str) -> None:
+    """Parameterized INSERT — the values are bound, never spliced into SQL."""
+    conn.execute(
+        "INSERT INTO comments (author, body) VALUES (?, ?)",
+        (author.strip(), body.strip()),
+    )
+    conn.commit()
+```
+
+Python's `sqlite3` is in the standard library, so the Python app has **zero
+external dependencies** — a real database with nothing to install.
+</TabItem>
+<TabItem label="Go">
+```go title="guestbook.go"
+func OpenDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS comments (" +
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL, body TEXT NOT NULL)")
+	return db, err
+}
+
+func InsertComment(db *sql.DB, author, body string) error {
+	_, err := db.Exec("INSERT INTO comments (author, body) VALUES (?, ?)",
+		strings.TrimSpace(author), strings.TrimSpace(body))
+	return err
+}
+```
+
+Go uses `database/sql` (stdlib) with `modernc.org/sqlite` — a **pure-Go** SQLite
+driver, so there is no cgo and no C toolchain needed to build. `*sql.DB` is a
+connection pool safe for concurrent use, which fits the goroutine-per-connection
+server perfectly.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn open_db(path: &str) -> Connection {
+    let conn = Connection::open(path).expect("open sqlite");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS comments (\
+             id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL, body TEXT NOT NULL)",
+        [],
+    )
+    .expect("create table");
+    conn
+}
+
+pub fn insert_comment(conn: &Connection, author: &str, body: &str) {
+    conn.execute(
+        "INSERT INTO comments (author, body) VALUES (?1, ?2)",
+        params![author.trim(), body.trim()],
+    )
+    .expect("insert");
+}
+```
+
+Rust uses `rusqlite` with the `bundled` feature, which compiles SQLite from
+source — no system library required. Because a `Connection` is not `Sync`, the
+thread pool shares one behind an `Arc<Mutex<Connection>>`: simple and correct for
+a teaching app (a production server would use a connection pool like `r2d2`).
+</TabItem>
+</Tabs>
+
+## The HTTP glue
+
+Above the storage sits the server from Part 4, now routing. The Rust version
+reuses the mini-NGINX thread pool; here is the routing core, identical in spirit
+across the three:
+
+```rust title="src/lib.rs — routing"
+pub fn handle_request(conn: &Connection, method: &str, path: &str, body: &str) -> Vec<u8> {
+    match (method, path) {
+        ("GET", "/") => response(200, "text/html", &render_page(conn), ""),
+        ("POST", "/comment") => {
+            let (author, message) = parse_form(body);
+            let errors = validate_submission(&author, &message);
+            if !errors.is_empty() {
+                return response(400, "text/html", &render_errors(&errors), "");
+            }
+            insert_comment(conn, &author, &message);   // parameterized
+            response(303, "text/plain", "", "Location: /\r\n")   // Post/Redirect/Get
+        }
+        _ => response(404, "text/plain", "404 Not Found\n", ""),
+    }
+}
+```
+
+The form body arrives URL-encoded (`author=Ana&body=Hello`), so each server
+percent-decodes it (`%27` → `'`, `+` → space) before validating — a small parser
+that is itself worth writing once to understand what a framework does for you.
+
+## The crown: SQL injection against real SQLite
+
+The capstone's SQLi test asserted an in-memory store kept the payload as data.
+Here the identical attack runs over HTTP against a **real SQLite file**, and the
+test reads the real table back to prove it survived:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="test_guestbook_app.py"
+async def test_sql_injection_against_real_sqlite_table_survives(self):
+    await self._post("/comment", "author=Alice&body=first")
+    # URL-encode the payload as a browser would.
+    payload = "%27%3B+DROP+TABLE+comments%3B+--"
+    status, _, _ = await self._post("/comment", f"author=Mallory&body={payload}")
+    self.assertEqual(status, 303)
+    # The REAL table still exists with both rows.
+    rows = all_comments(self.conn)
+    self.assertEqual(len(rows), 2)
+    self.assertEqual(rows[1][1], "'; DROP TABLE comments; --")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="guestbook_test.go"
+func TestSQLInjectionAgainstRealSQLiteTableSurvives(t *testing.T) {
+	addr, db := startServer(t)
+	post(t, addr, "/comment", "author=Alice&body=first")
+	payload := "%27%3B+DROP+TABLE+comments%3B+--"
+	post(t, addr, "/comment", "author=Mallory&body="+payload)
+	rows, err := AllComments(db) // if the table were dropped, this errors
+	if err != nil {
+		t.Fatalf("table appears dropped: %v", err)
+	}
+	if len(rows) != 2 || rows[1][1] != "'; DROP TABLE comments; --" {
+		t.Fatalf("payload mishandled: %v", rows)
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs (test)"
+#[test]
+fn sql_injection_against_real_sqlite_table_survives() {
+    let (addr, probe) = start_server();
+    post(addr, "/comment", "author=Alice&body=first");
+    let payload = "%27%3B+DROP+TABLE+comments%3B+--";
+    post(addr, "/comment", &format!("author=Mallory&body={payload}"));
+    let rows = all_comments(&probe.lock().unwrap());
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].1, "'; DROP TABLE comments; --");
+}
+```
+</TabItem>
+</Tabs>
+
+This is the proof the capstone could only model: a genuine SQL engine received
+the drop-table payload, stored it as a comment body, and left the table intact.
+Parameterization is not a convention the app follows — it is a guarantee the
+driver enforces, and the test confirms it against the real thing.
+
+## Three live servers, one page
+
+Start all three apps, fire the same three POSTs at each with `curl` (a normal
+comment, the SQLi payload, an XSS payload), then load `/`:
+
+```html
+<!-- identical from all three servers -->
+<li><strong>Ana</strong>: Hello</li>
+<li><strong>Mallory</strong>: &#39;; DROP TABLE comments; --</li>
+<li><strong>Eve</strong>: &lt;script&gt;alert(1)&lt;/script&gt;</li>
+```
+
+And on disk, each server's SQLite file holds exactly three rows — the table was
+never dropped. Three languages, three real databases, three HTTP servers,
+byte-identical output, both attacks defeated. That is a running application you
+can hand to anyone and dare them to break.
+
+<Aside type="tip" title="Run it yourself">
+  From any of the three example folders: `cargo run --release`, `go run .`, or
+  `python3 guestbook_app.py`. Open `http://127.0.0.1:8080`, post a comment, then
+  post `<script>alert(1)</script>` and `'; DROP TABLE comments; --` and watch
+  the page stay safe and the database stay intact.
+</Aside>
+
+## Exercises
+
+**1. Add pagination (all three).** When the guestbook has thousands of comments,
+`GET /` should show only the latest N. Add `LIMIT` and `OFFSET` to the query,
+driven by a `?page=` query parameter. Where does the page number get validated,
+and why must it be an integer bound as a parameter, not interpolated?
+
+<details>
+<summary>Solution sketch</summary>
+
+Parse `?page=` from the path, validate it as a non-negative integer, and pass it
+as a bound parameter to `LIMIT ? OFFSET ?`. It must be parameterized like any
+other user input: `?page=1;DROP TABLE comments` is the same attack in a new slot,
+and interpolating the page number reopens the exact hole the body defends
+against. This is the reminder that *every* piece of user-controlled data — path,
+query, header, body — is untrusted and needs the same discipline.
+
+</details>
+
+**2. Concurrent writes (Rust or Go).** Fire 100 simultaneous `POST /comment`
+requests and confirm all 100 land in the database exactly once. What does each
+language's storage model do under concurrency, and where is the synchronization?
+
+<details>
+<summary>Solution sketch</summary>
+
+Go's `*sql.DB` is a connection pool that serializes writes to SQLite internally,
+so concurrent goroutines are safe with no app-level locking. Rust's single
+`Connection` behind `Arc<Mutex<>>` serializes at the mutex — correct but a
+bottleneck under load, which is exactly why production uses a connection pool.
+Counting the rows afterward (should be exactly 100, no duplicates or losses) is
+the test; it exercises the same shared-state care from the Part 4 threads lesson,
+now against a real database.
+
+</details>
+
+**3. Add a JSON API (any language).** Add `GET /comments.json` returning the
+comments as JSON. Use a real JSON encoder (not string concatenation) and confirm
+that a comment body containing `"` or `</script>` is correctly escaped for the
+JSON grammar. Why can you not reuse the HTML escaper here?
+
+<details>
+<summary>Solution sketch</summary>
+
+JSON needs its own escaping (`"` → `\"`, control characters, etc.), and a real
+encoder (`json` in Python, `encoding/json` in Go, `serde_json` in Rust) handles
+it for the JSON grammar — reusing the HTML escaper would both miss JSON's
+dangerous characters and wrongly entity-encode inside strings. This is the
+context-dependence of escaping made concrete again: the same value needs a
+different encoder for HTML, for JSON, for a URL. Output encoding is always
+*encoding for a specific target grammar*.
+
+</details>
+
+<Quiz
+  question={'The running app sends "\'; DROP TABLE comments; --" through a POST to a real SQLite database. What happens?'}
+  options={[
+    { text: 'SQLite stores it as the text of one comment body; the table is intact — because the insert is parameterized, the driver binds the value and never parses it as SQL', correct: true, explanation: 'This is the capstone guarantee now proven against a real engine: the driver receives fixed SQL with a placeholder and the value separately, binds it as data, and executes nothing from it. The table keeps all its rows; the payload is just an oddly-punctuated comment.' },
+    { text: 'SQLite executes the DROP and the comments table disappears', correct: false, explanation: 'That is the outcome of string-interpolated SQL, which this app never does. Parameterized inserts send the value apart from the SQL text, so the drop statement is data, not a command.' },
+    { text: 'The driver rejects the input as malformed', correct: false, explanation: 'The driver does not inspect the value for "SQL-looking" content — it simply binds whatever bytes you give it as a parameter. The safety is that a bound parameter can never be SQL, not that the input is screened.' },
+    { text: 'It works only because SQLite is special; a bigger database would be vulnerable', correct: false, explanation: 'Parameterization is a universal feature of SQL drivers (Postgres, MySQL, etc.), not a SQLite quirk. The defence is the same everywhere: bind values, never interpolate them.' },
+  ]}
+/>
+
+<Quiz
+  question={'Every lesson before this one was dependency-free, but this app depends on a real SQLite driver. What is the reasoning?'}
+  options={[
+    { text: 'Dependency-free kept the ideas self-contained while learning them; a real app legitimately depends on real infrastructure, and you now understand the guarantee (parameterization) before trusting the engine that provides it', correct: true, explanation: 'The point of dependency-free lessons was to build the concepts yourself so nothing was a black box. Having done that, using a real database is the right move — the discipline is "understand your dependencies", not "have none". You wrote the parameterized-query guarantee before importing the engine that enforces it.' },
+    { text: 'It was a mistake; the app should have stayed dependency-free too', correct: false, explanation: 'Simulating a full SQL engine to avoid a dependency would be worse — more code, less realism, and no genuine proof. A real database is the correct tool for a real running app.' },
+    { text: 'Dependencies are always fine; the earlier restriction was pointless', correct: false, explanation: 'The earlier restriction had a real purpose — building understanding without black boxes. The lesson is judgment about *when* a dependency earns its place, not that dependencies never matter.' },
+    { text: 'SQLite has no real alternative, so it does not count as a dependency', correct: false, explanation: 'SQLite is genuinely an external dependency here (bundled/compiled or driver-provided). The justification is about understanding and appropriateness, not pretending it is not a dependency.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="You are taking a prototype with an in-memory store to production with a real database. What has to change, and what must not?">
+
+The storage adapter changes; the domain logic and its guarantees must not. In a
+well-factored app the in-memory store and the real database sit behind the same
+interface, so swapping them touches only the adapter — the validation, the
+parameterized-query construction, the rendering, and every test above stay
+identical. Critically, the *security-relevant* behavior lives above the storage
+boundary: the parameterized `(sql, params)` call is the same whether it hits a
+fake or real backend, so the injection guarantee is preserved by construction
+rather than re-earned. What you add is real-database concerns — connection
+management (a pool, not one shared connection), migrations, transactions, error
+handling for a backend that can actually fail — but you add them *at the
+boundary* without disturbing the core. That the tests pass unchanged against the
+real database is the signal the boundary was drawn correctly; it is exactly the
+dependency-injection payoff from Part 2 and 5.
+
+</Interview>
+
+<Interview question="How do the three languages differ in serving concurrent requests against SQLite, and does it affect correctness?">
+
+The concurrency models differ but correctness holds in all three. Go's
+`database/sql` is a connection pool safe for concurrent use, so
+goroutine-per-connection needs no app-level locking — the pool serializes writes
+to SQLite. Rust's `rusqlite::Connection` is not `Sync`, so the thread pool shares
+one behind a mutex; correct, but the mutex is a write bottleneck under load,
+which is why production reaches for a pool (`r2d2`, `deadpool`). Python's asyncio
+runs a single-threaded event loop, so the one connection is never touched by two
+tasks simultaneously — safe by the model, though a slow query blocks the loop.
+None of these choices affects the *result*: every comment is stored exactly once
+and the injection defence holds regardless, because those are properties of the
+parameterized call, not of the concurrency model. The differences are about
+throughput and where the synchronization lives, which is precisely the trade-off
+space Part 4 mapped.
+
+</Interview>
+
+## The end of the road — and the start
+
+This is the last built lesson. You began with ownership, a syscall, a first
+`fn main`, and you have arrived at a running, tested, attack-resistant web
+application in three languages, every layer of which you wrote and understand:
+the concurrency model serving it, the parameterized queries storing to a real
+database, the autoescaping rendering it, the validation guarding it, and the
+tests proving all of it — including two live attacks that fail. Nothing here is
+imported and trusted; it is built and understood.
+
+The curriculum ends; the building does not. Take this app further — pagination, a
+JSON API, real migrations, a connection pool, deploy it behind the health-check
+agent from Part 3. Every next step is now a composition of things you understand
+from the syscall up. That was the whole point.
+
+## References & further reading
+
+- The [Capstone](/systems-programming-academy/capstone/guestbook/) this runs for real, and the [Part 4 server](/systems-programming-academy/part-4-concurrency/mini-nginx/) it is built on
+- Python — [`sqlite3`](https://docs.python.org/3/library/sqlite3.html) (stdlib) · [Post/Redirect/Get](https://en.wikipedia.org/wiki/Post/Redirect/Get)
+- Go — [`database/sql`](https://pkg.go.dev/database/sql) · [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite) (pure-Go driver)
+- Rust — [`rusqlite`](https://docs.rs/rusqlite/latest/rusqlite/) · [`r2d2`](https://docs.rs/r2d2/latest/r2d2/) (connection pooling)
+- OWASP — [Query Parameterization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html)
+
+<Progress />
