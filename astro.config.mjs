@@ -4,9 +4,33 @@ import starlight from '@astrojs/starlight';
 
 // The Ultimate Systems Programming Academy
 // Author: Walter Angolar
+
+// Rehype plugin: make every external link (http/https) open in a new tab,
+// so reading references never navigate the reader away from the lesson.
+function rehypeExternalLinksNewTab() {
+  return (/** @type {any} */ tree) => {
+    const visit = (/** @type {any} */ node) => {
+      if (
+        node.type === 'element' &&
+        node.tagName === 'a' &&
+        typeof node.properties?.href === 'string' &&
+        /^https?:\/\//i.test(node.properties.href)
+      ) {
+        node.properties.target = '_blank';
+        node.properties.rel = ['noopener', 'noreferrer'];
+      }
+      if (Array.isArray(node.children)) node.children.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
 export default defineConfig({
   site: 'https://angolardevops.github.io',
   base: '/systems-programming-academy',
+  markdown: {
+    rehypePlugins: [rehypeExternalLinksNewTab],
+  },
   integrations: [
     starlight({
       title: 'Systems Programming Academy',
@@ -48,7 +72,6 @@ export default defineConfig({
           items: [
             {
               label: 'Rust',
-              badge: { text: '9 · complete', variant: 'success' },
               collapsed: true,
               items: [
                 {
@@ -100,81 +123,68 @@ export default defineConfig({
             },
             {
               label: 'Go',
-              badge: { text: '6 · complete', variant: 'success' },
               collapsed: true,
               items: [
                 {
                   label: 'Structs, Methods & Interfaces',
                   translations: { 'pt-BR': 'Structs, Métodos e Interfaces' },
                   slug: 'part-1-foundations/go/interfaces',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Error Handling',
                   translations: { 'pt-BR': 'Tratamento de Erros' },
                   slug: 'part-1-foundations/go/error-handling',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Slices, Maps & Strings',
                   translations: { 'pt-BR': 'Slices, Maps e Strings' },
                   slug: 'part-1-foundations/go/collections',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Testing & Documentation',
                   translations: { 'pt-BR': 'Testes e Documentação' },
                   slug: 'part-1-foundations/go/testing',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Generics',
                   translations: { 'pt-BR': 'Generics' },
                   slug: 'part-1-foundations/go/generics',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Goroutines & Channels',
                   translations: { 'pt-BR': 'Goroutines e Channels' },
                   slug: 'part-1-foundations/go/concurrency',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
               ],
             },
             {
               label: 'Python',
-              badge: { text: '5 · complete', variant: 'success' },
               collapsed: true,
               items: [
                 {
                   label: 'The Data Model',
                   translations: { 'pt-BR': 'O Modelo de Dados' },
                   slug: 'part-1-foundations/python/data-model',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Type Hints',
                   translations: { 'pt-BR': 'Type Hints' },
                   slug: 'part-1-foundations/python/type-hints',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Protocols & Duck Typing',
                   translations: { 'pt-BR': 'Protocols e Duck Typing' },
                   slug: 'part-1-foundations/python/protocols',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Iterators & Generators',
                   translations: { 'pt-BR': 'Iteradores e Geradores' },
                   slug: 'part-1-foundations/python/iterators',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
                 {
                   label: 'Testing',
                   translations: { 'pt-BR': 'Testes' },
                   slug: 'part-1-foundations/python/testing',
-                  badge: { text: 'Complete', variant: 'success' },
                 },
               ],
             },
@@ -188,43 +198,36 @@ export default defineConfig({
               label: 'Repository Pattern & Dependency Injection',
               translations: { 'pt-BR': 'Padrão Repository e Injeção de Dependências' },
               slug: 'part-2-engineering/repository-pattern',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Configuration & Secrets',
               translations: { 'pt-BR': 'Configuração e Segredos' },
               slug: 'part-2-engineering/configuration',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Logging & Observability',
               translations: { 'pt-BR': 'Logging e Observabilidade' },
               slug: 'part-2-engineering/logging',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Caching',
               translations: { 'pt-BR': 'Caching' },
               slug: 'part-2-engineering/caching',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'The Testing Pyramid',
               translations: { 'pt-BR': 'A Pirâmide de Testes' },
               slug: 'part-2-engineering/testing-pyramid',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Clean & Hexagonal Architecture',
               translations: { 'pt-BR': 'Arquitetura Clean e Hexagonal' },
               slug: 'part-2-engineering/hexagonal-architecture',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'CI/CD',
               translations: { 'pt-BR': 'CI/CD' },
               slug: 'part-2-engineering/ci-cd',
-              badge: { text: 'Complete', variant: 'success' },
             },
           ],
         },
@@ -236,25 +239,21 @@ export default defineConfig({
               label: 'Project: Log Analyzer CLI',
               translations: { 'pt-BR': 'Projeto: CLI Analisador de Logs' },
               slug: 'part-3-devops/log-analyzer',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Project: Prometheus-Style Exporter',
               translations: { 'pt-BR': 'Projeto: Exporter Estilo Prometheus' },
               slug: 'part-3-devops/prometheus-exporter',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Project: Config Generator',
               translations: { 'pt-BR': 'Projeto: Gerador de Configuração' },
               slug: 'part-3-devops/config-generator',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Project: Health-Check Agent',
               translations: { 'pt-BR': 'Projeto: Agente de Health-Check' },
               slug: 'part-3-devops/health-check',
-              badge: { text: 'Complete', variant: 'success' },
             },
           ],
         },
@@ -266,19 +265,16 @@ export default defineConfig({
               label: 'Threads & Shared State',
               translations: { 'pt-BR': 'Threads & Estado Partilhado' },
               slug: 'part-4-concurrency/threads-shared-state',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Message Passing & Channels',
               translations: { 'pt-BR': 'Message Passing & Channels' },
               slug: 'part-4-concurrency/message-passing',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Async & Event-Driven I/O',
               translations: { 'pt-BR': 'Async & I/O Orientado a Eventos' },
               slug: 'part-4-concurrency/async-io',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Project: mini-NGINX',
@@ -296,43 +292,36 @@ export default defineConfig({
               label: 'Routing & Middleware',
               translations: { 'pt-BR': 'Routing & Middleware' },
               slug: 'part-5-frameworks/routing-middleware',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Query Builder & SQL Injection',
               translations: { 'pt-BR': 'Query Builder & SQL Injection' },
               slug: 'part-5-frameworks/query-builder',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'DI Container',
               translations: { 'pt-BR': 'DI Container' },
               slug: 'part-5-frameworks/di-container',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Validation Framework',
               translations: { 'pt-BR': 'Framework de Validação' },
               slug: 'part-5-frameworks/validation',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Template Engine & XSS',
               translations: { 'pt-BR': 'Template Engine & XSS' },
               slug: 'part-5-frameworks/template-engine',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Serialization: JSON Encoder & Parser',
               translations: { 'pt-BR': 'Serialization: Encoder & Parser JSON' },
               slug: 'part-5-frameworks/serialization',
-              badge: { text: 'Complete', variant: 'success' },
             },
             {
               label: 'Test Framework',
               translations: { 'pt-BR': 'Test Framework' },
               slug: 'part-5-frameworks/test-framework',
-              badge: { text: 'Complete', variant: 'success' },
             },
           ],
         },
