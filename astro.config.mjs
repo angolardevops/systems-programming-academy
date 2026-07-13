@@ -288,6 +288,18 @@ export default defineConfig({
             },
           ],
         },
+        {
+          label: 'Part 5 · Building Frameworks',
+          translations: { 'pt-BR': 'Parte 5 · Construir Frameworks' },
+          items: [
+            {
+              label: 'Routing & Middleware',
+              translations: { 'pt-BR': 'Routing & Middleware' },
+              slug: 'part-5-frameworks/routing-middleware',
+              badge: { text: 'Complete', variant: 'success' },
+            },
+          ],
+        },
       ],
       components: {
         // Custom footer with the required authorship block.

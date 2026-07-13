@@ -1,0 +1,495 @@
+---
+title: "Routing & Middleware: Constrói uma Web Framework"
+description: O salto de biblioteca para framework é a inversão de controlo. Constrói uma micro web framework — tabela de rotas, parâmetros de path e uma cadeia de middleware composível — em Rust, Go e Python, com os mesmos nove testes a passar nas três.
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+O mini-NGINX da Parte 4 sabia servir ficheiros, mas acrescentar um segundo tipo
+de endpoint — digamos `/users/:id` a devolver JSON — obrigava a editar o handler
+de pedidos à mão. Isso não escala. Aquilo em que todo o servidor a sério se
+transforma é numa **framework**: declaras *o que* responde a cada rota e *o que*
+envolve cada pedido, e a framework trata da canalização.
+
+Esta lição constrói essa framework nas três linguagens: uma **tabela de rotas**
+com parâmetros de path (`/users/:id`) e uma **cadeia de middleware** (logging,
+auth, qualquer coisa que envolva um pedido). É pequena — umas centenas de linhas
+cada — mas é a forma real do Express/Flask/axum, e os mesmos **nove testes**
+passam contra as três implementações.
+
+<Aside type="note" title="Framework vs biblioteca — a diferença real">
+  Uma biblioteca é código que tu chamas. Uma framework é código que te chama a
+  ti. Entregas os teus handlers a uma framework e ela decide quando os corre —
+  "don't call us, we'll call you", o **Princípio de Hollywood**. Essa inversão
+  de controlo é o assunto todo desta lição, e é a razão pela qual as frameworks
+  se sentem diferentes de usar: preenches espaços em vez de conduzir um loop.
+</Aside>
+
+Código:
+[`examples/part5-router-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 9–10 testes cada, Go sob `-race`. Dispatch puro sobre
+valores `Request`/`Response`, por isso a framework é totalmente testável sem um
+socket.
+
+## A forma
+
+<Mermaid title="Um pedido flui pelo middleware, entra no routing, sai pelo middleware" code={`flowchart LR
+  R["dispatch(method, path)"] --> M1["middleware: logging"]
+  M1 --> M2["middleware: auth"]
+  M2 --> C["nucleo do router: match da rota"]
+  C -->|match| H["handler(req com params)"]
+  C -->|sem path| N4["404"]
+  C -->|metodo errado| N5["405"]
+  H --> M2b["auth desenrola"]
+  N4 --> M2b
+  N5 --> M2b
+  M2b --> M1b["logging desenrola"]
+  M1b --> OUT["Response"]`} />
+
+Duas decisões de design definem a framework, e ambas são testadas:
+
+1. **404 vs 405.** Se nenhum path registado casa, é `404 Not Found`. Se um path
+   casa mas não para este método, é `405 Method Not Allowed` — uma distinção que
+   routers desleixados erram, e da qual os clientes dependem.
+2. **O middleware envolve *todo* o dispatch**, incluindo 404s e 405s. Um
+   middleware de logging que só visse rotas casadas ficaria cego exatamente aos
+   pedidos que mais precisas de ver. Isto é subtil o suficiente para ter partido
+   a primeira versão deste código — o teste apanhou. (Mais sobre isto abaixo.)
+
+## Registar rotas
+
+O núcleo é uma lista de rotas; cada uma é um método, um padrão dividido em
+segmentos, e um handler. Um segmento começado por `:` é um **parâmetro de path**.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="microframework.py"
+def route(self, method: str, pattern: str) -> Callable[[Handler], Handler]:
+    """Decorator que regista um handler para method + pattern. Um segmento
+    começado por ':' é um parâmetro de path, e.g. /users/:id."""
+    segments = _split_path(pattern)
+
+    def register(handler: Handler) -> Handler:
+        self._routes.append((method, segments, handler))
+        return handler  # devolvido inalterado, para continuar chamável
+
+    return register
+```
+
+O Python apoia-se na sua funcionalidade de assinatura — o **decorator** — para
+que o registo se leia como uma declaração:
+
+```python
+@app.route("GET", "/users/:id")
+def show_user(req):
+    return Response(200, f"user profile: {req.params['id']}")
+```
+
+O decorator devolve o handler *inalterado* (uma garantia testada), por isso a
+função continua diretamente chamável — o registo é um efeito secundário, não uma
+transformação.
+</TabItem>
+<TabItem label="Go">
+```go title="router.go"
+// Route regista um handler para method + pattern. Um segmento começado por
+// ":" é um parâmetro de path, e.g. /users/:id. Devolve o router para encadear.
+func (r *Router) Route(method, pattern string, h Handler) *Router {
+	r.routes = append(r.routes, route{
+		method:   method,
+		segments: splitPath(pattern),
+		handler:  h,
+	})
+	return r
+}
+```
+
+O Go não tem decorators, por isso o registo é uma chamada de método explícita
+que devolve o router para encadear:
+`app.Route("GET", "/", home).Route("POST", "/users", create)`. Menos mágico,
+mais óbvio — o trade-off do Go numa linha.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Regista um handler para `method` + `pattern`. Um segmento começado por
+/// `:` é um parâmetro de path, e.g. `/users/:id`.
+pub fn route(
+    &mut self,
+    method: &str,
+    pattern: &str,
+    handler: impl Fn(&Request) -> Response + Send + Sync + 'static,
+) -> &mut Self {
+    self.routes.push(Route {
+        method: method.to_string(),
+        segments: split_path(pattern),
+        handler: Box::new(handler),
+    });
+    self
+}
+```
+
+O handler do Rust é `Box<dyn Fn(&Request) -> Response + Send + Sync>` — um trait
+object em box, porque os handlers têm tipos concretos diferentes mas têm de
+viver num só `Vec`. Os bounds `Send + Sync` são o que deixa este router mover-se
+pelo thread pool da Parte 4 mais tarde; o sistema de tipos já está a pensar na
+concorrência que as outras duas linguagens adiam para um runtime.
+</TabItem>
+</Tabs>
+
+## Casar um path, capturar parâmetros
+
+O matching é por segmento: comprimento igual, segmentos fixos têm de ser iguais,
+e um segmento `:name` captura o que estiver naquela posição. É o mesmo algoritmo
+nas três — as diferenças são puramente como cada uma soletra "tira os dois
+pontos iniciais".
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="microframework.py"
+def _match_segments(route_seg, req_seg):
+    """Casa segmentos de rota contra segmentos de pedido, capturando :params.
+    Devolve None em qualquer mismatch (comprimento diferente ou segmento fixo
+    que difere)."""
+    if len(route_seg) != len(req_seg):
+        return None
+    params = {}
+    for rseg, actual in zip(route_seg, req_seg):
+        if rseg.startswith(":"):
+            params[rseg[1:]] = actual
+        elif rseg != actual:
+            return None
+    return params
+```
+</TabItem>
+<TabItem label="Go">
+```go title="router.go"
+func matchSegments(routeSeg, reqSeg []string) (map[string]string, bool) {
+	if len(routeSeg) != len(reqSeg) {
+		return nil, false
+	}
+	params := map[string]string{}
+	for i, rseg := range routeSeg {
+		if name, ok := strings.CutPrefix(rseg, ":"); ok {
+			params[name] = reqSeg[i]
+		} else if rseg != reqSeg[i] {
+			return nil, false
+		}
+	}
+	return params, true
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn match_segments(route: &[String], request: &[String]) -> Option<HashMap<String, String>> {
+    if route.len() != request.len() {
+        return None;
+    }
+    let mut params = HashMap::new();
+    for (r, actual) in route.iter().zip(request.iter()) {
+        if let Some(name) = r.strip_prefix(':') {
+            params.insert(name.to_string(), actual.clone());
+        } else if r != actual {
+            return None;
+        }
+    }
+    Some(params)
+}
+```
+
+Repara no idioma partilhado: o `strip_prefix(':')` do Rust, o
+`strings.CutPrefix` do Go, e o `startswith(":")` + slice do Python exprimem
+todos "isto é um parâmetro, e se sim qual é o nome?" num só condicional. O tipo
+de retorno carrega a distinção match/no-match — `Option`, `(map, bool)`,
+`dict | None` — a forma honesta de cada linguagem dizer "talvez".
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Porquê uma varredura de lista e não uma trie?">
+  Casamos rotas varrendo uma lista — O(rotas) por pedido. Routers de produção
+  (httprouter, matchit do axum) usam uma radix trie para matching O(comprimento
+  do path) independentemente do número de rotas. Para dezenas de rotas a lista é
+  mais rápida na prática (sem pointer chasing, amiga da cache) e muito mais
+  simples de entender; a trie ganha a sua complexidade às centenas de rotas.
+  Saber *quando* a estrutura sofisticada compensa é o juízo de engenharia —
+  começar simples e medir está quase sempre certo.
+</Aside>
+
+## A cadeia de middleware: o coração disto
+
+O middleware é o padrão decorator aplicado ao tratamento de pedidos: cada
+middleware recebe o pedido e uma função `next`, e escolhe o que fazer à volta de
+a chamar — logar, autenticar, acrescentar headers, ou fazer **short-circuit** ao
+não chamar o `next` de todo.
+
+A cadeia é construída por fold: começa com o núcleo do router como o callable
+mais interno, depois envolve-o com cada middleware do último-registado para o
+primeiro, para que o **primeiro registado acabe mais externo**.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="microframework.py"
+def _run_chain(self, core: Handler, req: Request) -> Response:
+    """Faz fold do middleware à volta do core. Iterar do último acrescentado
+    para o primeiro faz o índice 0 o wrapper mais externo — 'o primeiro
+    registado corre primeiro'."""
+    nxt = core
+    for mw in reversed(self._middleware):
+        inner = nxt
+
+        def wrapped(r, mw=mw, inner=inner):
+            return mw(r, inner)
+
+        nxt = wrapped
+    return nxt(req)
+```
+
+Os argumentos por omissão `mw=mw, inner=inner` **não são decoração** — são
+estruturais. Sem eles, cada closure `wrapped` capturaria as *mesmas* variáveis
+`mw` e `inner` por referência, e depois do loop todas as closures veriam só os
+valores finais. Ligá-las como defaults captura os valores de cada iteração. É a
+clássica armadilha de late-binding-closure do Python, e errá-la aqui correria
+silenciosamente só o último middleware, N vezes.
+</TabItem>
+<TabItem label="Go">
+```go title="router.go"
+func (r *Router) runChain(core Handler, req *Request) Response {
+	next := core
+	for i := len(r.middleware) - 1; i >= 0; i-- {
+		mw := r.middleware[i]
+		inner := next
+		next = func(rq *Request) Response { return mw(rq, inner) }
+	}
+	return next(req)
+}
+```
+
+Os `mw := r.middleware[i]` e `inner := next` são a mesma correção de captura que
+os default args do Python — variáveis frescas por iteração. (O Go 1.22+ tornou
+as variáveis de loop por-iteração, mas o `next` é reatribuído a cada passagem,
+por isso o `inner := next` continua a ser preciso para congelar a cadeia
+anterior.)
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn run_chain(&self, core: &dyn Fn(&Request) -> Response, req: &Request) -> Response {
+    let mut next: Box<dyn Fn(&Request) -> Response + '_> = Box::new(move |r| core(r));
+    for mw in self.middleware.iter().rev() {
+        let inner = next;
+        next = Box::new(move |r| mw(r, &*inner));
+    }
+    next(req)
+}
+```
+
+As closures `move` do Rust tomam posse do `inner`, por isso cada camada *possui*
+a que está por baixo — a cadeia é uma pilha literal de closures em box, e o
+borrow checker garante que nenhuma camada sobrevive ao router. O tempo de vida
+`'_` liga a cadeia inteira ao `&self`, razão pela qual não pode ser vazada por
+acidente.
+</TabItem>
+</Tabs>
+
+Como o middleware envolve o *núcleo* do router (não só os handlers casados),
+esta mesma cadeia corre num 404 — que é exatamente o que a demo mostra:
+
+```text
+GET /        -> 200      (home)
+GET /users/7 -> 200      (user profile: 7)
+GET /admin   -> 401      (middleware de auth fez short-circuit: handler nunca correu)
+GET /nope    -> 404      (logado! o middleware viu a falha)
+POST /       -> 405      (o path existe só para GET)
+```
+
+## O bug que o teste apanhou
+
+A primeira versão desta framework aplicava o middleware só *depois* de uma rota
+casar — a cadeia envolvia o handler, não o router. Todos os testes passaram
+exceto um:
+
+```text
+test middleware_sees_every_request_once ... FAILED
+  middleware ran 1 times, want 2
+```
+
+O pedido `/missing` devolvia 404 sem o middleware de logging alguma vez correr.
+Num sistema real esta é a diferença entre um log que mostra a tua enxurrada de
+404s (alguém a fazer scan por `/wp-admin`) e um log que fica em silêncio
+enquanto estás sob ataque. A correção — envolver o núcleo do router, não o
+handler — é uma única mudança estrutural, e é *por isso* que a cadeia nas três
+linguagens faz fold à volta do `route_request` e não à volta do handler casado.
+Um único teste bem escolhido transformou um design plausível num correto.
+
+<Aside type="caution" title="A ordem importa, e é uma decisão real">
+  A ordem do middleware não é cosmética. Auth *antes* de logging significa que
+  pedidos não autorizados são logados como 401s (bom para auditoria). Logging
+  *antes* de auth significa que o log regista o path tentado mesmo para pedidos
+  rejeitados (bom para deteção de intrusão). O rate-limiting tem de vir antes do
+  trabalho caro, não depois. A framework dá-te o botão da ordem; usá-lo
+  corretamente é uma escolha de design de segurança, testada aqui por
+  `middleware_order_is_outermost_first`.
+</Aside>
+
+## Exercícios
+
+**1. Acrescenta parsing de query-string (nas três).** Estende o router para que
+`/search?q=rust&limit=10` popule um mapa `query` no pedido, separado dos params
+de path. Que camada deve ser dona disto — o parser, o router, ou um middleware?
+Justifica.
+
+<details>
+<summary>Esboço de solução</summary>
+
+O parsing da query pertence à construção do pedido (o parser), não ao router: a
+query não afeta *qual* rota casa (retira-la antes do matching), por isso
+acoplá-la ao routing seria um erro de camadas. Um middleware também funciona e é
+mais composível se só algumas rotas precisarem. O router em si deve ficar
+ignorante das queries — uma separação limpa que a lógica 404-vs-405 já demonstra.
+
+</details>
+
+**2. Liga-o ao servidor da Parte 4 (Rust ou Go).** Substitui a lógica de
+ficheiros estáticos do mini-NGINX por `router.dispatch(method, path)`: faz parse
+do pedido para um `Request`, dispatch, serializa o `Response` de volta para
+bytes HTTP. Acrescenta uma rota `/health` a devolver 200 e uma rota
+`/files/:name` a servir ficheiros. O que mudou, e o que ficou idêntico?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Só a cola muda: bytes → `Request` à entrada, `Response` → bytes à saída; o
+modelo de concorrência (thread pool / goroutines) e o router ficam ambos
+intocados. Essa costura limpa é o prémio de manter a framework pura — encaixa em
+qualquer transporte. Separaste agora *o que servir* (router) de *como servir em
+concorrência* (Parte 4), que é exatamente como os servidores reais se estratificam.
+
+</details>
+
+**3. Acrescenta uma funcionalidade `group` / prefixo (qualquer linguagem).**
+Suporta montar um conjunto de rotas sob um prefixo partilhado com middleware
+partilhado, e.g. todas as rotas `/api/*` recebem o middleware de auth e um
+prefixo `/api`. É assim que apps reais organizam dezenas de rotas. Qual é a
+forma mais limpa de o exprimir sem duplicar a cadeia de middleware?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Um `group(prefix, middleware)` devolve um registrador leve que prepende o
+prefixo a cada padrão e lembra o middleware do grupo, aplicado só às suas rotas.
+A versão elegante compõe: grupos aninham, e o middleware efetivo de cada rota é a
+concatenação dos grupos que a envolvem. É o ponto onde o teu brinquedo começa a
+sentir-se como os blueprints do Flask ou os routers do Express — uma abstração
+sobre a abstração.
+
+</details>
+
+<Quiz
+  question={'Que propriedade única mais distingue uma framework de uma biblioteca?'}
+  options={[
+    { text: 'Inversão de controlo — a framework chama o teu código (handlers), em vez de tu chamares o código dela', correct: true, explanation: 'O Princípio de Hollywood: "don\'t call us, we\'ll call you." Registas handlers e entregas o loop principal; a framework decide quando os invocar. Uma biblioteca é o inverso — ficas no controlo e chama-la.' },
+    { text: 'Uma framework é maior e tem mais funcionalidades', correct: false, explanation: 'O tamanho é incidental — a nossa framework tem umas centenas de linhas. Frameworks minúsculas e bibliotecas enormes existem ambas. A distinção é quem detém o fluxo de controlo.' },
+    { text: 'Uma framework é escrita por uma empresa, uma biblioteca por indivíduos', correct: false, explanation: 'A autoria é irrelevante para a distinção. Ambas vêm de todo o tipo de fontes.' },
+    { text: 'Uma framework corre num servidor, uma biblioteca corre localmente', correct: false, explanation: 'Onde o código corre não tem nada a ver com isto — há frameworks client-side e bibliotecas server-side. A diferença é a inversão de controlo.' },
+  ]}
+/>
+
+<Quiz
+  question={'Um pedido atinge um path que existe só para POST, mas o cliente enviou GET. O que deve um router correto devolver, e porque importa?'}
+  options={[
+    { text: '405 Method Not Allowed — o recurso existe mas não para este método; clientes e caches tratam 405 e 404 de forma muito diferente', correct: true, explanation: 'O nosso router regista "path casou mas o método não" em separado, devolvendo 405. Um 404 diria erradamente ao cliente que o recurso não existe de todo; o 405 diz corretamente "verbo errado", ao qual as ferramentas, caches e clientes de API reagem.' },
+    { text: '404 Not Found — se o método+path exato não está registado, não existe', correct: false, explanation: 'Isto confunde "nenhum recurso deste tipo" com "método errado para um recurso existente". São estados HTTP semanticamente diferentes e os clientes dependem da distinção.' },
+    { text: '500 Internal Server Error — o servidor não conseguiu tratá-lo', correct: false, explanation: 'Nada falhou internamente; o pedido estava bem formado e o servidor entendeu-o perfeitamente. Um 5xx seria uma mentira sobre a saúde do servidor.' },
+    { text: '200 OK com corpo vazio — ignorar o método errado em silêncio', correct: false, explanation: 'Aceitar em silêncio o método errado esconde bugs do cliente e viola a semântica HTTP. Correção é dizer ao cliente exatamente o que estava errado.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que a cadeia de middleware tem de envolver o núcleo do router e não só o handler casado?'}
+  options={[
+    { text: 'Para o middleware correr também nos 404s e 405s — um middleware de logging ou rate-limiting que saltasse pedidos não casados ficaria cego exatamente ao tráfego que mais importa', correct: true, explanation: 'É o bug que o teste apanhou: envolver só handlers casados fazia /missing devolver 404 sem logging. Envolver o núcleo faz cada pedido — casado ou não — fluir pela cadeia, que é o que a segurança e a observabilidade exigem.' },
+    { text: 'Torna o código mais curto', correct: false, explanation: 'Ambas as versões têm comprimento semelhante; a versão que envolve o núcleo é sem dúvida um pouco mais envolvida. Correção, não brevidade, é a razão.' },
+    { text: 'Handlers não podem ser envolvidos por closures nalgumas linguagens', correct: false, explanation: 'As três linguagens envolvem handlers sem problema — a versão buggy anterior fazia exatamente isso. A questão é o que é envolvido, não se envolver é possível.' },
+    { text: 'Melhora a performance do routing', correct: false, explanation: 'Não tem benefício de performance — sem dúvida um custo minúsculo, já que o middleware corre agora também nas falhas. A razão é a correção comportamental para preocupações transversais.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="Explica inversão de controlo com um exemplo concreto.">
+
+Inversão de controlo é entregar o fluxo de execução a uma framework em vez de o
+conduzir tu. Concretamente: com uma biblioteca como um cliente HTTP, *tu*
+escreves o loop e chamas `client.get(url)` quando decides. Com uma web
+framework, escreves funções handler e *registas*-nas; a framework é dona do loop
+de accept, do parsing do pedido, do routing, e chama o teu handler quando chega
+um pedido que casa. Nunca escreves `while accept`. O benefício é que toda a
+maquinaria transversal — routing, middleware, tratamento de erros — é escrita uma
+vez na framework e tu preenches só a parte que varia. O custo é que tens de
+trabalhar dentro do ciclo de vida e dos pontos de extensão da framework, razão
+pela qual escolher uma framework é um compromisso maior do que escolher uma
+biblioteca.
+
+</Interview>
+
+<Interview question="Como funciona o middleware, e qual é um bug real que a ordem do middleware pode causar?">
+
+O middleware é o padrão decorator para tratamento de pedidos: cada camada
+envolve a seguinte, recebendo o pedido e um callable `next`, livre de agir antes,
+depois, ou em vez de o chamar. Compõem-se numa cebola — o mais externo corre
+primeiro à entrada e por último à saída. A ordem é uma decisão genuína: põe o
+rate-limiting depois da autenticação e uma enxurrada não autenticada continua a
+consumir a tua computação de auth; põe um limite de tamanho de corpo depois do
+parsing do corpo e já pagaste o custo que querias prevenir. Um bug real clássico
+é o middleware de CORS ou de auth registado depois da rota que dele precisa, e
+por isso nunca corre em silêncio — razão pela qual as frameworks tornam a ordem
+de registo explícita e pela qual o nosso teste fixa a semântica mais-externo-primeiro.
+
+</Interview>
+
+<Interview question="O nosso router varre uma lista de rotas por pedido. Quando mudarias isso, e para quê?">
+
+Para dezenas de rotas, uma varredura linear está genuinamente bem — muitas vezes
+mais rápida do que qualquer coisa esperta, porque é previsível pelo branch
+predictor e amiga da cache, sem pointer chasing. Mudá-lo-ia quando o número de
+rotas chegasse às centenas ou quando o profiling mostrasse o routing no caminho
+quente, e passaria para uma radix/prefix trie (como o httprouter e o matchit do
+axum fazem), que casa em tempo proporcional ao comprimento do path
+independentemente de quantas rotas existem. A trie também lida naturalmente com a
+prioridade entre segmentos estáticos e parametrizados. O ponto de engenharia é
+que a estrutura de dados deve seguir a necessidade medida: não começaria com a
+trie, porque a sua complexidade é injustificada até a varredura aparecer de facto
+num profile — otimização prematura do routing é um desperdício real e comum.
+
+</Interview>
+
+## Desafio
+
+Faz crescer isto para uma framework que usarias mesmo: acrescenta parâmetros de
+path tipados (`/users/:id(int)` a rejeitar ids não numéricos com um 400), um
+helper de resposta JSON embutido, um middleware de tratamento de erros que apanha
+um handler que faz panic/raise e o transforma num 500 limpo, e um pequeno
+conjunto de middleware embutido (request-id, timing, gzip). Depois monta-a no teu
+servidor da Parte 4 e serve uma API real de dois recursos — digamos `/notes` e
+`/notes/:id` apoiadas num store em memória — com testes a atingi-la sobre sockets
+reais. Terás construído, do `accept()` ao routing ao middleware, a espinha
+inteira que o Flask, o Express e o axum cada um elaboram — e vais ler o código
+deles de forma muito diferente a seguir.
+
+## Referências & leitura adicional
+
+- Fielding — [Architectural Styles and the Design of Network-based Software Architectures](https://ics.uci.edu/~fielding/pubs/dissertation/top.htm) (a dissertação REST; cap. 5–6 sobre por que a semântica HTTP como 404/405 importa)
+- Express — [Writing middleware](https://expressjs.com/en/guide/writing-middleware.html) · [Using middleware](https://expressjs.com/en/guide/using-middleware.html)
+- Flask — [The application factory & view decorators](https://flask.palletsprojects.com/en/latest/patterns/appfactories/)
+- Go — [handlers de `net/http` e o padrão middleware](https://pkg.go.dev/net/http#Handler) · [a radix trie do httprouter](https://github.com/julienschmidt/httprouter)
+- axum — [`Router` e `middleware`](https://docs.rs/axum/latest/axum/middleware/index.html) (a forma de produção em Rust desta lição)
+
+<Progress />

@@ -1,0 +1,12 @@
+[package]
+name = "part5-router-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a web framework's core is dispatch logic, not I/O. We build
+# the router, path-param matching, and middleware chain over plain structs so
+# every piece is unit-testable without a socket.
+
+[[bin]]
+name = "router-demo"
+path = "src/main.rs"
