@@ -328,6 +328,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/serialization',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Test Framework',
+              translations: { 'pt-BR': 'Test Framework' },
+              slug: 'part-5-frameworks/test-framework',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
         {

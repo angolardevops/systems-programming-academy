@@ -53,6 +53,7 @@ jobs:
           - part5-validator-rust
           - part5-template-rust
           - part5-json-rust
+          - part5-testkit-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -99,6 +100,7 @@ jobs:
           - part5-validator-go
           - part5-template-go
           - part5-json-go
+          - part5-testkit-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -144,6 +146,7 @@ jobs:
           - part5-validator-py
           - part5-template-py
           - part5-json-py
+          - part5-testkit-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

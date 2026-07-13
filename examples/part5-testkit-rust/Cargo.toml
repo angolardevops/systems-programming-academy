@@ -1,0 +1,13 @@
+[package]
+name = "part5-testkit-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a test framework is a registry of test functions, a few
+# assertions, and a runner that isolates failures and prints a report. We test
+# the framework by feeding it known-passing and known-failing tests and
+# asserting its report — meta, but fully deterministic.
+
+[[bin]]
+name = "testkit-demo"
+path = "src/main.rs"

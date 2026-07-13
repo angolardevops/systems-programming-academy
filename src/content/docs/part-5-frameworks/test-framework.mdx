@@ -1,0 +1,374 @@
+---
+title: "Test Framework: Building the Tool We Used"
+description: Build a tiny test framework in Rust, Go, and Python — assertions, a runner that isolates failures and catches panics, and the canonical pass/fail report you read after every lesson. Byte-identical output across all three.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Every lesson in this academy ended with a green report: `test x ... ok`,
+`test result: ok`. You have read that output dozens of times without building
+the thing that produces it. This lesson closes the loop — a **test framework**,
+the tool the whole curriculum leaned on, built from the inside in all three
+languages. It is a fitting near-final lesson: the frameworks we build things
+*with* are themselves just programs, and a test runner is one of the smallest
+complete ones.
+
+Three pieces, shared by cargo test, `go test`, pytest, and JUnit alike:
+
+- **Assertions** that turn a condition into a *descriptive* failure — not a bare
+  `false`, but `expected 4, got 5`. A test that fails without telling you why is
+  barely better than no test.
+- **A registry and runner** that runs each test in **isolation**, so one test's
+  failure — or outright crash — does not stop the rest. This isolation is the
+  single property that makes a suite of hundreds of tests usable.
+- **A canonical report** — the summary you have been reading — deterministic and
+  byte-identical across languages.
+
+<Aside type="note" title="Testing the test framework">
+  How do you test a test framework? The only honest way: feed it known-passing
+  and known-failing tests and assert its *report*. Our tests build a kit with a
+  deliberate failure and check that the summary says `2 passed; 1 failed` with
+  the right failure line. Meta, but fully deterministic — the framework's output
+  is just a string.
+</Aside>
+
+Code:
+[`examples/part5-testkit-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 5 tests each, and the report is **byte-identical across all
+three languages**.
+
+## Assertions: a condition plus a reason
+
+An assertion compares and, on mismatch, produces a message that names both
+sides. That message is the difference between a five-second fix and a debugging
+session:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn assert_eq<T: PartialEq + std::fmt::Debug>(actual: T, expected: T) -> Check {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?}, got {actual:?}"))
+    }
+}
+```
+
+`Check` is `Result<(), String>`: `Ok` passed, `Err(message)` failed. The generic
+bound `PartialEq + Debug` lets one assertion compare any comparable, printable
+type.
+</TabItem>
+<TabItem label="Go">
+```go title="testkit.go"
+func AssertEq[T comparable](actual, expected T) Check {
+    if actual == expected {
+        return nil
+    }
+    return fmt.Errorf("expected %v, got %v", expected, actual)
+}
+```
+
+`Check` is Go's `error`: `nil` passed, a non-nil error failed. The generic
+constraint `comparable` (Go 1.18+) lets one assertion serve every comparable
+type.
+</TabItem>
+<TabItem label="Python">
+```python title="testkit.py"
+def assert_eq(actual: object, expected: object) -> None:
+    if actual != expected:
+        raise AssertionFail(f"expected {expected!r}, got {actual!r}")
+```
+
+Python signals failure the Pythonic way — by *raising*. An assertion that passes
+returns `None`; one that fails raises `AssertionFail` with the message. (This is
+exactly how `unittest` and `pytest`'s `assert` rewriting work underneath.)
+</TabItem>
+</Tabs>
+
+The design fork is visible here: Rust and Go return a value (`Result`/`error`),
+Python raises an exception. Both are valid failure-signalling strategies, and
+each language picks its idiom — but the runner must handle whichever its language
+uses, plus the *unexpected* failures neither anticipated.
+
+## The runner: isolation is the whole point
+
+A test suite is only useful if a failing (or crashing) test does not abort the
+run — you want *all* the results, not just up to the first disaster. So the
+runner wraps each test in a catch: a returned failure becomes a `FAILED`, and a
+**panic / exception** is caught and *also* turned into a failure, never allowed
+to kill the process.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+let result = panic::catch_unwind(AssertUnwindSafe(body));
+let outcome = match result {
+    Ok(Ok(())) => Outcome::Pass,
+    Ok(Err(message)) => Outcome::Fail(message),
+    Err(payload) => {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Outcome::Fail(format!("panicked: {msg}"))
+    }
+};
+```
+
+`std::panic::catch_unwind` stops a panicking test from unwinding past the runner;
+the payload is downcast to recover the panic message.
+</TabItem>
+<TabItem label="Go">
+```go title="testkit.go"
+func runOne(tc testCase) (result outcome) {
+    result.name = tc.name
+    defer func() {
+        if r := recover(); r != nil {
+            result.failed = true
+            result.message = fmt.Sprintf("panicked: %v", r)
+        }
+    }()
+    if err := tc.body(); err != nil {
+        result.failed = true
+        result.message = err.Error()
+    }
+    return result
+}
+```
+
+Go's `recover()` inside a deferred function catches a panic and converts it to a
+failure — the named return value lets the deferred closure set the outcome.
+</TabItem>
+<TabItem label="Python">
+```python title="testkit.py"
+try:
+    body()
+    outcomes.append(_Outcome(name, False, ""))
+except AssertionFail as e:
+    outcomes.append(_Outcome(name, True, str(e)))
+except Exception as e:  # test isolation is the point
+    outcomes.append(_Outcome(name, True, f"raised: {e!r}"))
+```
+
+Python catches the expected `AssertionFail` and, separately, *any* other
+exception — a broad `except` that would be a smell anywhere else but is exactly
+right here: isolating arbitrary test crashes is the runner's job.
+</TabItem>
+</Tabs>
+
+Each implementation has a test proving it: a suite where the first test panics
+and the second passes must report `1 failed; 1 passed` — the panic did not stop
+the run. That is the property. A test framework that let one crash abort the
+suite would be useless on the day you most need it.
+
+<Mermaid title="The runner isolates each test; a crash becomes a failure, not a stopped run" code={`flowchart TD
+  R["run all tests in order"] --> T1["test 1: catch failure/panic"]
+  T1 --> T2["test 2: catch failure/panic"]
+  T2 --> T3["test 3: catch failure/panic"]
+  T1 -.->|panic| F1["record FAILED, continue"]
+  T3 -.->|Err| F3["record FAILED, continue"]
+  T3 --> REP["report: N passed; M failed"]`} />
+
+## The canonical report
+
+The runner collects outcomes and renders the summary you know. The format is
+fixed so the output is deterministic and identical across languages:
+
+```text
+running 3 tests
+test adds ... ok
+test subtracts ... FAILED
+test multiplies ... ok
+
+failures:
+    subtracts: expected 2, got 3
+
+test result: FAILED. 2 passed; 1 failed
+```
+
+Rust, Go, and Python emit this **to the byte** — the same guarantee every
+cross-language project in this academy has rested on, now applied to the very
+tool that checks them. The header counts the tests, each line reports one
+outcome in registration order, the `failures:` block lists each failure with its
+descriptive message, and the final line is the machine-readable verdict a CI
+system greps for. This is not a toy resemblance to `cargo test` output — it is
+the same information, in the same shape, for the same reasons.
+
+<Aside type="tip" title="What real frameworks add">
+  Production frameworks add discovery (finding tests by naming convention or
+  attribute), fixtures and setup/teardown, parametrization, parallel execution,
+  rich diffs on failure, timing, filtering by name, and machine-readable output
+  (TAP, JUnit XML). But the core is exactly this: assert, isolate, report. Every
+  feature is scaffolding around that spine — which is why you can now read any
+  test runner's source and recognize its bones.
+</Aside>
+
+## Exercises
+
+**1. Add `assert_contains` and `assert_raises` (all three).** Extend the
+assertion set: one that checks a string contains a substring, and one that runs
+a closure and passes only if it fails/raises. What makes a *good* failure message
+for each — what does the reader need to see?
+
+<details>
+<summary>Solution sketch</summary>
+
+`assert_contains(haystack, needle)` should fail with both strings shown
+(`"abc" does not contain "x"`), because "not found" alone forces the reader to go
+look them up. `assert_raises` inverts the runner's own logic — it passes when the
+inner closure fails and fails when it unexpectedly succeeds, and its message
+should say which happened. Good assertion messages follow one rule: show enough
+that the reader never has to re-run to understand the failure. That is the same
+"loud, specific failure" principle from the validation and DI lessons.
+
+</details>
+
+**2. Add timing and a slow-test warning (Rust or Go).** Measure each test's
+duration and mark any over a threshold. Where does the measurement go, and why
+must it be *outside* the assertion but *inside* the isolation boundary?
+
+<details>
+<summary>Solution sketch</summary>
+
+The clock wraps the `body()` call inside `runOne`/the catch block: you want to
+time the whole test including a panic's unwinding, but the timing code itself
+must not be what crashes. Reporting per-test duration and flagging slow ones is
+how real runners surface the test that quietly grew from 1 ms to 3 s — an
+observability feature, the same instinct as the Part 2 logging lesson, applied to
+the test suite itself.
+
+</details>
+
+**3. Add test discovery (any language).** Instead of manually registering each
+test, discover them: in Python, functions named `test_*` in a module; in Go/Rust,
+a registration macro or a slice populated at init. What does automatic discovery
+buy, and what does it cost in explicitness?
+
+<details>
+<summary>Solution sketch</summary>
+
+Discovery removes the boilerplate of registering every test by hand (and the bug
+of forgetting to) — you write a test and it runs, which is why pytest and `go
+test` use naming conventions. The cost is magic: the connection between "this
+function exists" and "it runs" becomes implicit, discoverable only by knowing the
+convention, and mis-naming a test silently skips it. This is the explicit-vs-
+convenient trade-off from the DI-container lesson again: automatic wiring is less
+code but more to know.
+
+</details>
+
+<Quiz
+  question={'A test framework runs a suite where the second of five tests panics. What should a good runner do?'}
+  options={[
+    { text: 'Catch the panic, record that test as FAILED, and continue running tests 3-5 — so you get all five results', correct: true, explanation: 'Isolation is the defining feature of a usable runner: one test crashing must not prevent the others from reporting. The panic is caught (catch_unwind / recover / except), turned into a FAILED with the panic message, and the run continues. You want the complete picture, not just what happened before the first crash.' },
+    { text: 'Stop immediately and report only the first two results', correct: false, explanation: 'Aborting on the first crash is exactly the failure mode isolation prevents. On a large suite you would fix one crash, re-run, hit the next, re-run — instead of seeing all failures at once. The runner must continue.' },
+    { text: 'Let the panic propagate and crash the whole test process', correct: false, explanation: 'That is what happens WITHOUT a runner. The runner exists precisely to contain crashes so the suite survives them; letting the process die defeats the purpose.' },
+    { text: 'Skip the panicking test silently and report four tests', correct: false, explanation: 'Silently dropping a crashed test hides a real failure — worse than reporting it. A panic is a failure and must be counted and shown, not swept away.' },
+  ]}
+/>
+
+<Quiz
+  question={'Why does assert_eq produce "expected 4, got 5" instead of just failing with "false"?'}
+  options={[
+    { text: 'Because a descriptive message lets you understand the failure without re-running or adding prints — it shows both the expected and actual values at the failure site', correct: true, explanation: 'A bare "assertion failed" tells you where but not what; "expected 4, got 5" tells you the actual discrepancy immediately, often making the cause obvious. Good assertion messages are the difference between a glance and a debugging session — the same loud, specific-failure principle the whole academy applies.' },
+    { text: 'Because the framework requires all assertions to return strings', correct: false, explanation: 'The message is a design choice for the reader, not a framework requirement. A framework could report a bare boolean; the point is that it should not, because the message is what makes a failure actionable.' },
+    { text: 'Because comparing values is faster than checking a boolean', correct: false, explanation: 'Both do the same comparison; the difference is only in what is reported on failure. Performance is irrelevant — usefulness of the message is the reason.' },
+    { text: 'Because "false" is not a valid failure value', correct: false, explanation: 'A boolean failure is perfectly valid mechanically; it is just unhelpful. The reason for the rich message is human debuggability, not correctness of the value.' },
+  ]}
+/>
+
+<Quiz
+  question={'How would you test a test framework itself?'}
+  options={[
+    { text: 'Feed it known-passing and known-failing tests and assert on its report — the report is a deterministic string you can compare exactly', correct: true, explanation: 'The framework\'s observable behavior is the report it produces, so you drive it with a controlled suite (some passing, one failing, one panicking) and assert the summary text and the pass/fail counts. It is meta but not circular: you are testing the runner\'s output with ordinary equality checks, which need no framework of their own.' },
+    { text: 'You cannot test a test framework; it is turtles all the way down', correct: false, explanation: 'There is no infinite regress: the framework\'s output is just a string, and asserting a string needs only plain equality, not another framework. The meta-level bottoms out immediately.' },
+    { text: 'Run it on the real test suite and see if the app works', correct: false, explanation: 'That tests the app, not the framework — it would not catch a runner that miscounts failures or mangles the report. You need controlled inputs with known outcomes to test the framework itself.' },
+    { text: 'Only by formal proof, since tests would be circular', correct: false, explanation: 'No proof or circularity is involved: driving the framework with known inputs and checking its string output is ordinary testing. The report is data you compare directly.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="What are the essential components of a test framework?">
+
+Three. First, assertions: functions that check a condition and, on failure,
+produce a message naming the expected and actual values — the message is what
+makes a failure diagnosable. Second, a runner that executes each test in
+isolation, catching both expected failures and unexpected crashes (panics,
+exceptions) so one bad test cannot abort the suite — this isolation is the
+property that makes a large suite usable. Third, reporting: a deterministic
+summary of which tests ran, which passed, which failed and why, in a format both
+humans and CI can read. Everything a production framework adds — discovery,
+fixtures, parametrization, parallelism, rich diffs — is built on that spine. If
+asked to build one, I would start exactly there: an assertion that returns a
+descriptive result, a runner that wraps each test in a catch, and a report
+function, then layer conveniences on top.
+
+</Interview>
+
+<Interview question="Why must a test runner catch panics/exceptions, and how does that differ from normal error handling?">
+
+Because tests are adversarial code that *will* crash — that is partly their job —
+and a crash in one test must not prevent the other tests from running and
+reporting. So the runner deliberately catches *everything*, including the broad
+"any exception" or "any panic" that normal application code should not swallow.
+This is the rare, legitimate use of a catch-all: in application code, catching
+every exception hides bugs; in a test runner, catching every exception *is* the
+feature, because the runner's contract is "give me all the results no matter what
+each test does". The distinction is intent — normal error handling recovers from
+anticipated failures and lets the unexpected propagate; a test runner treats the
+unexpected as data to report, converting a crash into a `FAILED` line rather than
+a dead process. Mixing these up — swallowing errors in app code, or letting a
+test crash the suite — is a classic mistake.
+
+</Interview>
+
+<Interview question="What makes test output good, for humans and for machines?">
+
+For humans: descriptive failures (expected vs actual, not just "failed"), a
+clear pass/fail count, failures grouped and easy to scan, and determinism so the
+same run always reads the same. For machines: a stable, parseable final verdict
+(our `test result: FAILED. 2 passed; 1 failed`) and, ideally, a structured
+format (TAP, JUnit XML) a CI system can ingest to mark the build and annotate a
+PR. The two audiences pull slightly differently — humans want readable prose,
+machines want rigid structure — which is why real runners often emit both a
+pretty console format and a machine format. The unifying requirement is
+determinism: flaky or reordered output breaks human trust and machine parsing
+alike, so canonical, ordered, reproducible output is the foundation both depend
+on — the same byte-identical property this whole academy used to compare
+languages.
+
+</Interview>
+
+## Challenge
+
+Use your framework to test one of the earlier lessons' modules — re-implement a
+few of the query-builder or validation tests on top of *your* `assert_eq` and
+runner, and confirm you get the same green report. Then add the one feature you
+missed most while writing tests in this academy — parametrized cases, a better
+diff, `assert_raises`, timing — and feel the framework improve under your own
+hand. You will have completed the loop the whole curriculum drew: you learned by
+running tests, and now you have built the thing that ran them, understood from
+the assertion up. There is no deeper way to know a tool than to have written it.
+
+## References & further reading
+
+- Rust — [the built-in test harness](https://doc.rust-lang.org/book/ch11-00-testing.html) · [`std::panic::catch_unwind`](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)
+- Go — [`testing`](https://pkg.go.dev/testing) · [how `go test` works](https://go.dev/blog/subtests)
+- Python — [`unittest`](https://docs.python.org/3/library/unittest.html) · [pytest's assertion rewriting](https://docs.pytest.org/en/stable/how-to/assert.html)
+- [Test Anything Protocol (TAP)](https://testanything.org/) · [JUnit XML](https://github.com/testmoapp/junitxml) — machine-readable test output formats
+- Kent Beck — *Test-Driven Development: By Example* (builds a test framework as its worked example)
+
+<Progress />
