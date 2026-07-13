@@ -29,6 +29,7 @@ bar over time.
 | **Part 4 → Concurrency & Parallelism** (3 lessons + mini-NGINX, 3 languages) | ✅ Complete, tested & benchmarked |
 | **Part 5 → Building Frameworks** (routing · query builder · DI container · validation · template engine, 3 languages) | ✅ Complete, tested (5 lessons) |
 | **Capstone → Secure Guestbook** (composes the frameworks; SQLi + XSS defeated, 3 languages) | ✅ Complete & tested |
+| **Capstone → Running App** (HTTP server + real SQLite; SQLi defeated against actual SQLite, 3 languages) | ✅ Complete & tested |
 
 **Part 1 · Foundations is complete across all three languages — 20 lessons.**
 
