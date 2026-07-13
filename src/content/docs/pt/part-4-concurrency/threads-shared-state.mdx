@@ -1,0 +1,641 @@
+---
+title: Threads & Estado Partilhado
+description: Um contador, quatro threads, quatro milhões de incrementos — medidos com data race, mutex, atómico e batching em Rust, Go e Python. Onde o compilador te salva, onde o race detector salva, e onde o GIL muda o jogo.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+As Partes 1–3 usaram concorrência como *ferramenta*: espalhar, esperar,
+recolher. A Parte 4 torna-a o *assunto*. Ao longo desta parte subimos de
+threads cruas para channels e para I/O assíncrono, e terminamos a construir um
+*mini-NGINX* — um servidor web concorrente a sério — nas três linguagens.
+
+Começamos por baixo, com a pergunta mais antiga e afiada da programação
+concorrente: **o que acontece quando duas threads tocam na mesma memória?**
+A experiência é deliberadamente minúscula — um contador partilhado, quatro
+threads, um milhão de incrementos cada — porque a este tamanho nada fica
+escondido. Corremos mal, depois corremos em segurança de três formas
+diferentes, e medimos tudo.
+
+<Aside type="note" title="Pré-requisitos">
+  As lições de concorrência da Parte 1
+  ([Rust](/systems-programming-academy/pt/part-1-foundations/rust/concurrency/),
+  [Go](/systems-programming-academy/pt/part-1-foundations/go/concurrency/))
+  cobrem criar e juntar threads. Esta lição assume isso e foca-se em
+  *partilhar*.
+</Aside>
+
+Código:
+[`examples/part4-threads-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um limpo em fmt/lint com 6–7 testes; todos os números abaixo foram
+medidos pelos harnesses incluídos, na mesma máquina.
+
+## A experiência: `counter += 1`, quatro de cada vez
+
+`counter += 1` parece atómico. Não é — é um **read-modify-write**: carregar o
+valor, somar um, escrever de volta. Quando duas threads intercalam esses três
+passos, um incremento sobrescreve o outro e perde-se para sempre:
+
+<Mermaid title="Um update perdido: ambas leem 41, ambas escrevem 42 - um incremento desaparece" code={`sequenceDiagram
+    participant A as Thread A
+    participant M as counter (memoria)
+    participant B as Thread B
+    A->>M: le -> 41
+    B->>M: le -> 41
+    A->>M: escreve 42
+    B->>M: escreve 42
+    Note over M: dois incrementos aconteceram, o contador andou um`} />
+
+Quatro threads com um milhão de incrementos cada deviam produzir exatamente
+**4.000.000**. Eis o que acontece de facto em cada linguagem com a versão
+ingénua.
+
+### Rust: a race é um erro de compilação
+
+```rust title="racy.rs — NÃO compila"
+use std::thread;
+
+fn main() {
+    let mut counter = 0u64;
+    thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                for _ in 0..1_000_000 {
+                    counter += 1; // data race: dois `&mut` ao mesmo tempo
+                }
+            });
+        }
+    });
+    println!("{counter}");
+}
+```
+
+```text
+error[E0499]: cannot borrow `counter` as mutable more than once at a time
+ --> racy.rs:7:21
+  |
+7 |             s.spawn(|| {
+  |             -       ^^ `counter` was mutably borrowed here in the
+  |                        previous iteration of the loop
+9 |                     counter += 1; // data race: dois `&mut` ao mesmo tempo
+  |                     ------- borrows occur due to use of `counter` in closure
+```
+
+Este é o maior dividendo do sistema de ownership da Parte 1: uma data race
+exige duas threads com `&mut` para os mesmos dados, e a regra de *uma
+referência mutável* do borrow checker torna isso irrepresentável. A promessa
+do Rust é precisa — código safe não pode ter data races. Este bug não se
+executa; nunca chega a existir.
+
+### Go: compila, corre, e perde 65% do trabalho em silêncio
+
+```go title="racy.go — compila sem queixas, está errado"
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var counter uint64
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 1_000_000 {
+				counter++ // data race: read-modify-write sem sincronização
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(counter)
+}
+```
+
+```text
+$ go run racy.go
+1403205
+```
+
+**1.403.205** — não 4.000.000. Dois milhões e meio de incrementos desapareceram
+em silêncio como updates perdidos, e o número muda a cada execução. É por isto
+que o Go traz um race detector e que o nosso CI corre `go test -race` em todos
+os módulos:
+
+```text
+$ go run -race racy.go
+==================
+WARNING: DATA RACE
+Read at 0x00c00011a028 by goroutine 10:
+  main.main.func1()
+      racy.go:16 +0x99
+
+Previous write at 0x00c00011a028 by goroutine 8:
+  main.main.func1()
+      racy.go:16 +0xab
+==================
+```
+
+O detetor aponta a linha exata e as duas goroutines. A disciplina que exige:
+o race detector só vê races que *acontecem durante a execução*, por isso
+pertence ao CI, onde os testes exercitam os caminhos concorrentes — não só ao
+teu portátil quando te lembras.
+
+### Python: o GIL protege bytecodes, não a tua lógica
+
+O **Global Interpreter Lock** do CPython só deixa uma thread executar bytecode
+Python de cada vez. Isso torna cada bytecode individual atómico — mas
+`counter += 1` são *vários* bytecodes (load, add, store), e o interpretador
+pode trocar de thread entre eles. A race é real; é apenas mais difícil de
+observar do que em Go, porque a troca grosseira do GIL (a cada ~5 ms por
+omissão, `sys.getswitchinterval()`) torna a janela pequena. Com azar no timing
+ou um `+=` mais lento (num objeto com `__iadd__` custom, por exemplo), perdes
+updates sem erro e sem detetor.
+
+A regra que se segue: **o GIL não é uma ferramenta de sincronização.** Se duas
+threads mudam estado partilhado, usas lock — como em Go, como em Rust.
+
+## Três estratégias seguras, medidas
+
+Os módulos testados implementam as mesmas três estratégias em cada linguagem:
+lock em cada incremento, inteiro atómico (Rust e Go), ou **batching** —
+acumular um total local à thread e fundir sob o lock uma vez por thread.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Incrementa um contador protegido por `Mutex` a partir de `n_threads`
+/// threads, `iters` vezes cada. Devolve sempre exatamente
+/// `n_threads * iters`.
+///
+/// Threads com scope podem pedir emprestado um simples `&Mutex<u64>`;
+/// `Arc` só é preciso quando as threads sobrevivem ao scope que as criou.
+pub fn counter_mutex(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    *counter.lock().unwrap() += 1;
+                }
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
+
+/// Mesmo contrato, mas lock-free: `fetch_add` num inteiro atómico.
+/// Uma instrução de hardware em vez de lock/unlock.
+pub fn counter_atomic(n_threads: usize, iters: u64) -> u64 {
+    let counter = AtomicU64::new(0);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                for _ in 0..iters {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    counter.into_inner()
+}
+
+/// Variante batched: cada thread acumula localmente e toma o lock
+/// **uma vez** no fim. A contenção cai de `n * iters` operações de lock
+/// para `n`.
+pub fn counter_batched(n_threads: usize, iters: u64) -> u64 {
+    let counter = Mutex::new(0u64);
+    thread::scope(|s| {
+        for _ in 0..n_threads {
+            s.spawn(|| {
+                let mut local = 0u64;
+                for _ in 0..iters {
+                    local += 1;
+                }
+                *counter.lock().unwrap() += local;
+            });
+        }
+    });
+    counter.into_inner().unwrap()
+}
+```
+
+Repara no que o sistema de tipos codifica: `Mutex<u64>` *possui* os dados que
+protege — não chegas ao `u64` sem passar por `lock()`. Em Go e Python o mutex
+e os dados são apenas vizinhos, e a ligação vive na tua cabeça.
+</TabItem>
+<TabItem label="Go">
+```go title="threads.go"
+// CounterMutex incrementa um contador protegido por mutex a partir de
+// nGoroutines goroutines, iters vezes cada.
+func CounterMutex(nGoroutines int, iters uint64) uint64 {
+	var (
+		mu      sync.Mutex
+		counter uint64
+		wg      sync.WaitGroup
+	)
+	for range nGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iters {
+				mu.Lock()
+				counter++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return counter
+}
+
+// CounterAtomic é a variante lock-free: atomic.Uint64.Add compila para
+// uma instrução de hardware em vez de um par lock/unlock.
+func CounterAtomic(nGoroutines int, iters uint64) uint64 {
+	var (
+		counter atomic.Uint64
+		wg      sync.WaitGroup
+	)
+	for range nGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iters {
+				counter.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	return counter.Load()
+}
+
+// CounterBatched acumula localmente e toma o lock uma vez por goroutine:
+// a contenção cai de n*iters operações de lock para n.
+func CounterBatched(nGoroutines int, iters uint64) uint64 {
+	var (
+		mu      sync.Mutex
+		counter uint64
+		wg      sync.WaitGroup
+	)
+	for range nGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var local uint64
+			for range iters {
+				local++
+			}
+			mu.Lock()
+			counter += local
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return counter
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="threads_demo.py"
+def counter_locked(n_threads: int, iters: int) -> int:
+    """Incrementa um contador partilhado sob um ``threading.Lock``.
+
+    Devolve sempre exatamente ``n_threads * iters`` — o lock torna o
+    read-modify-write atómico.
+    """
+    counter = 0
+    lock = threading.Lock()
+
+    def work() -> None:
+        nonlocal counter
+        for _ in range(iters):
+            with lock:
+                counter += 1
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
+
+
+def counter_batched(n_threads: int, iters: int) -> int:
+    """Acumula localmente, toma o lock uma vez por thread.
+
+    Mesmo contrato que :func:`counter_locked` com ``n`` aquisições do lock
+    em vez de ``n * iters``.
+    """
+    counter = 0
+    lock = threading.Lock()
+
+    def work() -> None:
+        nonlocal counter
+        local = 0
+        for _ in range(iters):
+            local += 1
+        with lock:
+            counter += local
+
+    threads = [threading.Thread(target=work) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return counter
+```
+
+A stdlib não tem inteiro atómico — o padrão batched é a resposta do Python à
+contenção. (`with lock:` é `lock.acquire()`/`release()` com segurança perante
+exceções — a mesma garantia que o Rust obtém do destrutor do `MutexGuard` e o
+Go do `defer mu.Unlock()`.)
+</TabItem>
+</Tabs>
+
+As seis funções têm o mesmo teste: o resultado tem de ser **exatamente**
+`n_threads × iters`. Não aproximadamente — exatamente. Correção em concorrência
+é binária.
+
+## Os números
+
+Quatro threads, um milhão de incrementos cada (Rust em release, Go via
+`go test -bench`; a mesma máquina Linux de 20 cores):
+
+<Benchmark
+  metric="4 threads x 1M incrementos de um contador partilhado (menor é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust — mutex por incremento", value: 356, unit: "ms" },
+    { label: "Go — mutex por incremento", value: 112, unit: "ms" },
+    { label: "Rust — fetch_add atómico", value: 51, unit: "ms" },
+    { label: "Go — Add atómico", value: 49, unit: "ms" },
+    { label: "Go — batched (lock uma vez)", value: 0.32, unit: "ms" },
+    { label: "Rust — batched (lock uma vez)", value: 0.16, unit: "ms" },
+  ]}
+/>
+
+O Python corre um quarto da carga (4 × 250k) porque incrementos interpretados
+são ~50× mais lentos — escala em conformidade ao comparar:
+
+<Benchmark
+  metric="Python: 4 threads x 250k incrementos (um quarto da carga)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "lock por incremento", value: 171, unit: "ms" },
+    { label: "batched (lock uma vez)", value: 24, unit: "ms" },
+  ]}
+/>
+
+Três conclusões para interiorizar:
+
+**Atómicos custam o mesmo em Rust e Go (~50 ms) — porque a linguagem é
+irrelevante.** Ambos compilam `fetch_add` / `Add` para a mesma instrução x86
+`lock xadd`. A este nível estás a medir o protocolo de coerência de cache do
+CPU, não a linguagem: os quatro cores lutam pela posse exclusiva da cache line
+onde o contador vive.
+
+**O mutex contendido do Go bateu o do Rust por 3× (112 ms vs 356 ms).** Não
+porque o Go seja "mais rápido" — porque o lock está integrado com o scheduler
+do runtime. Quando uma goroutine falha o lock, o Go estaciona-a e corre outra
+goroutine, tudo em userspace. O `std::sync::Mutex` do Rust, sob a mesma
+contenção brutal, faz syscalls futex para estacionar threads do SO, e as idas
+ao kernel acumulam. (Crates como o `parking_lot` encurtam a distância; sob
+contenção *baixa* os mutexes são comparáveis.) A lição medida: o mesmo nome de
+primitiva pode esconder maquinaria muito diferente.
+
+**O batching ganha por três ordens de grandeza — 0,16 ms vs 356 ms.** As
+1.000.000× menos operações de lock devolvem o benchmark de sincronização a um
+loop de aritmética. Esta é a verdadeira moral da lição: o caro nunca foi o
+mutex — foi a **contenção**, quatro cores serializados numa única posição de
+memória. A sincronização mais rápida é a que não fazes. Os sistemas reais
+aplicam isto por todo o lado: contadores per-CPU no kernel Linux, métricas
+locais ao shard agregadas no scrape, arenas thread-local nos allocators.
+
+<Aside type="tip" title="Regra de design">
+  Antes de procurar um lock mais rápido, reduz a frequência com que o tomas.
+  Partilha **resultados**, não **trabalho a meio**.
+</Aside>
+
+## Prova dos nove: o trabalho acelera mesmo?
+
+Contadores medem o custo de partilhar. A outra metade da história: com
+trabalho embaraçosamente paralelo (somar um array grande por blocos), as
+threads entregam? O `sum_parallel` de cada módulo divide os dados por N
+threads:
+
+<Benchmark
+  metric="Somar 50M inteiros, 1 thread vs 4 (Rust/Go); Python soma 5M (um décimo da carga)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust — 1 thread (50M)", value: 20.7, unit: "ms" },
+    { label: "Rust — 4 threads (50M)", value: 10.1, unit: "ms" },
+    { label: "Go — 1 goroutine (50M)", value: 24.5, unit: "ms" },
+    { label: "Go — 4 goroutines (50M)", value: 11.1, unit: "ms" },
+    { label: "Python — 1 thread (5M)", value: 54, unit: "ms" },
+    { label: "Python — 4 threads (5M)", value: 60, unit: "ms", note: "GIL: sem speedup" },
+  ]}
+/>
+
+Mais duas lições medidas:
+
+**Rust e Go aceleram ~2×, não 4×.** Somar faz uma adição por cada load de 8
+bytes — os cores passam o tempo à espera da RAM, e quatro cores partilham um
+bus de memória. Esta carga é **limitada pela largura de banda de memória**; o
+paralelismo ajuda até o bus saturar. A lei de Amdahl tem um primo de hardware.
+
+**As 4 threads do Python são *mais lentas* do que 1 (60 ms vs 54 ms).** O GIL
+serializa os loops CPU-bound — concorrência sem paralelismo — e a troca de
+threads ainda acrescenta overhead. Este único número explica uma escola de
+arquitetura inteira: para Python CPU-bound usa-se `multiprocessing` (processos
+separados, GILs separados) ou empurra-se o loop para C/NumPy (que largam o
+GIL). Threads em Python pagam-se em trabalho **I/O-bound**, onde o GIL é
+libertado em cada chamada bloqueante — exatamente a razão pela qual a thread
+pool do agente de health-check da Parte 3 funcionou tão bem. (A PEP 703 torna
+o GIL opcional nos builds free-threaded do Python 3.13+; o CPython de produção
+hoje ainda corre com ele.)
+
+<Mermaid title="Escolher uma estrategia de partilha" code={`flowchart TD
+  A[Threads partilham um valor?] -->|so leitura| B[Partilha sem lock]
+  A -->|com mutacao| C{Com que frequencia?}
+  C -->|hot loop| D[Reestrutura: acumula local, funde uma vez]
+  C -->|ocasional| E{Inteiro simples?}
+  E -->|sim| F[Atomico - Rust/Go]
+  E -->|nao| G[Mutex a volta dos dados]
+  D --> H[Contencao ~zero]`} />
+
+## Exercícios
+
+**1. Perde updates de propósito (Go).** Pega no `CounterMutex`, apaga o par
+`mu.Lock()`/`mu.Unlock()` e corre o teste com e sem `-race`. Quantos
+incrementos sobrevivem na tua máquina? Porque é que o total muda a cada
+execução?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Sem `-race` o teste falha com um total aleatório (o nosso imprimiu 1.403.205
+de 4.000.000 — o teu número será diferente, porque a perda depende de como o
+scheduler intercala as janelas de read-modify-write). Com `-race` a execução
+aborta com um `WARNING: DATA RACE` a apontar a linha `counter++` em duas
+goroutines. A variabilidade é o ponto: uma data race não é um bug determinista
+que reproduzes e corriges por observação — tem de ser prevenida
+estruturalmente.
+
+</details>
+
+**2. Encontra o ponto de viragem (Rust).** O `counter_mutex` toma o lock 4M
+vezes; o `counter_batched`, 4. Escreve uma variante que toma o lock a cada `k`
+incrementos e cronometra-a para k = 1, 10, 100, 1000. Onde é que a curva
+achata?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Acumula em `local` e, quando `local % k == 0`, funde e limpa. Na nossa máquina
+a curva colapsa depressa: k=10 é ~10× melhor que k=1, k=100 fica a ~2× do
+batching total, k=1000 é indistinguível dele. A forma diz-te que o custo de
+contenção amortiza rápido — raramente precisas de batching *perfeito*, só de
+batching *suficiente*.
+
+</details>
+
+**3. Liberta o GIL (Python).** Substitui o `sum(chunk)` puro por slices de
+`array.array`, e depois repete a experiência com NumPy (`np.sum`), que liberta
+o GIL. Mede 1 vs 4 threads nas duas variantes. O que muda e porquê?
+
+<details>
+<summary>Esboço de solução</summary>
+
+As variantes em Python puro e `array.array` não mostram speedup — o loop
+continua a correr bytecode sob o GIL. Com NumPy, 4 threads aproximam-se de um
+speedup real porque o `np.sum` larga o GIL e corre loops em C em paralelo. A
+regra geral: threads em Python só paralelizam as partes que libertam o GIL
+(extensões C, I/O bloqueante).
+
+</details>
+
+<Quiz
+  question={'Quatro threads correm `counter += 1` um milhão de vezes cada, sem sincronização, em Go. Qual é o resultado garantido?'}
+  options={[
+    { text: 'O programa imprime um valor ≤ 4.000.000, mas qual valor é imprevisível', correct: true, explanation: 'Updates perdidos só podem perder incrementos, nunca inventá-los — mas quantos se perdem depende do scheduling. A nossa execução imprimiu 1.403.205; a tua vai diferir. Nada mais é garantido: nem erro, nem crash, nem deteção.' },
+    { text: 'O programa rebenta com um erro de runtime', correct: false, explanation: 'Data races em Go não rebentam em inteiros — corrompem em silêncio. Só o race detector (um build opt-in separado) as reporta.' },
+    { text: 'O resultado é 4.000.000 porque incrementos são atómicos em x86', correct: false, explanation: 'O `inc` em memória do x86 não é atómico entre cores sem o prefixo `lock`, e o read-modify-write compilado são várias instruções de qualquer forma. As perdas acontecem na prática — medimos 65% desaparecidos.' },
+    { text: 'O Go recusa compilar acesso partilhado sem sincronização', correct: false, explanation: 'Isso é o Rust. O Go compila de bom grado; a segurança fica adiada para o race detector em runtime, que só reporta races que ocorrem de facto numa execução instrumentada.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que o contador batched bateu o mutex por incremento em ~1000x, se o mutex em si custa nanossegundos?'}
+  options={[
+    { text: 'Porque o custo era a contenção — serializar quatro cores numa posição de memória — não a instrução de lock em si', correct: true, explanation: 'Cada incremento com lock força a transferência de posse da cache line entre cores e, muitas vezes, uma espera futex. O batching remove 99,9999% desses pontos de sincronização, e o trabalho volta à velocidade de aritmética simples.' },
+    { text: 'Porque a versão batched faz menos adições', correct: false, explanation: 'Faz exatamente as mesmas 4M adições — mais 4 fusões. A aritmética é idêntica; só a frequência de sincronização mudou.' },
+    { text: 'Porque os mutexes ficam mais lentos quanto mais tempo são mantidos', correct: false, explanation: 'Cada posse aqui dura nanossegundos. O problema é a frequência com que o lock é tomado sob contenção, não o tempo que é mantido.' },
+    { text: 'Porque o compilador otimiza variáveis locais para registos', correct: false, explanation: 'Verdade mas insuficiente — isso explica talvez 2-3x. Os 1000x vêm de eliminar a sincronização inter-core em cada iteração.' },
+  ]}
+/>
+
+<Quiz
+  question={'Um job Python CPU-bound demora 40s numa thread. Um colega divide-o por 4 threads. O que deves esperar em CPython?'}
+  options={[
+    { text: 'Cerca de 40s ou ligeiramente pior — o GIL serializa bytecode CPU-bound; usa multiprocessing ou uma biblioteca que liberte o GIL', correct: true, explanation: 'Medimos exatamente isto: 4 threads somaram 5M inteiros em 60ms vs 54ms de uma thread. Threads só ajudam em Python quando o trabalho liberta o GIL (I/O, extensões C).' },
+    { text: 'Cerca de 10s — quatro threads, quatro cores', correct: false, explanation: 'Só uma thread executa bytecode Python de cada vez sob o GIL. Quatro threads CPU-bound revezam-se; não correm em paralelo.' },
+    { text: 'Uma data race a corromper os resultados', correct: false, explanation: 'Dividir trabalho em blocos independentes não tem estado mutável partilhado, logo não há race — o problema é o speedup ausente, não corrupção.' },
+    { text: 'Um deadlock entre as threads e o GIL', correct: false, explanation: 'O GIL é adquirido e libertado pelo próprio interpretador à volta de cada janela de bytecode; código de utilizador não consegue fazer deadlock contra ele desta forma.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="O que é exatamente uma data race, e como é que Rust, Go e Python lidam com ela?">
+
+Uma data race são duas threads a aceder à mesma posição de memória em
+concorrência, com pelo menos uma a escrever, sem sincronização a ordenar os
+acessos. O Rust torna-a irrepresentável em compilação: `&mut` é exclusivo,
+logo código safe não consegue ter aliases de estado mutável entre threads
+(E0499 na nossa demo). O Go permite-a e fornece um detetor dinâmico (`-race`)
+que reporta races que ocorrem durante execuções instrumentadas — a proteção é
+probabilística e pertence ao CI. O CPython estreita a janela com o GIL (um
+fluxo de bytecode de cada vez), mas operações compostas continuam a
+intercalar-se, por isso mutação partilhada exige locks explícitos; o GIL é um
+detalhe de implementação, não uma API de sincronização.
+
+</Interview>
+
+<Interview question="Quando escolherias um atómico em vez de um mutex, e o que é que nenhum dos dois resolve?">
+
+Atómicos servem estado de uma palavra com transições simples: contadores,
+flags, números de sequência — um `fetch_add` substitui um par lock/unlock e
+não pode fazer deadlock. Um mutex é obrigatório no momento em que uma
+*invariante abrange mais do que uma palavra* — dois campos que têm de mudar
+juntos, uma sequência check-then-act — porque os atómicos só tornam
+indivisíveis operações individuais, não sequências. Nenhum resolve contenção:
+as nossas medições mostram atómicos sob fogo de quatro cores a custar ainda
+300× mais do que a fusão batched, porque os cores continuam a lutar pela mesma
+cache line. Acima de certa taxa de escrita a resposta é estrutural — shard,
+batch, ou entregar o estado a um único dono (próxima lição: channels).
+
+</Interview>
+
+<Interview question="A latência p99 do teu serviço dispara sob carga e o profiling mostra threads bloqueadas num mutex. Quais são as tuas opções?">
+
+Primeiro mede *o que* o lock protege e *quanto tempo* é mantido — contenção é
+frequência × tempo de posse. Depois, por ordem de preferência: (1) encolhe a
+secção crítica — tira I/O, alocação e computação de dentro do lock; (2) reduz
+a frequência — acumula updates thread-local e funde periodicamente, como a
+nossa medição de 1000× mostra; (3) shard — divide um contador/mapa em N com
+lock por hash, cortando a contenção N vezes; (4) muda a posse — entrega o
+estado a um único escritor alimentado por um channel ou fila, e o lock
+desaparece; (5) só então considera locks mais sofisticados (read-write,
+`parking_lot`, estruturas lock-free), que mudam constantes mas raramente
+resolvem um gargalo arquitetural.
+
+</Interview>
+
+<Interview question="Porque é que o GIL existe, e o que muda com o Python free-threaded?">
+
+O GIL tornou a gestão de memória do CPython (contagem de referências) segura e
+rápida sem locking fino em cada objeto — uma troca razoável em 1992 que tornou
+o código single-threaded mais rápido e as extensões C mais simples. O custo
+apareceu décadas depois, quando os cores se multiplicaram: threading CPU-bound
+tornou-se inútil. A PEP 703 (builds free-threaded do Python 3.13+)
+substitui-o por biased reference counting e locks por objeto — threads
+CPU-bound passam a paralelizar de verdade, ao preço de overhead single-thread
+e de uma migração do ecossistema de extensões C que assumia o GIL. A nuance
+que vale pontos em entrevista: o GIL nunca bloqueou threading I/O-bound,
+porque o CPython liberta-o à volta das chamadas bloqueantes.
+
+</Interview>
+
+## Desafio
+
+Instrumenta um programa real: pega no log analyzer da Parte 3 e torna o mapa
+`counts` por classe concorrente — quatro threads, cada uma a fazer parse de um
+quarto do ficheiro. Fá-lo três vezes: um mutex à volta do mapa inteiro, um
+mutex por classe (sharding por chave), e mapas por thread fundidos no fim.
+Compara os três com a versão sequencial no ficheiro de 500k linhas. Vais
+reproduzir a curva desta lição — e descobrir se domina o parsing (CPU) ou a
+contagem (partilha), que é exatamente a pergunta que um profiler responde
+antes de otimizares seja o que for.
+
+## Referências & leitura adicional
+
+- Rust Book cap. 16 — [Fearless Concurrency](https://doc.rust-lang.org/book/ch16-00-concurrency.html)
+- Docs Go — [Data Race Detector](https://go.dev/doc/articles/race_detector) · [The Go Memory Model](https://go.dev/ref/mem)
+- Docs Python — [`threading`](https://docs.python.org/3/library/threading.html) · [PEP 703: CPython free-threaded](https://peps.python.org/pep-0703/)
+- Preshing — [An Introduction to Lock-Free Programming](https://preshing.com/20120612/an-introduction-to-lock-free-programming/)
+- Drepper — [What Every Programmer Should Know About Memory](https://people.freebsd.org/~lstewart/articles/cpumemory.pdf) (custos de coerência de cache)
+
+<Progress />

@@ -1,0 +1,11 @@
+[package]
+name = "part4-threads-rust"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "threads-bench"
+path = "src/main.rs"
+
+[profile.release]
+debug = false

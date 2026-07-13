@@ -253,6 +253,18 @@ export default defineConfig({
             },
           ],
         },
+        {
+          label: 'Part 4 · Concurrency & Parallelism',
+          translations: { 'pt-BR': 'Parte 4 · Concorrência & Paralelismo' },
+          items: [
+            {
+              label: 'Threads & Shared State',
+              translations: { 'pt-BR': 'Threads & Estado Partilhado' },
+              slug: 'part-4-concurrency/threads-shared-state',
+              badge: { text: 'Complete', variant: 'success' },
+            },
+          ],
+        },
       ],
       components: {
         // Custom footer with the required authorship block.
