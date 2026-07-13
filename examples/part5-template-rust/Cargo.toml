@@ -1,0 +1,13 @@
+[package]
+name = "part5-template-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a template engine parses a template string and renders it
+# against a context map. HTML-escaping is a handful of character replacements —
+# no crate needed — so the rendered output is directly assertable and identical
+# across languages.
+
+[[bin]]
+name = "template-demo"
+path = "src/main.rs"

@@ -1,0 +1,433 @@
+---
+title: "Template Engine: Autoescaping & XSS"
+description: Constrói um template engine em Rust, Go e Python com autoescaping de HTML por omissão — o gémeo do lado do output da defesa contra injeção do query builder. Um pipeline de filtros composível, um opt-out raw explícito, e HTML renderizado byte-idêntico nas três.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+A [lição do query builder](/systems-programming-academy/pt/part-5-frameworks/query-builder/)
+defendeu a fronteira de *input*: os valores do utilizador tornam-se parâmetros,
+nunca sintaxe SQL. Esta lição defende a fronteira de *output* com a mesmíssima
+ideia ao contrário. Um **template engine** substitui placeholders `{{ name }}`
+por dados — e se esses dados forem o comentário de um utilizador com `<script>`,
+renderizá-lo literalmente numa página é **cross-site scripting (XSS)**, o gémeo
+do lado do HTML da SQL injection. A defesa tem a mesma forma: tornar o valor
+*dados, não código*, fazendo **autoescaping de cada substituição por omissão**.
+
+A palavra *omissão* é a lição toda. Um engine onde tens de lembrar-te de escapar
+é um engine onde uma chamada esquecida é uma vulnerabilidade. Um engine que
+escapa automaticamente, e torna o caminho *perigoso* o explícito
+(`{{ trusted | raw }}`), transforma o XSS de "o bug que esqueceste de prevenir"
+em "a coisa que tiveste de pedir deliberadamente".
+
+<Aside type="note" title="Duas fronteiras, um princípio">
+  Query builder: valor do utilizador → placeholder `?` → ligado como dados →
+  nunca parseado como SQL. Template engine: valor do utilizador → autoescapado →
+  texto inerte → nunca parseado como HTML. A mesma jogada de design — *seguro por
+  omissão, perigoso por opt-in explícito* — defende tanto os dados que entram na
+  tua base de dados como os dados que saem para a tua página. A injeção é uma
+  classe de bug com muitas fachadas; esta é a sua contramedida, duas vezes.
+</Aside>
+
+Código:
+[`examples/part5-template-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 10 testes cada. Renderização de strings pura, por isso o
+output é diretamente verificável e o HTML renderizado é **byte-idêntico nas três
+linguagens**.
+
+## O engine num exemplo
+
+```text
+render("<p>{{ comment }}</p>", { comment: "<script>alert('xss')</script>" })
+
+-> "<p>&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;</p>"
+```
+
+A tag `<script>` chegou como dados e saiu como *texto*: o browser renderiza os
+caracteres literais `<script>…`, não executa um script. Essa única transformação
+é a diferença entre um campo de comentário e um buraco de execução-remota-de-
+código. E aconteceu sem esforço nenhum do autor do template — porque escapar é o
+default.
+
+## Escaping de HTML: cinco caracteres, a ordem importa
+
+Escapar substitui os caracteres que carregam significado estrutural em HTML pelos
+seus equivalentes de entidade. São cinco, e **o `&` tem de ser substituído
+primeiro**:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")   // TEM de ser primeiro
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="template.go"
+func EscapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")   // TEM de ser primeiro
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	s = strings.ReplaceAll(s, "'", "&#39;")
+	return s
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="template.py"
+def escape_html(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")   # TEM de ser primeiro
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+```
+</TabItem>
+</Tabs>
+
+Porquê o `&` primeiro? Todas as outras substituições *introduzem* um `&`
+(`&lt;`, `&gt;`, …). Se escapasses o `<` antes do `&`, e depois escapasses o `&`,
+o `&` dentro do `&lt;` recém-escrito seria re-escapado para `&amp;lt;` e a página
+mostraria o texto literal `&lt;` em vez de `<`. A dependência de ordem numa
+função de cinco linhas é um lindo exemplo de como código crítico de segurança
+esconde subtileza no mundano — e o teste `ampersand_is_escaped_first` fixa-o
+exatamente.
+
+<Aside type="caution" title="O contexto importa — este escaper é para texto/atributos HTML">
+  Estas cinco substituições estão corretas para texto de elemento HTML e valores
+  de atributo entre aspas duplas. Outros contextos precisam de escaping
+  *diferente*: um valor dentro de um bloco `<script>`, um URL num `href`, ou um
+  valor CSS têm cada um as suas regras, e usar escaping de texto-HTML aí é ele
+  próprio uma vulnerabilidade. Engines reais seguem o contexto. O nosso engine,
+  como a maioria dos tutoriais, trata o caso comum; a lição é que "escaping" é
+  sempre "escaping *para um contexto específico*".
+</Aside>
+
+## Parsing e o pipeline de filtros
+
+O `render` percorre o template, copiando texto literal e avaliando cada
+`{{ expr }}`. Uma expressão é um nome de variável opcionalmente seguido de um
+pipeline de filtros — `{{ name | trim | upper }}` — aplicados da esquerda para a
+direita. `raw` é um filtro que desativa o escape final.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn render_expr(expr: &str, context: &HashMap<String, String>) -> Result<String, String> {
+    let mut parts = expr.split('|').map(str::trim);
+    let var = parts.next().unwrap_or("");
+    if var.is_empty() {
+        return Err("empty expression: {{ }}".to_string());
+    }
+    let mut value = context
+        .get(var)
+        .cloned()
+        .ok_or_else(|| format!("unknown variable: {var}"))?;
+
+    let filters: Vec<&str> = parts.collect();
+    let raw = filters.contains(&"raw");
+    for filter in &filters {
+        value = apply_filter(filter, value)?;
+    }
+
+    Ok(if raw { value } else { escape_html(&value) })
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="template.go"
+func renderExpr(expr string, context map[string]string) (string, error) {
+	parts := strings.Split(expr, "|")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	varName := parts[0]
+	if varName == "" {
+		return "", fmt.Errorf("empty expression: {{ }}")
+	}
+	value, ok := context[varName]
+	if !ok {
+		return "", fmt.Errorf("unknown variable: %s", varName)
+	}
+
+	filters := parts[1:]
+	raw := false
+	for _, f := range filters {
+		if f == "raw" {
+			raw = true
+		}
+	}
+	for _, f := range filters {
+		var err error
+		if value, err = applyFilter(f, value); err != nil {
+			return "", err
+		}
+	}
+
+	if raw {
+		return value, nil
+	}
+	return EscapeHTML(value), nil
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="template.py"
+def _render_expr(expr: str, context: dict[str, str]) -> str:
+    parts = [p.strip() for p in expr.split("|")]
+    var = parts[0]
+    if var == "":
+        raise TemplateError("empty expression: {{ }}")
+    if var not in context:
+        raise TemplateError(f"unknown variable: {var}")
+    value = context[var]
+
+    filters = parts[1:]
+    raw = "raw" in filters
+    for f in filters:
+        value = _apply_filter(f, value)
+
+    return value if raw else escape_html(value)
+```
+</TabItem>
+</Tabs>
+
+Duas escolhas de design a nomear. Primeiro, **o escape acontece por último, após
+cada filtro** — por isso `{{ name | upper }}` põe em maiúsculas e *depois*
+escapa, e nunca podes acidentalmente des-escapar filtrando a seguir. Segundo, uma
+**variável desconhecida é um erro**, não uma string vazia silenciosa. Um
+`{{ usrname }}` com typo deve falhar ruidosamente em desenvolvimento, não
+renderizar um branco onde devia estar um nome e ir para produção sem se notar.
+
+## O opt-out `raw`: tornar o perigo visível
+
+Às vezes tens genuinamente HTML confiável para injetar — Markdown que renderizaste
+tu próprio, um snippet escrito por um admin. `raw` é o escape hatch, e o seu
+design é deliberado: é **explícito e pesquisável**. Cada sítio onde a tua app
+confia em HTML é um `| raw` num template, por isso um auditor pode fazer `grep`
+exatamente pelos pontos arriscados.
+
+```text
+render("{{ bio | raw }}", { bio: "<em>trusted markup</em>" })
+-> "<em>trusted markup</em>"     (renderizado como HTML real — pediste-o)
+```
+
+<Mermaid title="Seguro por omissao; o perigo e um opt-in explicito e grepavel" code={`flowchart TD
+  V["valor do contexto"] --> F{"| raw presente?"}
+  F -->|nao default| E["escapar HTML -> texto inerte"]
+  F -->|sim explicito| R["passar -> HTML vivo"]
+  E --> S["seguro: XSS impossivel"]
+  R --> W["so-confiavel: auditavel via grep '| raw'"]`} />
+
+Esta é a mesma filosofia do `unsafe` do Rust: a capacidade perigosa existe,
+porque às vezes precisas dela, mas é uma *keyword marcada* que consegues
+encontrar e rever, não o default silencioso. Contrasta com um engine que *não*
+escapa por omissão (PHP antigo, concatenação de strings): aí, cada output é um
+buraco potencial e não consegues fazer grep pelos erros, porque o erro é a
+*ausência* de uma chamada.
+
+## Renderização byte-idêntica
+
+Os três engines renderizaram a mesma página — um username, um comentário não
+confiável, e uma bio confiável — ao byte:
+
+```html
+<article>
+  <h2>Ana</h2>
+  <p>&lt;script&gt;steal(document.cookie)&lt;/script&gt;</p>
+  <footer><em>trusted markup</em></footer>
+</article>
+```
+
+O `<script>` do comentário é texto inerte; o `<em>` da bio é HTML vivo porque foi
+explicitamente marcado `| raw`. O mesmo output nas três linguagens, e é por isso
+que os mesmos dez testes — a verificar estas strings escapadas exatas — passam
+contra cada implementação.
+
+## Exercícios
+
+**1. Acrescenta um condicional (nas três).** Estende o parser para suportar
+`{% if var %}...{% endif %}`, renderizando o corpo só quando `var` é um valor
+não-vazio no contexto. O que acrescenta isto ao trabalho do parser, e porque é um
+salto maior do que acrescentar um filtro?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Um filtro é uma operação folha num valor; um condicional introduz *estrutura* — o
+parser tem agora de encontrar o `{% endif %}` correspondente (e tratar
+aninhamento), transformando uma varredura plana numa árvore. É o passo de
+"substituição de strings" para "linguagem com fluxo de controlo", e é onde um
+template engine começa a precisar de um parser a sério (tokenizar, depois
+construir uma AST) em vez do loop de encontrar-os-delimitadores que bastou para a
+substituição. O autoescaping tem na mesma de se aplicar dentro do corpo do
+condicional — a invariante de segurança não tira férias por haver um `if`.
+
+</details>
+
+**2. Acrescenta um loop sobre valores de lista (qualquer linguagem).** Suporta
+`{% for x in items %}{{ x }}{% endfor %}`. O nosso contexto mapeia nomes para
+*strings* — o que tem de mudar no modelo de dados, e como manténs o valor
+por-item autoescapado?
+
+<details>
+<summary>Esboço de solução</summary>
+
+O tipo de valor do contexto tem de alargar de "string" para "string ou lista de
+strings" (um pequeno tipo-soma / interface / union), e o loop liga `x` a cada
+elemento num scope filho. Cada `{{ x }}` dentro do corpo renderiza pelo mesmo
+caminho de autoescaping, por isso os itens da lista são escapados exatamente como
+qualquer outro valor — o loop acrescenta iteração, não uma exceção de escaping. É
+o ponto onde o modelo de valores do engine começa a parecer uma pequena linguagem
+dinâmica, que é exatamente o que o Jinja, o Handlebars, e o html/template do Go
+são.
+
+</details>
+
+**3. Parte o autoescaping de propósito, depois corrige-o (Rust ou Go).** Remove o
+escape default (faz o `render_expr` devolver o valor cru) e observa o teste
+`autoescapes_html_by_default` falhar com um `<script>` vivo no output. Agora
+acrescenta um tipo `safe`-por-construção: um newtype `Html(String)` que é a única
+coisa que o `render` emite sem escapar, para uma `String` simples *não poder*
+chegar ao output sem ser escapada. O que é que o sistema de tipos te deu?
+
+<details>
+<summary>Esboço de solução</summary>
+
+Um newtype (`Html(String)` em Rust, um tipo distinto em Go) torna "HTML já
+seguro" um *tipo*, por isso o compilador impõe que só conteúdo escapado-ou-
+explicitamente-confiável é emitido cru — uma `String` simples simplesmente não
+pode ser renderizada sem passar primeiro pelo escaping. É exatamente assim que o
+`askama` do Rust e outros template engines type-safe eliminam o XSS
+estruturalmente: a segurança torna-se uma propriedade que o compilador verifica,
+não uma convenção que tens de lembrar. É a mesma jogada de
+"tornar-a-coisa-errada-irrepresentável" do query builder, agora imposta por tipos
+em vez de pela forma da API.
+
+</details>
+
+<Quiz
+  question={'Um comentário de utilizador com <script>alert(1)</script> é renderizado numa página por um template engine que autoescapa por omissão. O que faz o browser?'}
+  options={[
+    { text: 'Mostra o texto literal "<script>alert(1)</script>" — os caracteres escapados são mostrados, não executados', correct: true, explanation: 'O autoescaping transforma < em &lt;, > em &gt;, etc., por isso o browser renderiza os caracteres como texto visível em vez de parsear um elemento <script>. O payload é inerte: é exatamente assim que o autoescaping previne XSS.' },
+    { text: 'Executa alert(1), porque a tag script chega ao DOM', correct: false, explanation: 'É o que acontece SEM escaping. Com autoescaping, os sinais de maior/menor são convertidos em entidades antes de chegarem ao browser, por isso nenhum elemento script é parseado.' },
+    { text: 'Remove a tag script mas renderiza o resto', correct: false, explanation: 'O escaping não remove nem saneia — transforma caracteres especiais em entidades para se mostrarem literalmente. Nada é removido; o comentário inteiro aparece como texto.' },
+    { text: 'Mostra um branco, porque o engine rejeita input perigoso', correct: false, explanation: 'O engine não rejeita nem esvazia o valor — escapa-o, por isso o comentário completo é visível como texto inerte. Esvaziar perderia o conteúdo real (inofensivo-como-texto) do utilizador.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que o "&" tem de ser o primeiro caractere substituído ao escapar HTML?'}
+  options={[
+    { text: 'Porque todas as outras substituições introduzem um "&" (&lt;, &gt;, ...); escapar o & por último duplo-escaparia esses para &amp;lt;', correct: true, explanation: 'Se substituísses < → &lt; primeiro e depois & → &amp;, o & dentro do &lt; recém-escrito tornar-se-ia &amp;lt;, e a página mostraria o texto literal "&lt;" em vez de "<". Substituir o & primeiro significa que os &s que ele cria são os finais, intocados pelos passos seguintes.' },
+    { text: 'Porque o "&" é o caractere mais perigoso para XSS', correct: false, explanation: 'Os sinais de maior/menor < e > é que abrem e fecham tags; o & não é especialmente perigoso. O requisito de ordem é sobre evitar duplo-escaping, não sobre ranking de perigo.' },
+    { text: 'Porque o "&" aparece mais frequentemente no texto', correct: false, explanation: 'A frequência é irrelevante para a correção aqui. A razão é mecânica: substituições posteriores emitem &, por isso o & tem de ser tratado antes delas para evitar re-escaping.' },
+    { text: 'Não importa; qualquer ordem produz o mesmo resultado', correct: false, explanation: 'A ordem importa absolutamente. Escapar o & por último duplo-escapa as entidades introduzidas pelas outras substituições, corrompendo o output — o que o teste ampersand-first apanha.' },
+  ]}
+/>
+
+<Quiz
+  question={'O engine escapa por omissão e exige "| raw" para output de HTML não-escapado. Porque é isso mais seguro que um engine onde chamas escape() à mão?'}
+  options={[
+    { text: 'Um escape() esquecido é uma vulnerabilidade invisível; com escape-por-omissão, os pontos arriscados são os marcadores "| raw" explícitos que consegues encontrar e auditar', correct: true, explanation: 'Quando o escaping é manual, um erro é a AUSÊNCIA de uma chamada — impossível de fazer grep, fácil de esquecer num de cem outputs. O escape-por-omissão inverte isto: cada output é seguro a menos que alguém tenha escrito | raw, por isso toda a superfície de ataque é o conjunto finito e pesquisável de marcadores raw.' },
+    { text: 'O escape() manual é mais lento em runtime', correct: false, explanation: 'A performance não é o ponto; ambos fazem as mesmas substituições. A diferença é qual escolha é o default e portanto quais erros são possíveis e encontráveis.' },
+    { text: 'O filtro | raw valida o HTML quanto à segurança', correct: false, explanation: 'O raw não faz validação nenhuma — confia em ti completamente e emite o valor tal e qual. O seu valor de segurança é ser explícito e grepável, não verificar nada.' },
+    { text: 'São igualmente seguros; é só preferência de estilo', correct: false, explanation: 'Não são igualmente seguros. O seguro-por-omissão torna o caminho perigoso opt-in e auditável; o escaping manual torna o caminho perigoso o default silencioso — uma diferença real e grande em quantos bugs de XSS vão para produção.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="O que é XSS e como é que o autoescaping de um template engine o previne?">
+
+Cross-site scripting é injetar markup ou script controlado pelo atacante numa
+página para executar no browser de outro utilizador — roubar cookies de sessão,
+agir como ele, desfigurar a página. Acontece quando dados do utilizador são
+colocados em HTML sem serem escapados, e o browser parseia os dados como markup:
+um comentário de `<script>…</script>` torna-se uma tag script viva. Um template
+engine com autoescaping previne-o convertendo os caracteres HTML especiais
+(`<`, `>`, `&`, aspas) em cada valor substituído em entidades *por omissão*, para
+os dados renderizarem como texto inerte e nunca poderem abrir uma tag. A chave é
+*por omissão*: o escaping manual falha no momento em que um output é esquecido,
+enquanto o escape-por-omissão torna a segurança a base e força o perigoso
+"renderiza isto como HTML real" a ser um opt-in explícito e revisível. É o análogo
+do lado do output das queries parametrizadas para SQL.
+
+</Interview>
+
+<Interview question="O escaping depende do contexto. O que significa isso e porque importa?">
+
+O mesmo valor precisa de escaping *diferente* consoante onde no documento aterra.
+Texto de elemento HTML e atributos entre aspas precisam de conversão de
+`<`, `>`, `&`, aspa → entidade. Mas um valor colocado dentro de um bloco
+`<script>` tem de ser escapado para JavaScript (ou melhor, passado como JSON), um
+valor num `href` precisa de codificação de URL e verificações de esquema (para
+bloquear URIs `javascript:`), e um valor num contexto CSS tem as suas próprias
+regras. Aplicar escaping de texto-HTML num contexto JS ou URL *não* o torna
+seguro — é uma gramática diferente com caracteres perigosos diferentes. É por
+isto que os engines sérios são *context-aware*: seguem onde no template o valor
+está a ser inserido e escolhem o escaper certo, e porque é que "escapa tudo da
+mesma forma" é um modelo mental subtilmente errado. O nosso engine didático trata
+o caso comum de texto-HTML e é explícito que escaping é sempre escaping *para um
+contexto*.
+
+</Interview>
+
+<Interview question="Como tornarias o XSS estruturalmente impossível em vez de apenas evitado-por-omissão?">
+
+Mover a garantia de um default de runtime para o sistema de tipos. Representa
+"HTML sabido seguro" como o seu próprio tipo — um newtype como `Html(String)` — e
+faz o output do template aceitar só esse tipo, com as *únicas* formas de o
+construir a serem (a) escapar uma string simples ou (b) um construtor `trusted()`
+explícito e auditado. Agora uma `String` crua não pode chegar à página de todo; o
+compilador rejeita-a até ter sido escapada ou explicitamente abençoada. Template
+engines type-safe (o `askama` do Rust, o `lucid` do Haskell, o HTML do Elm)
+funcionam exatamente assim, transformando "lembrámo-nos de escapar?" em
+"compila?". É a versão mais forte do princípio seguro-por-omissão: não um default
+que podias sobrepor esquecendo, mas uma invariante que o sistema de tipos impõe —
+a mesma escalada de convenção para verificação-do-compilador que o ownership do
+Rust trouxe à segurança de memória.
+
+</Interview>
+
+## Desafio
+
+Compõe a espinha de segurança de uma web app a partir das lições da Parte 5: uma
+[rota](/systems-programming-academy/pt/part-5-frameworks/routing-middleware/)
+aceita um comentário, o [framework de validação](/systems-programming-academy/pt/part-5-frameworks/validation/)
+verifica-o, o [query builder](/systems-programming-academy/pt/part-5-frameworks/query-builder/)
+armazena-o *parametrizado* (sem SQL injection), e este template engine renderiza
+a lista de comentários *autoescapada* (sem XSS) — montado no servidor da Parte 4.
+Depois tenta atacar a tua própria app: submete `'; DROP TABLE comments; --` e
+`<script>alert(1)</script>` como comentário, e confirma que a tabela sobrevive e o
+script renderiza como texto. Terás construído, e depois falhado em furar, as duas
+defesas de injeção que guardam quase todas as aplicações web — input e output, o
+mesmo princípio dos dois lados.
+
+## Referências & leitura adicional
+
+- OWASP — [Cross Site Scripting (XSS)](https://owasp.org/www-community/attacks/xss/) · [XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- Go — [`html/template`](https://pkg.go.dev/html/template) (autoescaping context-aware na stdlib) vs [`text/template`](https://pkg.go.dev/text/template) (sem escaping)
+- Python — [autoescaping do Jinja2](https://jinja.palletsprojects.com/en/latest/api/#autoescaping) · [`markupsafe`](https://markupsafe.palletsprojects.com/)
+- Rust — [`askama`](https://docs.rs/askama/latest/askama/) (templates autoescaped, type-safe, em compile-time)
+- A [lição do query builder](/systems-programming-academy/pt/part-5-frameworks/query-builder/) — o gémeo do lado do input desta defesa
+
+<Progress />

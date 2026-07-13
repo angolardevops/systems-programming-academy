@@ -316,6 +316,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/validation',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Template Engine & XSS',
+              translations: { 'pt-BR': 'Template Engine & XSS' },
+              slug: 'part-5-frameworks/template-engine',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],
