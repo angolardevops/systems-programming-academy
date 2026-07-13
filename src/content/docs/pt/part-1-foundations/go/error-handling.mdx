@@ -1,0 +1,525 @@
+---
+title: "Go: Tratamento de Erros"
+description: Em Go os erros são valores — devolvidos, verificados e envolvidos, não lançados. A interface error, erros sentinela, tipos de erro próprios, wrapping com %w e errors.Is/As, com exemplos completos e testados.
+difficulty: beginner
+estimatedMinutes: 28
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={28} languages={["go"]} />
+
+O Go não tem exceções. Uma operação que pode falhar devolve um **valor de erro**
+como último resultado, e quem chama verifica-o — ali mesmo, à vista. O famoso `if
+err != nil` não é boilerplate a detestar; é a linguagem a insistir que decida o
+que acontece quando as coisas correm mal, no sítio exato onde podem correr. Esta
+lição cobre o modelo inteiro: a interface `error`, erros sentinela e próprios,
+wrapping, e as ferramentas de inspeção `errors.Is`/`errors.As`.
+
+<Aside type="note" title="Pré-requisitos">
+  Precisa de [Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/)
+  — um erro é apenas um valor que satisfaz uma interface de um método.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/go-errors/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` verde, `go vet` limpo). Cada bloco é **completo** — um `package main`
+executável, ou uma declaração inteira do módulo.
+
+## Erros são valores
+
+`error` é uma **interface** embutida com um único método:
+
+```go
+type error interface {
+	Error() string
+}
+```
+
+Uma função que pode falhar devolve `(resultado, error)`. `nil` significa sucesso.
+
+```go title="main.go — completo, executável"
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("42")
+	if err != nil {
+		fmt.Println("failed:", err)
+		return
+	}
+	fmt.Println("parsed:", n) // parsed: 42
+
+	_, err = strconv.Atoi("oops")
+	if err != nil {
+		fmt.Println("failed:", err) // failed: strconv.Atoi: parsing "oops": invalid syntax
+	}
+}
+```
+
+Saída:
+
+```text
+parsed: 42
+failed: strconv.Atoi: parsing "oops": invalid syntax
+```
+
+<Aside type="tip" title="Trate onde puder, devolva onde não puder">
+  Se uma função consegue reagir de forma útil a um erro, trate-o. Caso contrário
+  devolva-o a quem chama (normalmente com contexto acrescentado — ver wrapping
+  abaixo). Não faça log *e* devolva o mesmo erro; isso duplica o reporte.
+</Aside>
+
+## Tipos de erro próprios
+
+Como `error` é só uma interface, qualquer tipo com um método `Error() string` é um
+erro. Uma struct permite carregar **detalhe estruturado**:
+
+```go title="users.go"
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+```
+
+Um programa completo que devolve e imprime um:
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+func checkName(name string) error {
+	if name == "" {
+		return &ValidationError{Field: "name", Reason: "must not be empty"}
+	}
+	return nil
+}
+
+func main() {
+	if err := checkName(""); err != nil {
+		fmt.Println(err) // invalid name: must not be empty
+	}
+	fmt.Println(checkName("Ada")) // <nil>
+}
+```
+
+Saída:
+
+```text
+invalid name: must not be empty
+<nil>
+```
+
+## Erros sentinela e `errors.Is`
+
+Um **sentinela** é um valor de erro a nível de pacote com que quem chama compara.
+Use `errors.Is` (não `==`) para continuar a bater certo depois de wrapping:
+
+```go title="users.go"
+var ErrNotFound = errors.New("user not found")
+```
+
+```go title="main.go — completo, executável"
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrNotFound = errors.New("not found")
+
+var db = map[string]string{"1": "Ada"}
+
+func lookup(id string) (string, error) {
+	name, ok := db[id]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return name, nil
+}
+
+func main() {
+	_, err := lookup("999")
+	if errors.Is(err, ErrNotFound) {
+		fmt.Println("no such user") // no such user
+	}
+}
+```
+
+Saída:
+
+```text
+no such user
+```
+
+## Wrapping com `%w`
+
+Devolva um erro com **contexto acrescentado** usando `fmt.Errorf` e o verbo `%w`.
+O erro envolvido continua alcançável — `errors.Is`/`errors.As` percorrem a cadeia
+toda.
+
+<Mermaid title="O wrapping cria uma cadeia que errors.Is/As percorrem" code={`flowchart LR
+  A["erro strconv: invalid syntax"] -->|envolvido por %w| B["parsing age: ..."]
+  B -->|envolvido por %w| C["line 'Bob, x': ..."]
+  C --> D["errors.Is / errors.As voltam a qualquer camada"]`} />
+
+```go title="main.go — completo, executável"
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+)
+
+func parseAge(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parsing age %q: %w", s, err) // %w envolve
+	}
+	return n, nil
+}
+
+func main() {
+	_, err := parseAge("twelve")
+	fmt.Println(err) // parsing age "twelve": strconv.Atoi: parsing "twelve": invalid syntax
+
+	// errors.Is alcança através do wrapper até ao sentinela subjacente:
+	fmt.Println(errors.Is(err, strconv.ErrSyntax)) // true
+}
+```
+
+Saída:
+
+```text
+parsing age "twelve": strconv.Atoi: parsing "twelve": invalid syntax
+true
+```
+
+## Extrair um erro tipado com `errors.As`
+
+Onde o `errors.Is` bate num *valor*, o `errors.As` encontra um erro de um *tipo*
+na cadeia e liga-o, para poder ler os seus campos:
+
+```go title="main.go — completo, executável"
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+func validate() error {
+	return fmt.Errorf("request failed: %w", &ValidationError{Field: "age", Reason: "must be positive"})
+}
+
+func main() {
+	err := validate()
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("bad field:", ve.Field) // bad field: age
+	}
+}
+```
+
+Saída:
+
+```text
+bad field: age
+```
+
+<Quiz
+  question={'Depois de envolver um erro com %w, como deve quem chama verificar um erro sentinela específico?'}
+  options={[
+    { text: "Com == , p. ex. err == ErrNotFound." },
+    { text: "Com errors.Is(err, ErrNotFound), que percorre a cadeia envolvida.", correct: true },
+    { text: "Comparando as strings de err.Error().", },
+    { text: "Não dá; o wrapping esconde o original.", },
+  ]}
+  explanation="Assim que um erro é envolvido com %w, `err == ErrNotFound` é falso porque `err` é agora o wrapper. `errors.Is(err, ErrNotFound)` desembrulha a cadeia e devolve true se alguma camada bater certo. Use `errors.Is` para valores sentinela e `errors.As` para tipos de erro concretos — nunca comparação de strings."
+/>
+
+## Panic e recover (usar com parcimónia)
+
+`panic` desenrola a stack como uma exceção; `recover` (numa função deferida)
+trava-a. Reserve-os para situações **verdadeiramente irrecuperáveis** ou bugs do
+programador — não para fluxo de controlo comum. O Go idiomático devolve erros.
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+func safeDivide(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil // pânico se b == 0
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2)) // 5 <nil>
+	fmt.Println(safeDivide(10, 0)) // 0 recovered: runtime error: integer divide by zero
+}
+```
+
+Saída:
+
+```text
+5 <nil>
+0 recovered: runtime error: integer divide by zero
+```
+
+## Erros comuns & depuração
+
+### 1. Ignorar o erro
+
+```go
+n, _ := strconv.Atoi(userInput) // ✗ usa 0 em silêncio com input mau
+```
+
+O `go vet` e os linters assinalam muitos erros ignorados. **Correção:** verifique-o,
+ou se quer mesmo descartá-lo, torne-o explícito e comente porquê.
+
+### 2. Comparar com `==` depois de wrapping
+
+```go
+if err == ErrNotFound { ... } // ✗ falso assim que err foi envolvido com %w
+```
+
+**Correção:** `errors.Is(err, ErrNotFound)`.
+
+### 3. `%v` em vez de `%w` quando queria envolver
+
+```go
+return fmt.Errorf("context: %v", err) // formata o erro mas NÃO o envolve
+```
+
+Com `%v` a cadeia parte-se — `errors.Is`/`errors.As` não alcançam a causa.
+**Correção:** use `%w` quando quer que o original continue inspecionável.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Devolver e verificar um erro sentinela.">
+
+Escreva `sqrt(x float64) (float64, error)` que devolve um sentinela `ErrNegative`
+para input negativo. Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"math"
+)
+
+var ErrNegative = errors.New("cannot sqrt a negative number")
+
+func sqrt(x float64) (float64, error) {
+	if x < 0 {
+		return 0, ErrNegative
+	}
+	return math.Sqrt(x), nil
+}
+
+func main() {
+	r, err := sqrt(144)
+	fmt.Println(r, err) // 12 <nil>
+	_, err = sqrt(-1)
+	fmt.Println(errors.Is(err, ErrNegative)) // true
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Envolver um erro com contexto.">
+
+Escreva `readConfig(name string) error` que envolve um erro de mais baixo nível com
+o nome do ficheiro usando `%w`, e mostre que o `errors.Is` continua a bater certo.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrMissing = errors.New("missing")
+
+func readConfig(name string) error {
+	// imagine que a pesquisa falhou com ErrMissing
+	return fmt.Errorf("reading config %q: %w", name, ErrMissing)
+}
+
+func main() {
+	err := readConfig("app.toml")
+	fmt.Println(err)                        // reading config "app.toml": missing
+	fmt.Println(errors.Is(err, ErrMissing)) // true
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 3 — Extrair um erro próprio com errors.As.">
+
+Dado um `*ValidationError` envolvido, use `errors.As` para ler o seu `Field`.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct{ Field string }
+
+func (e *ValidationError) Error() string { return "invalid " + e.Field }
+
+func do() error {
+	return fmt.Errorf("op failed: %w", &ValidationError{Field: "email"})
+}
+
+func main() {
+	err := do()
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("field:", ve.Field) // field: email
+	}
+}
+```
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Devolver `(resultado, error)`; verificar `if err != nil` | `panic` para falhas comuns e recuperáveis |
+| Envolver com `%w` para acrescentar contexto | `%v` quando queria manter a causa inspecionável |
+| `errors.Is` para sentinelas, `errors.As` para tipos | `err == Sentinela` depois de wrapping, ou match de strings |
+| Erros sentinela para condições bem conhecidas | Um novo `errors.New` em todo o lado para a mesma condição |
+| Tratar **ou** devolver — não ambos | Log e devolver o mesmo erro (reporte duplo) |
+| Acrescentar contexto em cada camada | Devolver o erro cru sem rasto |
+
+## Mini-projeto
+
+**Construa um carregador de config com erros tipados.** Faça parsing de linhas
+`chave=valor` para uma struct. Defina um tipo `ConfigError` que carrega o número da
+linha e a chave em causa, e um sentinela `ErrDuplicateKey`. O `Load` deve envolver
+erros de parse de mais baixo nível com `%w` e contexto de linha. Escreva testes
+table-driven que usam `errors.Is` (para `ErrDuplicateKey`) e `errors.As` (para
+`*ConfigError`).
+
+Requisitos: usa um tipo de erro próprio e um sentinela, envolve com `%w`, testes
+table-driven a cobrir cada caminho de erro, e `go vet` limpo.
+
+## Perguntas de entrevista
+
+<Interview question="Porque usa o Go valores de erro devolvidos em vez de exceções?">
+
+Porque torna o tratamento de erros **explícito e local**: o caminho de falha fica
+mesmo ao lado do código que pode falhar, visível na assinatura `(T, error)`, e as
+ferramentas próximas do compilador (`go vet`, linters) podem assinalar erros
+ignorados. As exceções criam fluxo de controlo invisível que salta pela stack; os
+designers do Go preferiram que cada chamador decida conscientemente o que fazer. O
+`panic`/`recover` existe para casos verdadeiramente excecionais, não para erros de
+rotina.
+
+</Interview>
+
+<Interview question="Qual a diferença entre errors.Is e errors.As?">
+
+`errors.Is(err, target)` reporta se algum erro na cadeia envolvida é **igual** a um
+valor sentinela específico (como `ErrNotFound`). `errors.As(err, &target)` encontra
+o primeiro erro na cadeia de um **tipo** específico, e atribui-o a `target` para
+poder ler os campos. Use `Is` para detetar condições conhecidas; use `As` para
+extrair detalhe estruturado de um tipo de erro próprio. Ambos desembrulham cadeias
+`%w`.
+
+</Interview>
+
+<Interview question="O que faz o %w no fmt.Errorf?">
+
+O `%w` envolve o erro dado dentro do novo, registando-o como a causa. A mensagem do
+novo erro inclui o texto do erro envolvido, e `errors.Is`/`errors.As` conseguem
+voltar ao original. Usar `%v` formata o erro como texto mas parte a cadeia, tornando
+a causa não-inspecionável. Só é permitido um `%w` por chamada `Errorf`.
+
+</Interview>
+
+<Interview question="Quando é o panic apropriado em Go?">
+
+Para situações irrecuperáveis que indicam um bug ou tornam continuar sem sentido:
+um invariante violado, um caso de switch impossível, falha ao inicializar algo sem
+o qual o programa não corre (muitas vezes no arranque). As bibliotecas quase nunca
+devem entrar em pânico com input de quem chama — devolvam antes um erro. O `recover`
+é usado sobretudo em fronteiras de processo ou goroutine (p. ex. um servidor HTTP a
+transformar o pânico de um handler num 500), não como fluxo de controlo de rotina.
+
+</Interview>
+
+## Desafio
+
+Pegue num script cheio de chamadas `panic`/`log.Fatal` e reescreva-o para as funções
+devolverem erros até ao `main`, que os trata uma vez. Acrescente um tipo de erro
+próprio para uma falha de domínio e um sentinela para outra, depois escreva testes
+com `errors.Is` e `errors.As`. Alimente-o com input inválido e confirme que reporta
+uma mensagem clara e envolvida ("reading config \"x\": parsing line 3: ...") em vez
+de um stack trace. Esse rasto de contexto é o que transforma um crash misterioso
+num erro acionável.
+
+## Referências & leitura adicional
+
+- *A Tour of Go* — [errors](https://go.dev/tour/methods/19)
+- Blog do Go — [working with errors in Go 1.13](https://go.dev/blog/go1.13-errors) (`%w`, `Is`, `As`)
+- *Effective Go* — [errors](https://go.dev/doc/effective_go#errors)
+- Pacote `errors` — [documentação](https://pkg.go.dev/errors)
+
+<Progress />

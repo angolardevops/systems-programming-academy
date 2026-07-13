@@ -1,0 +1,56 @@
+---
+title: Boas-vindas
+description: O que é esta Academia, para quem é, e o padrão de qualidade a que cada lição é sujeita.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Esta Academia existe para ensinar **engenharia de software**, não apenas
+linguagens de programação. A sintaxe é a parte fácil e está bem coberta noutros
+sítios. O que raramente se ensina bem — e o que separa quem escreve código de
+quem faz engenharia — é como **desenhar sistemas, raciocinar sobre
+compromissos, testar com rigor e entregar software que sobrevive em produção**.
+
+Fazemo-lo através de três linguagens, escolhidas porque as suas filosofias de
+design discordam de formas instrutivas:
+
+- **Python** otimiza o tempo e a clareza do programador.
+- **Go** otimiza equipas e simplicidade operacional.
+- **Rust** otimiza correção e controlo sem coletor de lixo.
+
+Ver o *mesmo* problema resolvido nas três ensina-lhe quanto custa realmente cada
+escolha de design.
+
+## Para quem é
+
+- Iniciantes que querem aprender a programar **como se faz na indústria** desde o primeiro dia.
+- Engenheiros que dominam uma linguagem e querem pensar entre paradigmas.
+- Universidades e empresas à procura de um currículo rigoroso e livremente reutilizável.
+
+<Aside type="tip" title="Não precisa de saber as três linguagens">
+  Cada lição é autossuficiente e indica os seus pré-requisitos. Pode seguir uma
+  única linguagem de cima a baixo, ou ler de forma comparativa.
+</Aside>
+
+## O padrão a que cada lição é sujeita
+
+1. **Tudo executa.** Nada de pseudocódigo. O código acompanha em [`examples/`](https://github.com/angolardevops) e é compilado e testado em CI.
+2. **Tudo é testado.** Cada lição traz testes que corre; mostramos o comando e o resultado esperado.
+3. **Os benchmarks são reais.** As afirmações de desempenho vêm com um binário que pode correr.
+4. **Os erros são de primeira classe.** Cada lição tem uma secção *Erros comuns* com o erro real do compilador/runtime e a correção.
+5. **Preparação para entrevistas.** Cada lição termina com perguntas de entrevista e um desafio.
+
+## Como ler uma lição
+
+Cada lição de Fundamentos segue o mesmo ritmo:
+
+- **Teoria** — o modelo mental, com um diagrama.
+- **Exemplos** — pequenos, executáveis, explicados linha a linha.
+- **Erros comuns & depuração** — erros reais e como os ler.
+- **Exercícios** — com soluções completas.
+- **Desempenho** — medido, não afirmado.
+- **Boas práticas vs anti-padrões** — lado a lado.
+- **Perguntas de entrevista & desafio** — para testar compreensão real.
+
+Pronto? Continue para [Como usar esta Academia](/systems-programming-academy/pt/how-to-use/), ou vá direto
+para [Rust: Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).

@@ -1,0 +1,430 @@
+---
+title: "Rust: Generics & Lifetimes"
+description: Write code once that works for many types, and let the compiler prove your references are always valid. Generic functions and structs, trait bounds, and lifetime annotations — with complete, tested examples.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["rust"]} />
+
+Two features let Rust be both abstract and safe at once. **Generics** let you
+write a function or type once and use it for many concrete types, with no runtime
+cost. **Lifetimes** let the compiler prove that every reference points to data
+that is still alive — no dangling pointers, checked before your program runs.
+They look intimidating; this lesson shows they are just the compiler asking you
+to make promises it can verify.
+
+<Aside type="note" title="Prerequisites">
+  You need [Ownership & the Borrow Checker](/systems-programming-academy/part-1-foundations/rust/ownership/)
+  (references and borrows) and [Types & Traits](/systems-programming-academy/part-1-foundations/rust/traits/)
+  (trait bounds). Lifetimes build directly on borrowing.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-generics/`](https://github.com/angolardevops/systems-programming-academy)
+(7 passing tests, clean `cargo clippy`). Every snippet is **complete**.
+
+## Generics: one definition, many types
+
+Without generics you would copy `largest_i32`, `largest_f64`, `largest_str`… With
+one **type parameter** `T`, you write it once. The bound `T: PartialOrd` says "T
+must be comparable" — required, because the body uses `>`.
+
+```rust title="src/lib.rs"
+pub fn largest<T: PartialOrd>(list: &[T]) -> Option<&T> {
+    let mut it = list.iter();
+    let mut biggest = it.next()?; // None if empty
+    for item in it {
+        if item > biggest {
+            biggest = item;
+        }
+    }
+    Some(biggest)
+}
+```
+
+A complete program using it for three different types:
+
+```rust title="main.rs — complete, runnable"
+fn largest<T: PartialOrd>(list: &[T]) -> Option<&T> {
+    let mut it = list.iter();
+    let mut biggest = it.next()?;
+    for item in it {
+        if item > biggest {
+            biggest = item;
+        }
+    }
+    Some(biggest)
+}
+
+fn main() {
+    println!("{:?}", largest(&[3, 7, 2, 9, 4]));       // Some(9)
+    println!("{:?}", largest(&[1.5, 0.2, 3.9]));        // Some(3.9)
+    println!("{:?}", largest(&["fig", "pear", "apple"])); // Some("pear")
+    println!("{:?}", largest::<i32>(&[]));              // None
+}
+```
+
+<Aside type="tip" title="Generics are zero-cost">
+  The compiler *monomorphizes*: it generates a specialised copy of `largest` for
+  each type you actually call it with — `largest::<i32>`, `largest::<f64>`, and so
+  on. The result is exactly as fast as if you had hand-written each version. You
+  pay in compile time and binary size, never in runtime speed.
+</Aside>
+
+## Generic structs and conditional methods
+
+Types can be generic too. A `Pair<T>` holds two values of the same type:
+
+```rust title="src/lib.rs"
+pub struct Pair<T> {
+    pub first: T,
+    pub second: T,
+}
+
+impl<T> Pair<T> {
+    pub fn new(first: T, second: T) -> Self {
+        Pair { first, second }
+    }
+}
+```
+
+You can add methods that exist **only when the bound is met** — a powerful
+pattern. `larger` needs to compare, so it lives in an `impl` block with a
+`PartialOrd` bound; a `Pair` of non-comparable values simply won't have it:
+
+```rust title="src/lib.rs"
+use std::fmt::Display;
+
+impl<T: PartialOrd + Display> Pair<T> {
+    pub fn larger(&self) -> &T {
+        if self.first >= self.second { &self.first } else { &self.second }
+    }
+}
+```
+
+<Quiz
+  question={'Why does `fn largest<T>(list: &[T]) -> &T` fail to compile without a bound?'}
+  options={[
+    { text: "Generics always need a bound; it is a syntax rule.", },
+    { text: "The body uses `>`, which requires `T: PartialOrd` — the compiler cannot assume every type is comparable.", correct: true },
+    { text: "Because `&[T]` is not allowed as a parameter.", },
+    { text: "It would compile; the bound is optional.", },
+  ]}
+  explanation="A generic `T` could be *any* type, including ones with no ordering. The moment the body relies on a capability (`>`, `+`, `.clone()`, printing…), you must state the matching bound (`PartialOrd`, `Add`, `Clone`, `Display`…). The bound is a promise the caller must satisfy and the body may then rely on."
+/>
+
+## Lifetimes: proving references stay valid
+
+A lifetime is the span during which a reference is valid. Usually the compiler
+infers them (lifetime *elision*). You must write them when a function returns a
+reference and the compiler can't tell which input it borrows from.
+
+Consider returning the longer of two strings. Which input does the result borrow
+from? The compiler doesn't know, so you annotate: `'a` says "the output lives as
+long as **both** inputs".
+
+```rust title="src/lib.rs"
+pub fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+    if x.len() >= y.len() { x } else { y }
+}
+```
+
+<Mermaid title="The output borrows for the shorter of the two input lifetimes" code={`flowchart LR
+  X["x: &'a str"] --> F["longest<'a>"]
+  Y["y: &'a str"] --> F
+  F --> R["returns &'a str — valid while BOTH x and y are"]`} />
+
+A complete program — and the error you get if a borrow outlives its data:
+
+```rust title="main.rs — complete, runnable"
+fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+    if x.len() >= y.len() { x } else { y }
+}
+
+fn main() {
+    let a = String::from("a long string");
+    let result;
+    {
+        let b = String::from("short");
+        result = longest(a.as_str(), b.as_str());
+        println!("longest is: {result}"); // OK: used while both a and b are alive
+    }
+    // println!("{result}"); // ✗ would fail: `b` is dropped here, result may borrow it
+}
+```
+
+Output:
+
+```text
+longest is: a long string
+```
+
+<Aside type="caution" title="Lifetimes don't change how long data lives">
+  Annotations do not extend or shorten any value's life — they only *describe*
+  the relationships so the compiler can reject code where a reference could
+  outlive its data. The fix for a lifetime error is almost always to restructure
+  ownership, not to add more `'a`s.
+</Aside>
+
+## Structs that hold references
+
+If a struct stores a reference, it must declare a lifetime, promising it cannot
+outlive the data it points into:
+
+```rust title="src/lib.rs"
+pub struct Excerpt<'a> {
+    pub part: &'a str,
+}
+
+impl<'a> Excerpt<'a> {
+    /// The first sentence of `text`, borrowed — not copied.
+    pub fn first_sentence(text: &'a str) -> Excerpt<'a> {
+        let end = text.find('.').map(|i| i + 1).unwrap_or(text.len());
+        Excerpt { part: &text[..end] }
+    }
+}
+```
+
+A complete program:
+
+```rust title="main.rs — complete, runnable"
+struct Excerpt<'a> {
+    part: &'a str,
+}
+
+fn main() {
+    let novel = String::from("Call me Ishmael. Some years ago...");
+    let first = Excerpt {
+        part: novel.split('.').next().expect("has a sentence"),
+    };
+    println!("{}", first.part); // Call me Ishmael
+    // `novel` must outlive `first`, and it does — both live to the end of main.
+}
+```
+
+Output:
+
+```text
+Call me Ishmael
+```
+
+## Common mistakes & debugging
+
+### 1. Missing trait bound
+
+```rust
+fn print_all<T>(items: &[T]) {
+    for x in items {
+        println!("{x}"); // ✗ T might not be printable
+    }
+}
+```
+
+```text
+error[E0277]: `T` doesn't implement `std::fmt::Display`
+  = help: consider restricting type parameter `T`: `T: std::fmt::Display`
+```
+
+**Fix:** add the bound the compiler names — `fn print_all<T: std::fmt::Display>(...)`.
+
+### 2. Returning a reference to a local
+
+```rust
+fn broken<'a>() -> &'a str {
+    let s = String::from("temporary");
+    &s // ✗ `s` is dropped when the function returns
+}
+```
+
+```text
+error[E0515]: cannot return reference to local variable `s`
+```
+
+**Fix:** return the owned `String` instead of a borrow — you can't lend out
+something you're about to destroy.
+
+### 3. Mismatched lifetimes
+
+```rust
+// This returns a reference borrowed from `x`, and correctly promises the output
+// lives as long as `x` (`'a`). Promise the wrong lifetime and the compiler
+// catches the inconsistency.
+fn first<'a, 'b>(x: &'a str, _y: &'b str) -> &'a str { x } // OK
+```
+
+If instead you wrote `-> &'b str` while returning `x`, you'd get
+`error[E0623]: lifetime mismatch` — the returned reference borrows from `x` (`'a`)
+but you promised `'b`.
+
+## Exercises
+
+<Interview question="Exercise 1 — A generic swap.">
+
+Write `swap<T>(a: T, b: T) -> (T, T)` that returns the pair reversed. Complete
+`fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+fn swap<T>(a: T, b: T) -> (T, T) {
+    (b, a)
+}
+
+fn main() {
+    println!("{:?}", swap(1, 2));            // (2, 1)
+    println!("{:?}", swap("x", "y"));        // ("y", "x")
+}
+```
+
+No bound is needed: the body only *moves* the values, it never compares or prints
+them, so any `T` works.
+
+</Interview>
+
+<Interview question="Exercise 2 — A generic function with two bounds.">
+
+Write `show_max<T: PartialOrd + std::fmt::Display>(a: T, b: T)` that prints the
+larger value. Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::fmt::Display;
+
+fn show_max<T: PartialOrd + Display>(a: T, b: T) {
+    let max = if a >= b { a } else { b };
+    println!("max = {max}");
+}
+
+fn main() {
+    show_max(3, 9);       // max = 9
+    show_max("pear", "fig"); // max = pear
+}
+```
+
+The `+` combines bounds: `T` must be both comparable and printable.
+
+</Interview>
+
+<Interview question="Exercise 3 — A struct holding a reference.">
+
+Define `Tagged<'a> { label: &'a str, value: i32 }` and a method `describe`
+returning a `String`. Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+struct Tagged<'a> {
+    label: &'a str,
+    value: i32,
+}
+
+impl<'a> Tagged<'a> {
+    fn describe(&self) -> String {
+        format!("{} = {}", self.label, self.value)
+    }
+}
+
+fn main() {
+    let name = String::from("temperature");
+    let t = Tagged { label: &name, value: 21 };
+    println!("{}", t.describe()); // temperature = 21
+}
+```
+
+`Tagged` borrows `name`, so `name` must outlive `t` — here both live to the end of
+`main`, so it compiles.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| One generic function with a bound | Copy-pasted `_i32`/`_f64`/`_str` variants |
+| Add only the bounds the body needs | Over-constraining with `T: Clone + Debug + …` |
+| Let lifetime elision work; annotate only when needed | Annotating every reference "to be safe" |
+| Return owned data when there's nothing to borrow from | Returning `&` to a local (won't compile) |
+| `where` clauses for many/long bounds | An unreadable pile of inline `<T: A + B + C>` |
+| Conditional `impl` blocks to gate methods by bound | Panicking at runtime when a type lacks a capability |
+
+## Mini-project
+
+**Build a generic `Cache<K, V>`.** Wrap a `HashMap<K, V>` where `K: Eq + Hash +
+Clone` and `V: Clone`. Provide `get(&self, key) -> Option<V>`, `insert(&mut self,
+key, value)`, and `get_or_insert_with(&mut self, key, f)` that computes and stores
+a value only if the key is absent. Then add a borrowing view type `Entry<'a, K,
+V>` if you want to practice struct lifetimes.
+
+Requirements: generic over both `K` and `V` with the right bounds, at least four
+`#[test]` cases, and `cargo clippy` clean.
+
+## Interview questions
+
+<Interview question="What is monomorphization?">
+
+It's how Rust compiles generics: for each concrete type a generic function or
+type is used with, the compiler generates a specialised, non-generic copy.
+`largest::<i32>` and `largest::<f64>` become two distinct functions in the binary.
+This makes generic code as fast as hand-written code (no runtime dispatch), at the
+cost of larger binaries and longer compiles — the opposite trade-off from dynamic
+dispatch with `dyn`.
+
+</Interview>
+
+<Interview question="What problem do lifetimes solve?">
+
+They let the compiler guarantee, at compile time, that no reference outlives the
+data it points to — eliminating dangling pointers and use-after-free without a
+garbage collector. A lifetime annotation like `'a` doesn't change how long
+anything lives; it *relates* the lifetimes of inputs and outputs so the compiler
+can reject any program where a borrow could dangle.
+
+</Interview>
+
+<Interview question="When can you omit lifetime annotations?">
+
+When the compiler can infer them via the three *elision rules*: (1) each
+reference parameter gets its own lifetime; (2) if there is exactly one input
+lifetime, it is assigned to all outputs; (3) for methods, the lifetime of `&self`
+is assigned to outputs. Most functions match these rules, so you rarely write
+lifetimes. You annotate when there are multiple input references and the compiler
+cannot tell which one the output borrows from.
+
+</Interview>
+
+<Interview question="What is the difference between a generic type parameter and a lifetime parameter?">
+
+A type parameter (`<T>`) abstracts over *which type* the code works with, resolved
+by monomorphization into concrete code. A lifetime parameter (`<'a>`) abstracts
+over *how long* a reference is valid; it carries no data and generates no code —
+it exists purely for the borrow checker to verify reference validity. Both are
+erased before runtime.
+
+</Interview>
+
+## Challenge
+
+Take the `Stack<T>` (or any container) you built for the testing lesson and make
+it fully generic with the right bounds, then add an iterator that yields `&T` —
+which forces you to name a lifetime tying the iterator to the stack. Get it past
+`cargo clippy` with `-D warnings`. Wrestling one custom iterator's lifetimes into
+place teaches more than a page of theory.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 10 — [“Generic Types, Traits, and Lifetimes”](https://doc.rust-lang.org/book/ch10-00-generics.html)
+- *Rust by Example* — [generics](https://doc.rust-lang.org/rust-by-example/generics.html)
+- *Rust by Example* — [lifetimes](https://doc.rust-lang.org/rust-by-example/scope/lifetime.html)
+- Rust Reference — [lifetime elision](https://doc.rust-lang.org/reference/lifetime-elision.html)
+
+<Progress />

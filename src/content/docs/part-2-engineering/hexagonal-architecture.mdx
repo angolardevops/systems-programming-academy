@@ -1,0 +1,521 @@
+---
+title: "Clean & Hexagonal Architecture"
+description: Domain, use cases, adapters, composition root — the Dependency Rule made concrete with one task tracker layered identically in Rust, Go, and Python, including an executable architecture test that fails if a layer imports outward.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+Every Part 2 lesson so far has quietly used the same architecture: ports defined
+by the code that needs them, adapters injected from outside, business logic that
+never names a database. This lesson makes that architecture explicit. **Clean
+Architecture** (Robert C. Martin) and **Hexagonal Architecture / Ports &
+Adapters** (Alistair Cockburn) are two formulations of one idea — concentric
+layers governed by a single law, the **Dependency Rule**: *source-code
+dependencies point only inward.* We build the same task tracker, layered
+identically, in all three languages — and in Python we go one step further:
+an **executable architecture test** that fails the build if anyone violates the
+rule.
+
+<Aside type="note" title="Prerequisites">
+  This synthesises the whole Part 2 arc:
+  [Repository & DI](/systems-programming-academy/part-2-engineering/repository-pattern/) (ports/adapters),
+  [the Testing Pyramid](/systems-programming-academy/part-2-engineering/testing-pyramid/) (layer-per-level
+  testing). If those clicked, this is the map they live on.
+</Aside>
+
+All code is from three tested modules —
+[`examples/part2-hexagonal-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— each `fmt`/`lint` clean with tests at every layer.
+
+## The layers and the one rule
+
+<Mermaid title="The Dependency Rule: all source dependencies point inward" code={`flowchart TD
+  C["Composition root (main): wires everything — knows all layers"] --> A["Adapters: InMemoryRepo, PostgresRepo, HTTP, CLI"]
+  A --> U["Application: use cases + PORTS (TaskRepo defined here)"]
+  U --> D["Domain: entities + business rules — depends on NOTHING"]`} />
+
+- **Domain** (innermost): entities and their invariants. Pure. Depends on
+  nothing — not the web framework, not the database, not even the app layer.
+- **Application**: use cases orchestrating the domain, plus the **ports**
+  (interfaces) they need from the outside world — defined *here*, in the layer
+  that uses them, not next to the database.
+- **Adapters**: concrete implementations of the ports (in-memory, Postgres,
+  HTTP handlers, CLI). They depend inward; nothing inward knows they exist.
+- **Composition root**: the one place (usually `main`) that knows every layer
+  and wires adapters into use cases.
+
+The payoff is everything Part 2 has demonstrated piecemeal: swap storage without
+touching logic, test each layer at its own pyramid level, and keep business
+rules readable in one dependency-free place.
+
+## The domain: rules with zero infrastructure
+
+Business rules live on the entity, testable in microseconds:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod domain)"
+pub struct Task {
+    pub id: u32,
+    pub title: String,
+    pub done: bool,
+}
+
+impl Task {
+    /// Business rule: a task must have a non-empty title.
+    pub fn new(id: u32, title: &str) -> Result<Task, DomainError> {
+        if title.trim().is_empty() {
+            return Err(DomainError::EmptyTitle);
+        }
+        Ok(Task { id, title: title.trim().to_string(), done: false })
+    }
+
+    /// Business rule: completing twice is an error, not a no-op.
+    pub fn complete(&mut self) -> Result<(), DomainError> {
+        if self.done {
+            return Err(DomainError::AlreadyDone);
+        }
+        self.done = true;
+        Ok(())
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="domain/task.go"
+// Package domain imports NOTHING from the outer layers.
+type Task struct {
+	ID    int
+	Title string
+	Done  bool
+}
+
+// NewTask enforces the title rule at construction.
+func NewTask(id int, title string) (Task, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return Task{}, ErrEmptyTitle
+	}
+	return Task{ID: id, Title: title}, nil
+}
+
+// Complete enforces the no-double-completion rule.
+func (t *Task) Complete() error {
+	if t.Done {
+		return ErrAlreadyDone
+	}
+	t.Done = true
+	return nil
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="domain.py"
+@dataclass
+class Task:
+    """The entity; its invariants live here, next to its data."""
+
+    id: int
+    title: str
+    done: bool = False
+
+    @classmethod
+    def new(cls, task_id: int, title: str) -> Task:
+        title = title.strip()
+        if not title:
+            raise EmptyTitleError("a task needs a title")
+        return cls(id=task_id, title=title)
+
+    def complete(self) -> None:
+        if self.done:
+            raise AlreadyDoneError(f"task {self.id} already done")
+        self.done = True
+```
+</TabItem>
+</Tabs>
+
+## The application layer: use cases own their ports
+
+The crucial, often-missed detail: **the port belongs to the layer that uses it.**
+`TaskRepo` is declared in the application layer, describing what the use cases
+need — the database adapter then conforms to *it*, inverting the dependency:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod app)"
+use crate::domain::{DomainError, Task}; // inward import — the only direction
+
+/// Port: defined HERE, in the layer that uses it.
+pub trait TaskRepo {
+    fn next_id(&self) -> u32;
+    fn save(&mut self, task: Task);
+    fn get(&self, id: u32) -> Option<Task>;
+}
+
+pub struct TaskService<R: TaskRepo> { repo: R }
+
+impl<R: TaskRepo> TaskService<R> {
+    pub fn add(&mut self, title: &str) -> Result<u32, AppError> {
+        let id = self.repo.next_id();
+        let task = Task::new(id, title).map_err(AppError::Domain)?;
+        self.repo.save(task);
+        Ok(id)
+    }
+
+    pub fn complete(&mut self, id: u32) -> Result<(), AppError> {
+        let mut task = self.repo.get(id).ok_or(AppError::NotFound(id))?;
+        task.complete().map_err(AppError::Domain)?;
+        self.repo.save(task);
+        Ok(())
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="app/service.go"
+import "academy.example/hexagonal/domain" // inward import — the only direction
+
+// TaskRepo is the port: defined HERE, in the layer that uses it.
+type TaskRepo interface {
+	NextID() int
+	Save(t domain.Task)
+	Get(id int) (domain.Task, bool)
+}
+
+type Service struct{ repo TaskRepo }
+
+func (s *Service) Add(title string) (int, error) {
+	id := s.repo.NextID()
+	task, err := domain.NewTask(id, title)
+	if err != nil {
+		return 0, err
+	}
+	s.repo.Save(task)
+	return id, nil
+}
+```
+
+Go enforces the rule structurally: if `domain` imported `app` (which imports
+`domain`), the compiler rejects the **import cycle**.
+</TabItem>
+<TabItem label="Python">
+```python title="application.py"
+from domain import Task  # inward import — the only direction
+
+
+class TaskRepo(Protocol):
+    """The port: defined HERE, in the layer that uses it."""
+
+    def next_id(self) -> int: ...
+    def save(self, task: Task) -> None: ...
+    def get(self, task_id: int) -> Task | None: ...
+
+
+class TaskService:
+    def __init__(self, repo: TaskRepo) -> None:
+        self._repo = repo
+
+    def add(self, title: str) -> int:
+        task_id = self._repo.next_id()
+        task = Task.new(task_id, title)  # domain rule enforced here
+        self._repo.save(task)
+        return task_id
+```
+</TabItem>
+</Tabs>
+
+## Adapters and the composition root
+
+The in-memory adapter implements the port (a Postgres one would sit beside it);
+the composition root is the *only* code that touches every layer:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod composition)"
+pub struct App {
+    service: TaskService<InMemoryRepo>,
+}
+
+impl App {
+    pub fn new() -> Self {
+        App { service: TaskService::new(InMemoryRepo::default()) } // the wiring
+    }
+
+    pub fn complete(&mut self, id: u32) -> String {
+        match self.service.complete(id) {
+            Ok(()) => format!("Task #{id} done."),
+            Err(AppError::NotFound(_)) => format!("No task #{id}."),
+            Err(AppError::Domain(DomainError::AlreadyDone)) => {
+                format!("Task #{id} was already done.")
+            }
+            Err(e) => format!("Unexpected error: {e:?}"),
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="hexagonal.go"
+// The composition root: the only place that knows every layer.
+func NewApp() *App {
+	return &App{service: app.NewService(adapters.NewInMemoryRepo())} // the wiring
+}
+
+func (a *App) Complete(id int) string {
+	err := a.service.Complete(id)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("Task #%d done.", id)
+	case errors.Is(err, app.ErrNotFound):
+		return fmt.Sprintf("No task #%d.", id)
+	case errors.Is(err, domain.ErrAlreadyDone):
+		return fmt.Sprintf("Task #%d was already done.", id)
+	default:
+		return fmt.Sprintf("Unexpected error: %v", err)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="main_app.py"
+class App:
+    def __init__(self) -> None:
+        self._service = TaskService(InMemoryRepo())  # the wiring
+
+    def complete(self, task_id: int) -> str:
+        try:
+            self._service.complete(task_id)
+        except NotFoundError:
+            return f"No task #{task_id}."
+        except AlreadyDoneError:
+            return f"Task #{task_id} was already done."
+        return f"Task #{task_id} done."
+```
+</TabItem>
+</Tabs>
+
+## Enforcing the rule with a test
+
+Diagrams decay; tests don't. The Python module ships an **architecture test**
+that parses each layer's imports with `ast` and fails if any point outward:
+
+```python title="test_hexagonal.py"
+class ArchitectureTests(unittest.TestCase):
+    """The Dependency Rule as an executable check: if someone adds
+    `from adapters import ...` to domain.py, THIS TEST FAILS."""
+
+    FORBIDDEN = {
+        "domain.py": {"application", "adapters", "main_app"},
+        "application.py": {"adapters", "main_app"},
+        "adapters.py": {"application", "main_app"},
+    }
+
+    def test_dependencies_point_inward(self) -> None:
+        for filename, forbidden in self.FORBIDDEN.items():
+            with self.subTest(layer=filename):
+                illegal = self.imports_of(filename) & forbidden
+                self.assertEqual(illegal, set(),
+                                 f"{filename} must not import outward: {illegal}")
+```
+
+The other two languages get the same guarantee structurally: **Go** forbids
+import cycles outright (once `app` imports `domain`, `domain` importing `app`
+is a compile error), and **Rust's** module tree makes an outward `use
+crate::adapters` inside `domain` glaringly visible in review (and impossible
+across crates without declaring the dependency in `Cargo.toml`).
+
+<Quiz
+  question={'Where should the TaskRepo port (interface) be defined, and why?'}
+  options={[
+    { text: "Next to the database adapter, since it describes storage.", },
+    { text: "In the application layer that uses it — so the adapter depends on the use cases’ needs, inverting the dependency.", correct: true },
+    { text: "In the domain, since everything depends on the domain.", },
+    { text: "In the composition root, which knows everything.", },
+  ]}
+  explanation="Defining the port in the consuming layer is the inversion in ‘dependency inversion’: the interface expresses what the use cases need, and the storage adapter must conform to it — so the source dependency points from adapter (outer) to application (inner). Put the interface next to the database and the direction flips back: the app layer would import storage code, violating the Dependency Rule."
+/>
+
+## How the three languages compare
+
+| Aspect | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Layer boundary | modules (or crates) | packages | modules (or packages) |
+| Rule enforced by | module tree / crate deps | import-cycle prohibition | the architecture test |
+| Port | `trait` in `app` | `interface` in `app` | `Protocol` in `application` |
+| Wiring style | generics (static DI) | interface values | duck-typed constructor |
+| Domain purity check | review + crate boundaries | compiler | `ast`-based test |
+
+## Common mistakes & debugging
+
+### 1. Domain entities importing framework types
+
+The moment `Task` carries an ORM base class, a JSON annotation, or an HTTP
+type, the domain is welded to infrastructure and its tests drag that
+infrastructure along. **Fix:** keep entities plain; map to framework types at
+the adapter boundary.
+
+### 2. Ports defined next to the adapters
+
+An interface in the `postgres` package that the app layer imports points the
+dependency *outward* — same files, opposite architecture. **Fix:** declare the
+port in the layer that consumes it (as all three modules here do).
+
+### 3. Business logic leaking into the composition root or handlers
+
+`if task.done { return "already done" }` inside an HTTP handler is a rule that
+escaped the domain — now it exists once per interface (HTTP, CLI, queue).
+**Fix:** handlers translate; the domain decides.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a use case without touching adapters.">
+
+Add a `rename(id, new_title)` use case, reusing the domain's title rule. Which
+layers change?
+
+**Solution (Python):**
+
+```python
+# application.py — the ONLY layer that changes (plus a domain reuse):
+def rename(self, task_id: int, new_title: str) -> None:
+    task = self._repo.get(task_id)
+    if task is None:
+        raise NotFoundError(f"task {task_id} not found")
+    renamed = Task.new(task.id, new_title)  # reuse the title rule
+    renamed.done = task.done
+    self._repo.save(renamed)
+```
+
+Domain: unchanged (rule reused). Adapters: unchanged (same port). Composition:
+one message mapping. That locality is the architecture working.
+
+</Interview>
+
+<Interview question="Exercise 2 — Extend the architecture test.">
+
+You add a `notifications.py` adapter. Extend the architecture test so the inner
+layers can't import it.
+
+**Solution:**
+
+```python
+FORBIDDEN = {
+    "domain.py": {"application", "adapters", "main_app", "notifications"},
+    "application.py": {"adapters", "main_app", "notifications"},
+    "adapters.py": {"application", "main_app"},
+    "notifications.py": {"application", "main_app"},  # adapters stay peers
+}
+```
+
+Every new outer module joins the forbidden set of every inner layer — the test
+grows with the codebase.
+
+</Interview>
+
+<Interview question="Exercise 3 — Name the layer.">
+
+Where does each belong: (a) "an order over €10,000 requires approval", (b) "SELECT
+* FROM orders WHERE id = $1", (c) "return HTTP 404 when the order is missing",
+(d) "connect the Postgres repo to the order service"?
+
+**Answer:** (a) domain (business rule); (b) adapter (storage detail); (c) adapter
+(HTTP translation of an app-layer NotFound); (d) composition root (wiring).
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Rules on entities, in a dependency-free domain | Business logic in handlers/controllers |
+| Ports declared in the consuming layer | Interfaces living beside the database code |
+| One composition root that wires everything | Layers constructing their own dependencies |
+| Architecture enforced by tests/compiler | Architecture that exists only in a diagram |
+| Adapters translate; domain decides | Framework types threaded through the core |
+| Start simple; add layers when they pay | Cargo-cult layering on a 200-line script |
+
+## Mini-project
+
+**Re-architect the signup feature** from the
+[Testing Pyramid lesson](/systems-programming-academy/part-2-engineering/testing-pyramid/) into explicit
+layers in one language: `domain` (email value object + rules), `application`
+(SignupService + `UserRepo`/`Notifier` ports), `adapters` (in-memory both), and
+a composition root. Port the existing tests to their layers, and — if Python —
+add the architecture test. Confirm the whole pyramid still passes and the
+domain imports nothing.
+
+## Interview questions
+
+<Interview question="What is the Dependency Rule?">
+
+The single law of Clean/Hexagonal architecture: source-code dependencies must
+point only inward — from infrastructure toward application toward domain. Inner
+layers know nothing about outer ones: no names, no types, no imports. Data can
+flow both ways at runtime (an adapter calls a use case, which returns results
+outward), but *compile-time* knowledge only points in. It's what makes the core
+testable in isolation and the infrastructure swappable.
+
+</Interview>
+
+<Interview question="How do Clean Architecture and Hexagonal Architecture relate?">
+
+They're two formulations of the same idea. Hexagonal (Cockburn, 2005) frames it
+as a core surrounded by **ports** (interfaces the core defines) and **adapters**
+(implementations for specific technologies), with no inherent layer count. Clean
+Architecture (Martin, 2012) generalises to concentric circles — entities, use
+cases, interface adapters, frameworks — governed by the Dependency Rule. In
+practice teams blend them: hexagonal's ports/adapters vocabulary with Clean's
+domain/application split, as this lesson does.
+
+</Interview>
+
+<Interview question="How can you enforce architectural boundaries mechanically?">
+
+Depends on the language's tooling. Go: package import cycles are compile errors,
+so layering violations often can't compile; reviewers guard the rest. Rust:
+split layers into crates and the dependency graph in `Cargo.toml` is the
+architecture. Python/JS: add architecture tests that parse imports (as this
+lesson's `ast` test does) or use dedicated tools (import-linter, dependency-
+cruiser, ArchUnit for Java). The principle: a boundary that isn't checked by CI
+will erode.
+
+</Interview>
+
+<Interview question="When is this architecture overkill?">
+
+For small scripts, prototypes, and tools with one interface and trivial logic —
+the layers add indirection with nothing to protect. The honest heuristic:
+introduce the port/adapter seam when the *second* implementation (a test fake
+counts!) or the *second* interface appears, and grow toward full layering as
+the domain logic becomes worth isolating. Architecture is a means of managing
+change; where change is cheap, ceremony is waste.
+
+</Interview>
+
+## Challenge
+
+Take a service you own and draw its *actual* dependency graph (imports, not
+intentions). Find the arrows pointing outward — domain code importing the ORM,
+handlers computing business rules — and fix **one**: extract the rule into a
+plain domain object, define the port where it's consumed, and add the test or
+lint that stops the arrow from coming back. Repeat weekly. Architectures aren't
+adopted in a rewrite; they're recovered one inverted dependency at a time.
+
+## References & further reading
+
+- Alistair Cockburn — [Hexagonal Architecture](https://alistair.cockburn.us/hexagonal-architecture/)
+- Robert C. Martin — [The Clean Architecture](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html) and *Clean Architecture* (2017)
+- [import-linter](https://import-linter.readthedocs.io/) (Python) · [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) (JS) — mechanical boundary enforcement
+- *Architecture Patterns with Python* (Percival & Gregory) — free online, the same ideas in depth
+
+<Progress />

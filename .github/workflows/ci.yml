@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  site:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+
+  rust-examples:
+    name: Rust examples (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate:
+          - rust-ownership
+          - rust-error-handling
+          - rust-traits
+          - rust-collections
+          - rust-testing
+          - rust-generics
+          - rust-smart-pointers
+          - rust-concurrency
+          - rust-unsafe
+          - part2-repository-rust
+          - part2-config-rust
+          - part2-logging-rust
+          - part2-caching-rust
+          - part2-pyramid-rust
+          - part2-hexagonal-rust
+          - part3-loganalyzer-rust
+          - part3-exporter-rust
+          - part3-confgen-rust
+          - part3-healthcheck-rust
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+
+  go-examples:
+    name: Go examples (gofmt, vet, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - go-interfaces
+          - go-errors
+          - go-collections
+          - go-testing
+          - go-generics
+          - go-concurrency
+          - part2-repository-go
+          - part2-config-go
+          - part2-logging-go
+          - part2-caching-go
+          - part2-pyramid-go
+          - part2-hexagonal-go
+          - part3-loganalyzer-go
+          - part3-exporter-go
+          - part3-confgen-go
+          - part3-healthcheck-go
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+
+  python-examples:
+    name: Python examples (ruff, unittest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - py-datamodel
+          - py-typing
+          - py-protocols
+          - py-iterators
+          - py-testing
+          - part2-repository-py
+          - part2-config-py
+          - part2-logging-py
+          - part2-caching-py
+          - part2-pyramid-py
+          - part2-hexagonal-py
+          - part3-loganalyzer-py
+          - part3-exporter-py
+          - part3-confgen-py
+          - part3-healthcheck-py
+    defaults:
+      run:
+        working-directory: examples/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pipx install ruff
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: python -m unittest discover -s . -p 'test_*.py'

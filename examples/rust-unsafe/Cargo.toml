@@ -1,0 +1,13 @@
+[package]
+name = "unsafe_ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Unsafe Rust & FFI."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: the FFI examples call the C standard library (libc), which is
+# always linked. `cargo test` runs offline on stable.
+
+[lib]
+path = "src/lib.rs"

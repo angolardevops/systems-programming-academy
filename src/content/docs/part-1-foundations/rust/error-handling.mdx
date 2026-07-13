@@ -1,0 +1,585 @@
+---
+title: "Rust: Error Handling with Result, Option & ?"
+description: How Rust turns errors into ordinary values you cannot ignore — Result, Option, the ? operator, custom error types, and when to panic — with complete, runnable examples.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["rust"]} />
+
+Most languages treat errors as an interruption: an exception is thrown and flies
+up the stack until *something* catches it — or nothing does and the program
+dies. Rust makes a different bet: **an error is an ordinary value**, returned
+like any other, and the type system will not let you forget to handle it. This
+lesson builds that model from nothing, with programs you can paste into a file
+and run unchanged.
+
+<Aside type="note" title="Prerequisites">
+  You should be comfortable with functions, `enum`, `struct`, and pattern
+  matching (`match`). Ownership helps but isn't required — see
+  [Ownership & the Borrow Checker](/systems-programming-academy/part-1-foundations/rust/ownership/).
+</Aside>
+
+All code here is from the tested crate
+[`examples/rust-error-handling/`](https://github.com/angolardevops/systems-programming-academy)
+(9 passing tests, clean `cargo clippy`). Every snippet below is **complete**: it
+either has its own `fn main`, or is a whole item you can drop into a file.
+
+## Theory: two enums that change everything
+
+Rust has no exceptions. Instead, fallibility and absence are encoded in two
+standard `enum`s from the prelude:
+
+```rust
+// These two are in the standard library — shown here so you can see they are
+// just ordinary enums, nothing magic.
+enum Option<T> {
+    Some(T), // a value is present
+    None,    // no value
+}
+
+enum Result<T, E> {
+    Ok(T),  // success, carrying a T
+    Err(E), // failure, carrying an E
+}
+```
+
+- Use **`Option<T>`** when a value may legitimately be **absent** (a lookup that
+  finds nothing). Absence is not an error.
+- Use **`Result<T, E>`** when an operation can **fail** and the caller needs to
+  know **why**.
+
+Because these are return values, the compiler forces the caller to deal with
+them — there is no invisible control-flow jump. That is the whole idea.
+
+<Mermaid title="How ? propagates: unwrap on Ok, return early on Err" code={`flowchart TD
+  A["call expr?"] --> B{"Result is..."}
+  B -->|Ok v| C["expression evaluates to v"]
+  B -->|Err e| D["return Err(e.into()) from the function"]
+  C --> E["continue with v"]`} />
+
+## A complete program you can run
+
+Here is the whole running example in one self-contained file. Save it as
+`main.rs` and run `cargo run` (or paste into the [Rust Playground](https://play.rust-lang.org)).
+It parses `"name, age"` lines into records and reports precise errors.
+
+```rust title="main.rs — complete, runnable"
+use std::fmt;
+
+/// A parsed user record.
+#[derive(Debug, PartialEq, Eq)]
+struct User {
+    name: String,
+    age: u8,
+}
+
+/// Every way a single line can be malformed. An enum (not a String) lets the
+/// caller match on the *kind* of failure.
+#[derive(Debug, PartialEq, Eq)]
+enum ParseError {
+    WrongFieldCount { found: usize },
+    EmptyName,
+    InvalidAge { value: String },
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::WrongFieldCount { found } => {
+                write!(f, "expected 2 comma-separated fields, found {found}")
+            }
+            ParseError::EmptyName => write!(f, "name must not be empty"),
+            ParseError::InvalidAge { value } => {
+                write!(f, "age '{value}' is not a valid number in 0..=255")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Parse one line. Note the `?` on `parse()`: on error it returns early.
+fn parse_user(line: &str) -> Result<User, ParseError> {
+    let parts: Vec<&str> = line.split(',').collect();
+    if parts.len() != 2 {
+        return Err(ParseError::WrongFieldCount { found: parts.len() });
+    }
+
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(ParseError::EmptyName);
+    }
+
+    let age_text = parts[1].trim();
+    let age: u8 = age_text
+        .parse()
+        .map_err(|_| ParseError::InvalidAge { value: age_text.to_string() })?;
+
+    Ok(User { name: name.to_string(), age })
+}
+
+fn main() {
+    for line in ["Ada, 36", "", "Bob, twelve", "a,b,c"] {
+        match parse_user(line) {
+            Ok(user) => println!("ok:    {user:?}"),
+            Err(e) => println!("error on {line:?}: {e}"),
+        }
+    }
+}
+```
+
+Running it prints exactly:
+
+```text
+ok:    User { name: "Ada", age: 36 }
+error on "": expected 2 comma-separated fields, found 1
+error on "Bob, twelve": age 'twelve' is not a valid number in 0..=255
+error on "a,b,c": expected 2 comma-separated fields, found 3
+```
+
+<Aside type="tip" title="What `?` actually does">
+  `expr?` means: if `expr` is `Ok(v)` (or `Some(v)`), evaluate to `v`; if it is
+  `Err(e)`, `return Err(e.into())` from the current function. It replaces a
+  pyramid of `match` with one character — but the early return is still there,
+  fully visible to the type system.
+</Aside>
+
+## `Option`: absence without errors
+
+`Option` is for "there might be nothing", and the compiler makes you handle the
+nothing. This is a complete program:
+
+```rust title="main.rs — complete, runnable"
+#[derive(Debug)]
+struct User {
+    name: String,
+    age: u8,
+}
+
+/// Returns the first adult, or None if there are none.
+fn first_adult(users: &[User]) -> Option<&User> {
+    users.iter().find(|u| u.age >= 18)
+}
+
+fn main() {
+    let people = vec![
+        User { name: "Kid".to_string(), age: 10 },
+        User { name: "Grace".to_string(), age: 45 },
+    ];
+
+    // Three idiomatic ways to handle the Option:
+    match first_adult(&people) {
+        Some(u) => println!("match:      {}", u.name),
+        None => println!("match:      nobody"),
+    }
+
+    if let Some(u) = first_adult(&people) {
+        println!("if let:     {}", u.name);
+    }
+
+    // `map` + `unwrap_or` collapses it to a default without a branch.
+    let name = first_adult(&people).map(|u| u.name.as_str()).unwrap_or("nobody");
+    println!("map/unwrap: {name}");
+}
+```
+
+Output:
+
+```text
+match:      Grace
+if let:     Grace
+map/unwrap: Grace
+```
+
+## Propagating errors out of `main`
+
+`main` can itself return a `Result`. Then `?` works inside `main`, and the
+runtime prints any error and exits non-zero. Complete program:
+
+```rust title="main.rs — complete, runnable"
+use std::num::ParseIntError;
+
+/// Doubles the number written in `text`. `?` turns a parse failure into an
+/// early return; the error type is the standard library's ParseIntError.
+fn double(text: &str) -> Result<i64, ParseIntError> {
+    let n: i64 = text.parse()?; // <- ? propagates ParseIntError
+    Ok(n * 2)
+}
+
+fn main() -> Result<(), ParseIntError> {
+    println!("{}", double("21")?); // prints 42
+    println!("{}", double("oops")?); // returns Err from main -> prints error, exits 1
+    println!("unreachable");
+    Ok(())
+}
+```
+
+Running it prints `42`, then the process exits with an error:
+
+```text
+42
+Error: ParseIntError { kind: InvalidDigit }
+```
+
+<Aside type="caution" title="`Box<dyn Error>` for quick propagation">
+  When a function calls several fallible operations with *different* error
+  types, give it `-> Result<T, Box<dyn std::error::Error>>`. Any error that
+  implements the standard `Error` trait converts into the box automatically via
+  `?`. It is the pragmatic default for `main` and small programs; libraries
+  usually define a precise error enum instead (as our `ParseError` does).
+</Aside>
+
+## Fail-fast vs fail-soft
+
+A real parser must choose: stop at the first bad row, or keep the good ones and
+collect the errors? Both are one function each in the companion crate.
+
+**Fail-fast** — `collect()` into a `Result` short-circuits on the first `Err`:
+
+```rust title="src/lib.rs"
+pub fn parse_users(input: &str) -> Result<Vec<User>, ParseError> {
+    input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(parse_user)
+        .collect() // Iterator<Item = Result<..>>  ->  Result<Vec<..>, ..>
+}
+```
+
+**Fail-soft** — keep good rows, remember which lines failed:
+
+```rust title="src/lib.rs"
+pub fn parse_users_lenient(input: &str) -> (Vec<User>, Vec<(usize, ParseError)>) {
+    let mut users = Vec::new();
+    let mut errors = Vec::new();
+    for (i, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match parse_user(line) {
+            Ok(u) => users.push(u),
+            Err(e) => errors.push((i + 1, e)), // 1-based line number
+        }
+    }
+    (users, errors)
+}
+```
+
+Running the crate's binary (`cargo run`) over a messy input shows fail-soft in
+action — its real output is:
+
+```text
+== Lenient parse (keep good rows) ==
+  ok:   Ada Lovelace (36)
+  ok:   Carol Shaw (40)
+  skip: line 2: age 'not-a-number' is not a valid number in 0..=255
+
+First adult: Ada Lovelace
+```
+
+<Quiz
+  question="What does `.collect()` produce from an iterator of `Result<User, E>` when the target type is `Result<Vec<User>, E>`?"
+  options={[
+    { text: "A Vec that silently drops the Err items." },
+    { text: "The first Err if any item is Err, otherwise Ok(Vec) of all values.", correct: true },
+    { text: "A Vec<Result<User, E>> — collect can't merge them." },
+    { text: "It panics on the first Err." },
+  ]}
+  explanation="`collect()` is generic over the target type. Collecting into `Result<Vec<T>, E>` short-circuits: it returns `Err(e)` for the first failing item, or `Ok(vec)` if every item was `Ok`. This is the idiomatic fail-fast pattern — no manual loop needed."
+/>
+
+## Common mistakes & debugging
+
+### 1. `unwrap()` in production code
+
+`unwrap()` and `expect()` turn an `Err`/`None` into a **panic**. Great for
+examples and tests; a landmine in real code.
+
+```rust title="main.rs — complete, runnable (this PANICS on purpose)"
+fn main() {
+    let text = "not a number";
+    let n: i32 = text.parse().unwrap(); // panics here
+    println!("{n}");
+}
+```
+
+```text
+thread 'main' panicked at src/main.rs:3:31:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+```
+
+**Fix:** return a `Result` and use `?`, or handle both arms with `match`. Reserve
+`unwrap()` for cases that are *truly* impossible, and prefer `expect("why this
+can't fail")` so the panic message explains your reasoning.
+
+### 2. The `?` type mismatch
+
+```rust
+// This does NOT compile: parse() yields ParseIntError, but the function
+// promises ParseError, and there is no From<ParseIntError> for ParseError.
+fn parse_age(text: &str) -> Result<u8, ParseError> {
+    let age: u8 = text.parse()?; // ✗
+    Ok(age)
+}
+```
+
+```text
+error[E0277]: `?` couldn't convert the error to `ParseError`
+  = help: the trait `From<ParseIntError>` is not implemented for `ParseError`
+```
+
+**Fix (two options):** either implement `From<ParseIntError> for ParseError` so
+`?` can convert automatically, **or** convert explicitly with `map_err` — which
+is what `parse_user` does, because it also captures the offending text:
+
+```rust
+let age: u8 = text
+    .parse()
+    .map_err(|_| ParseError::InvalidAge { value: text.to_string() })?;
+```
+
+### 3. Ignoring a `Result` entirely
+
+```rust title="main.rs — compiles, but with a warning you must not ignore"
+use std::fs::File;
+
+fn main() {
+    File::create("/root/forbidden.txt"); // result ignored!
+    println!("done?");
+}
+```
+
+```text
+warning: unused `Result` that must be used
+ --> src/main.rs:4:5
+  = note: this `Result` may be an `Err` variant, which should be handled
+```
+
+**Fix:** handle it (`match`/`?`), or if you truly mean to discard it, be explicit
+with `let _ = ...;` so the intent is on the record.
+
+## Exercises
+
+<Interview question="Exercise 1 — Convert unwrap-heavy code to ?.">
+
+Rewrite this so it never panics and instead returns the error to the caller.
+Provide a complete `fn main` that prints the result or the error.
+
+```rust
+fn sum_two(a: &str, b: &str) -> i64 {
+    a.parse::<i64>().unwrap() + b.parse::<i64>().unwrap() // panics on bad input
+}
+```
+
+**Solution — complete, runnable:**
+
+```rust
+use std::num::ParseIntError;
+
+fn sum_two(a: &str, b: &str) -> Result<i64, ParseIntError> {
+    Ok(a.parse::<i64>()? + b.parse::<i64>()?)
+}
+
+fn main() {
+    match sum_two("20", "22") {
+        Ok(n) => println!("sum = {n}"),   // sum = 42
+        Err(e) => println!("bad input: {e}"),
+    }
+    match sum_two("20", "x") {
+        Ok(n) => println!("sum = {n}"),
+        Err(e) => println!("bad input: {e}"), // bad input: invalid digit found in string
+    }
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Combine Option and Result with ok_or.">
+
+Given a slice of users, write `oldest_name(users) -> Result<String, String>` that
+returns the oldest user's name, or an `Err` message if the slice is empty.
+
+**Solution — complete, runnable:**
+
+```rust
+#[derive(Debug)]
+struct User { name: String, age: u8 }
+
+fn oldest_name(users: &[User]) -> Result<String, String> {
+    users
+        .iter()
+        .max_by_key(|u| u.age)          // Option<&User>
+        .map(|u| u.name.clone())         // Option<String>
+        .ok_or_else(|| "no users".to_string()) // Option -> Result
+}
+
+fn main() {
+    let people = vec![
+        User { name: "Ada".to_string(), age: 36 },
+        User { name: "Grace".to_string(), age: 45 },
+    ];
+    println!("{:?}", oldest_name(&people)); // Ok("Grace")
+    println!("{:?}", oldest_name(&[]));      // Err("no users")
+}
+```
+
+`ok_or_else` is the bridge from `Option` to `Result`: `None` becomes `Err(...)`.
+
+</Interview>
+
+<Interview question="Exercise 3 — A custom error with a Display message.">
+
+Define a `DivideError` enum with a `ByZero` variant, implement `Display`, and
+write `checked_div(a, b) -> Result<i64, DivideError>`.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::fmt;
+
+#[derive(Debug, PartialEq)]
+enum DivideError {
+    ByZero,
+}
+
+impl fmt::Display for DivideError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DivideError::ByZero => write!(f, "cannot divide by zero"),
+        }
+    }
+}
+impl std::error::Error for DivideError {}
+
+fn checked_div(a: i64, b: i64) -> Result<i64, DivideError> {
+    if b == 0 {
+        return Err(DivideError::ByZero);
+    }
+    Ok(a / b)
+}
+
+fn main() {
+    println!("{:?}", checked_div(84, 2));  // Ok(42)
+    match checked_div(1, 0) {
+        Ok(n) => println!("{n}"),
+        Err(e) => println!("error: {e}"),  // error: cannot divide by zero
+    }
+}
+```
+
+</Interview>
+
+## Performance: is `Result` slower than exceptions?
+
+No — and often faster. A `Result<T, E>` is just a tagged union the size of its
+largest variant; returning one is a plain value return with no stack unwinding,
+no allocation, and nothing to catch. On the **happy path** it is effectively
+free, and the optimizer routinely inlines the `Ok` branch.
+
+By contrast, `panic!` (the exception-like path) *does* unwind the stack and runs
+destructors — it is comparatively expensive and meant for unrecoverable bugs,
+not control flow.
+
+<Aside type="tip" title="Rule of thumb">
+  Return `Result`/`Option` for anything a caller could reasonably want to
+  recover from. Reserve `panic!`/`unwrap`/`expect` for programmer errors and
+  genuinely impossible states. "Errors are values" is a performance feature, not
+  just an ergonomics one.
+</Aside>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Return `Result<T, E>` with a typed `E` for recoverable failures | Panic (or `unwrap`) deep inside library code |
+| Use `?` to propagate; handle at the boundary | Nest five levels of `match` by hand |
+| Define an `enum` error so callers can match the kind | Use `Result<T, String>` and lose all structure |
+| `impl Display + Error` so errors compose | Print the error and swallow it |
+| `expect("clear reason")` for true impossibilities | Bare `unwrap()` with no explanation |
+| `let _ = x;` to *intentionally* discard a `Result` | Silently ignore a `#[must_use]` warning |
+
+## Mini-project
+
+**Build a `Config` loader.** Parse a multiline `key=value` string into a struct
+with fields `host: String`, `port: u16`, and `verbose: bool`. Requirements:
+
+- A `ConfigError` enum with variants for a missing key, a duplicate key, and an
+  invalid value (carrying which key/value).
+- `impl Display` and `impl std::error::Error` for it.
+- A `load(text: &str) -> Result<Config, ConfigError>` using `?`.
+- At least four `#[test]` cases (happy path + one per error variant).
+- `cargo clippy` clean, and a `fn main` that loads a sample config and prints it.
+
+This exercises typed errors, `?`, `Option::ok_or`, and the `Display`/`Error`
+traits together — the full toolkit from this lesson.
+
+## Interview questions
+
+<Interview question="When should you use panic! instead of returning Result?">
+
+`panic!` is for **unrecoverable** situations that indicate a bug: a broken
+invariant, an index you *proved* is in bounds, a `match` arm that should be
+unreachable. It aborts the current thread (unwinding by default). Use `Result`
+for anything a caller might reasonably handle — bad input, missing files,
+network failures. A good library almost never panics on data it was given.
+
+</Interview>
+
+<Interview question="What is the difference between Option and Result?">
+
+`Option<T>` models **presence vs absence** (`Some`/`None`) — there is nothing to
+explain about a `None`. `Result<T, E>` models **success vs failure** (`Ok`/`Err`)
+and carries a reason `E` on failure. Convert between them with `ok_or`/`ok_or_else`
+(Option → Result) and `.ok()` (Result → Option, discarding the error).
+
+</Interview>
+
+<Interview question="How does the ? operator decide what error type to return?">
+
+`?` calls `From::from` on the error before returning it, so `Err(e)` becomes
+`Err(E::from(e))` where `E` is the function's declared error type. That is why a
+function returning `Result<_, Box<dyn Error>>` can use `?` on many different
+error types — each converts into the box. If no such `From` impl exists, you get
+a compile error (mistake #2 above).
+
+</Interview>
+
+<Interview question="Why does Rust warn when you ignore a Result?">
+
+`Result` is marked `#[must_use]`. Ignoring it usually means ignoring a possible
+failure — the exact bug the type system is trying to prevent. The warning forces
+a decision: handle it, propagate it with `?`, or explicitly discard it with
+`let _ =`. Silence is never the default.
+
+</Interview>
+
+## Challenge
+
+Take a small script you have that uses lots of `unwrap()` (a quick file reader, a
+scraper, a CLI). Rewrite it so `main` returns `Result<(), Box<dyn Error>>` and
+every `unwrap` becomes either a `?` or a deliberate, documented `expect`. Then
+feed it deliberately broken input and confirm it fails with a *clear* message and
+a non-zero exit code instead of a raw panic. That transition — from "crashes
+mysteriously" to "reports precisely" — is what production error handling buys you.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 9 — [“Error Handling”](https://doc.rust-lang.org/book/ch09-00-error-handling.html)
+- `std::result` — [module documentation](https://doc.rust-lang.org/std/result/)
+- `std::option` — [module documentation](https://doc.rust-lang.org/std/option/)
+- Rust By Example — [error handling and `?`](https://doc.rust-lang.org/rust-by-example/error.html)
+- The `?` operator RFC 243 — [error propagation](https://rust-lang.github.io/rfcs/0243-trait-based-exception-handling.html)
+
+<Progress />

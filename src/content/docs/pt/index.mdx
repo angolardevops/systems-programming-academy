@@ -1,0 +1,63 @@
+---
+title: Academia de Programação de Sistemas
+description: Aprenda engenharia de software de produção, do zero ao avançado, com Python, Go e Rust.
+template: splash
+hero:
+  tagline: Dos primeiros princípios à produção — com Python, Go e Rust.
+  actions:
+    - text: Comece pelo guia de Boas-vindas
+      link: /systems-programming-academy/pt/welcome/
+      icon: right-arrow
+      variant: primary
+    - text: Ir para a primeira lição
+      link: /systems-programming-academy/pt/part-1-foundations/rust/ownership/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Não é um passeio pela sintaxe. É uma formação em engenharia.
+
+A maioria dos tutoriais de linguagens para na sintaxe. Esta Academia ensina como
+o software real é **desenhado, construído, testado, medido e colocado em
+produção** — usando três linguagens em pontos diferentes do espectro da
+programação de sistemas.
+
+<CardGrid stagger>
+  <Card title="Python" icon="seti:python">
+    Legibilidade e velocidade. Seguimos a filosofia de Guido van Rossum: deve
+    haver uma — e de preferência só uma — forma óbvia de o fazer.
+  </Card>
+  <Card title="Go" icon="seti:go">
+    Simplicidade à escala. No espírito de Rob Pike: claro é melhor do que
+    esperto; um pouco de duplicação é melhor do que uma dependência a mais.
+  </Card>
+  <Card title="Rust" icon="seti:rust">
+    Segurança sem coletor de lixo. Na tradição de Graydon Hoare: o compilador é
+    o seu par de programação.
+  </Card>
+</CardGrid>
+
+## Cada lição é executável e testada
+
+- ✅ **Nada de pseudocódigo.** Cada exemplo compila e corre.
+- ✅ **Sem placeholders, sem TODOs.** O código vem com testes que pode correr.
+- ✅ **Benchmarks reais.** Os números vêm de código que pode re-executar.
+- ✅ **Bilingue.** Leia em Português ou English (troca no canto superior direito).
+
+## Como a Academia está organizada
+
+| Parte | Foco |
+| --- | --- |
+| **1 · Fundamentos** | Núcleo das linguagens: memória, tipos, ownership, erros, testes. |
+| **2 · Engenharia Real** | Arquitetura, CI/CD, observabilidade, segurança — comparadas. |
+| **3 · Automação DevOps** | Construir ferramentas reais: CLIs, exporters, geradores de config. |
+| **4 · Concorrência & Paralelismo** | Threads, async, canais — culminando num mini-NGINX. |
+| **5 · Construir Frameworks** | Reconstruir um ORM, um framework web e um runtime de green-threads. |
+| **Capstone** | Uma plataforma de microserviços de produção, sem frameworks. |
+
+:::note[Estado]
+Este é um recurso educativo aberto em desenvolvimento ativo. **Parte 1 → Rust →
+Ownership** está completa e totalmente testada; mais lições estão a ser
+construídas com o mesmo nível de exigência.
+:::

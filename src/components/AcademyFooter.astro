@@ -1,0 +1,21 @@
+---
+// Overrides Starlight's Footer: renders the default (prev/next nav, last-updated)
+// and appends the Academy's required authorship credit on every page.
+import Default from '@astrojs/starlight/components/Footer.astro';
+
+const year = new Date().getFullYear();
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<div class="spa-footer-credit">
+  <p>
+    <strong>Author:</strong> Walter Angolar &nbsp;·&nbsp;
+    <strong>Technical Review:</strong> Claude Code
+  </p>
+  <p>
+    Educational philosophy inspired by Guido van Rossum (Python), Rob Pike (Go)
+    and Graydon Hoare (Rust).
+  </p>
+  <p>© {year} Walter Angolar. Content licensed under MIT. Built with Astro Starlight.</p>
+</div>

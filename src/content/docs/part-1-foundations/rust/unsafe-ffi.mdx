@@ -1,0 +1,364 @@
+---
+title: "Rust: Unsafe & FFI"
+description: What `unsafe` really unlocks (five abilities, not chaos), how to wrap an unsafe core in a safe API, raw pointers, and calling C both ways via FFI — with a tested reimplementation of split_at_mut.
+difficulty: expert
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="expert" minutes={30} languages={["rust"]} />
+
+Every abstraction bottoms out somewhere. Rust's safety guarantees are built on a
+small amount of code that the compiler *cannot* verify — talking to hardware, to
+the operating system, to C libraries, or expressing a pattern the borrow checker
+is too conservative to allow. `unsafe` is the keyword that says "I've checked this
+by hand." Used well, it is rare, tiny, and wrapped in a safe API. This lesson
+demystifies it and shows the two directions of Foreign Function Interface (FFI).
+
+<Aside type="caution" title="This is expert-level, and rarely needed">
+  Most Rust programmers write little or no `unsafe`. Reach for it only when you
+  must, keep it minimal, document why it's sound, and — where possible — verify
+  it with [Miri](https://github.com/rust-lang/miri). The goal is a safe API on
+  top; callers should never need `unsafe` themselves.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-unsafe/`](https://github.com/angolardevops/systems-programming-academy)
+(7 passing tests, clean `cargo clippy`). Every snippet is **complete**.
+
+## What `unsafe` is — and is not
+
+A common myth: "`unsafe` turns off the borrow checker." It does not. Inside an
+`unsafe` block the borrow checker, type checker, and every other rule still apply.
+`unsafe` unlocks exactly **five** extra abilities:
+
+1. Dereference a raw pointer (`*const T`, `*mut T`).
+2. Call an `unsafe` function (including all FFI functions).
+3. Implement an `unsafe` trait (e.g. `Send`/`Sync` by hand).
+4. Access or modify a mutable `static`.
+5. Access fields of a `union`.
+
+In exchange, *you* promise to uphold the invariants the compiler can no longer
+check — chiefly that references are valid and never alias illegally.
+
+<Mermaid title="The safe/unsafe boundary: a small audited core behind a safe API" code={`flowchart TD
+  U["unsafe core: raw pointers, FFI calls (you verify the invariants)"] --> A["safe abstraction (validated inputs, SAFETY comments)"]
+  A --> C["callers: 100% safe Rust, no unsafe needed"]`} />
+
+## Raw pointers
+
+You can *create* raw pointers in safe code; only *dereferencing* them needs
+`unsafe`, because the compiler can't prove they point at valid, live data.
+
+```rust title="src/lib.rs"
+pub fn raw_pointer_roundtrip(value: i32) -> i32 {
+    let r = &value;
+    let raw: *const i32 = r; // making a raw pointer is safe
+
+    // SAFETY: `raw` came from a live reference to `value`, still in scope, so it
+    // is valid and aligned.
+    unsafe { *raw } // dereferencing it is unsafe
+}
+```
+
+<Aside type="tip" title="Write a SAFETY comment for every unsafe block">
+  The convention — used throughout the standard library — is a `// SAFETY:`
+  comment above each `unsafe` block explaining *why* the invariants hold. If you
+  can't write that justification, the code isn't sound. `clippy` can even require
+  it (`undocumented_unsafe_blocks`).
+</Aside>
+
+## A safe abstraction over an unsafe core
+
+The canonical example: `split_at_mut` returns two mutable slices into one slice.
+Safe Rust can't express this — the borrow checker can't prove the halves don't
+overlap — so the standard library implements it with a few lines of `unsafe`,
+behind a completely safe signature.
+
+```rust title="src/lib.rs"
+use std::slice;
+
+pub fn split_at_mut<T>(slice: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
+    let len = slice.len();
+    assert!(mid <= len, "mid {mid} out of bounds for slice of len {len}");
+    let ptr = slice.as_mut_ptr();
+
+    // SAFETY: mid <= len (asserted), so both halves stay in the allocation and
+    // [0, mid) and [mid, len) are disjoint — the two &mut never alias.
+    unsafe {
+        (
+            slice::from_raw_parts_mut(ptr, mid),
+            slice::from_raw_parts_mut(ptr.add(mid), len - mid),
+        )
+    }
+}
+```
+
+A complete program using the safe API — no `unsafe` in sight for the caller:
+
+```rust title="main.rs — complete, runnable"
+use std::slice;
+
+fn split_at_mut<T>(s: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
+    let len = s.len();
+    assert!(mid <= len);
+    let ptr = s.as_mut_ptr();
+    // SAFETY: mid <= len, so the two ranges are disjoint and in-bounds.
+    unsafe { (slice::from_raw_parts_mut(ptr, mid), slice::from_raw_parts_mut(ptr.add(mid), len - mid)) }
+}
+
+fn main() {
+    let mut data = [1, 2, 3, 4, 5];
+    let (left, right) = split_at_mut(&mut data, 2);
+    left[0] = 100;
+    right[0] = 300;
+    println!("{data:?}"); // [100, 2, 300, 4, 5]
+}
+```
+
+Output:
+
+```text
+[100, 2, 300, 4, 5]
+```
+
+## FFI, direction 1: calling C from Rust
+
+An `extern "C"` block declares functions implemented elsewhere (here, the C
+standard library). Calling them is `unsafe` because Rust can't verify C's
+contract. Wrap the call in a safe function:
+
+```rust title="src/lib.rs"
+use std::os::raw::c_int;
+
+extern "C" {
+    fn abs(input: c_int) -> c_int; // from libc
+}
+
+pub fn c_abs(x: i32) -> i32 {
+    // SAFETY: `abs` is pure over an int with no memory requirements.
+    unsafe { abs(x as c_int) as i32 }
+}
+```
+
+## FFI, direction 2: exposing Rust to C
+
+Mark a function `extern "C"` and `#[no_mangle]` so C code can find and call it by
+name. On the Rust side it's an ordinary safe function.
+
+```rust title="src/lib.rs"
+use std::os::raw::c_int;
+
+#[no_mangle]
+pub extern "C" fn rust_triple(x: c_int) -> c_int {
+    x * 3
+}
+```
+
+A C program could then `extern int rust_triple(int);` and call it after linking
+against the compiled Rust library.
+
+<Quiz
+  question={'Which statement about unsafe is TRUE?'}
+  options={[
+    { text: "unsafe disables the borrow checker inside the block.", },
+    { text: "unsafe unlocks five specific abilities (like dereferencing raw pointers) and shifts responsibility for the invariants to the programmer.", correct: true },
+    { text: "Any program using unsafe is guaranteed to have undefined behaviour.", },
+    { text: "unsafe makes code run faster automatically.", },
+  ]}
+  explanation="`unsafe` does not turn off the borrow checker or type system. It permits five extra operations the compiler cannot verify, and in return you must manually guarantee the safety invariants. Correct `unsafe` code has no undefined behaviour; the burden of proof simply moves from the compiler to you."
+/>
+
+## Common mistakes & debugging
+
+### 1. Dereferencing a dangling raw pointer
+
+```rust
+fn main() {
+    let ptr: *const i32 = {
+        let x = 5;
+        &x // x is dropped at the end of this block
+    };
+    // SAFETY: (there is none — this is the bug)
+    let value = unsafe { *ptr }; // ✗ undefined behaviour: x is gone
+    println!("{value}");
+}
+```
+
+This may print garbage, crash, or appear to work — classic UB. **The compiler
+won't stop you** inside `unsafe`; tools like Miri (`cargo +nightly miri run`) will.
+Keep raw pointers derived from data that clearly outlives them.
+
+### 2. A wrong FFI signature
+
+If your `extern "C"` declaration doesn't exactly match the C function's real
+signature (wrong argument types, wrong return type), calling it is undefined
+behaviour with no error. **Fix:** match the C header precisely, use the
+`std::os::raw` / `std::ffi` types (`c_int`, `c_char`, `CStr`, `CString`), and
+consider `bindgen` to generate bindings automatically.
+
+### 3. `unsafe` that didn't need to be
+
+Reaching for raw pointers when a slice, iterator, or `Cell` would do. Most
+"performance" `unsafe` is unnecessary — the optimizer already elides bounds checks
+it can prove are redundant. **Fix:** write safe code first, measure, and only
+introduce `unsafe` for a proven, documented reason.
+
+## Exercises
+
+<Interview question="Exercise 1 — Dereference a raw pointer safely.">
+
+Write a function that takes `&i32`, makes a raw pointer, and returns the value
+read back through it. Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+fn read_through_raw(r: &i32) -> i32 {
+    let p: *const i32 = r;
+    // SAFETY: p comes from a live reference r, valid for this call.
+    unsafe { *p }
+}
+
+fn main() {
+    let x = 99;
+    println!("{}", read_through_raw(&x)); // 99
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Call a C math function.">
+
+Call libc's `sqrt` (declare `fn sqrt(x: f64) -> f64`) behind a safe wrapper.
+
+**Solution — complete, runnable:**
+
+```rust
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+fn c_sqrt(x: f64) -> f64 {
+    // SAFETY: sqrt is pure over a double with no memory requirements.
+    unsafe { sqrt(x) }
+}
+
+fn main() {
+    println!("{}", c_sqrt(144.0)); // 12
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Export a Rust function with the C ABI.">
+
+Write `#[no_mangle] pub extern "C" fn add(a: i32, b: i32) -> i32` and call it from
+Rust to prove it works.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::os::raw::c_int;
+
+#[no_mangle]
+pub extern "C" fn add(a: c_int, b: c_int) -> c_int {
+    a + b
+}
+
+fn main() {
+    // Callable from Rust like any function; also linkable from C as `add`.
+    println!("{}", add(20, 22)); // 42
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Smallest possible `unsafe` block | A whole function marked `unsafe` "to be safe" |
+| A `// SAFETY:` comment justifying every block | `unsafe` with no explanation of why it's sound |
+| Wrap the unsafe core in a safe, validated API | Exposing raw pointers in your public API |
+| Match C signatures exactly; use `std::ffi` types | Guessing at FFI types (silent UB) |
+| Verify with Miri and tests | Assuming "it ran once" means it's sound |
+| Write safe code first; measure before `unsafe` | Premature `unsafe` for imagined speed |
+
+## Mini-project
+
+**Build a safe `Ring<T>` buffer** whose internals use raw pointers or
+`MaybeUninit<T>` for efficiency, but whose public API (`push`, `pop`, `len`) is
+entirely safe. Every `unsafe` block gets a `SAFETY` comment; the buffer never
+exposes a dangling reference.
+
+Requirements: a safe public API, documented `unsafe` internals, at least four
+`#[test]` cases (including wrap-around and empty/full edges), `cargo clippy`
+clean, and — if you can — a clean run under `cargo +nightly miri test`.
+
+## Interview questions
+
+<Interview question="Does unsafe turn off the borrow checker?">
+
+No. Inside `unsafe`, the borrow checker, type checker, and lifetime rules all
+still apply. `unsafe` only permits five additional operations the compiler cannot
+verify (raw-pointer dereference, calling `unsafe`/FFI functions, implementing
+`unsafe` traits, mutable statics, and `union` fields). You take on responsibility
+for the invariants around those operations — nothing else changes.
+
+</Interview>
+
+<Interview question="What does it mean to build a 'safe abstraction' over unsafe code?">
+
+It means confining `unsafe` to a small, audited core and exposing an API that
+callers can use without any `unsafe` and without being able to cause undefined
+behaviour, no matter what inputs they pass. `Vec`, `split_at_mut`, and `Mutex` all
+do this: unsafe inside, safe outside. The safe wrapper validates inputs (e.g. the
+`mid <= len` assert) so the invariants the unsafe core relies on always hold.
+
+</Interview>
+
+<Interview question="Why is calling an FFI function unsafe?">
+
+Because Rust cannot see or verify the foreign function's implementation or
+contract. The C side might dereference a pointer you passed, expect a specific
+memory layout, mutate through a `const` pointer, or have a signature that doesn't
+match your declaration — none of which the Rust compiler can check. You assert, by
+writing `unsafe`, that you've verified the contract holds.
+
+</Interview>
+
+<Interview question="What tools help you verify unsafe code?">
+
+`Miri`, an interpreter that detects many kinds of undefined behaviour (out-of-bounds
+access, use-after-free, misaligned reads, data races) at run time — invaluable for
+testing `unsafe`. Beyond it: `clippy`'s `undocumented_unsafe_blocks` lint, address
+and thread sanitizers (`-Z sanitizer`), and `cargo-fuzz` for fuzzing. And of course
+ordinary tests exercising the safe wrapper's edges.
+
+</Interview>
+
+## Challenge
+
+Reimplement a small slice of the standard library yourself — `Vec<T>`'s `push` and
+`pop` — using `alloc`, raw pointers, and `ptr::write`/`ptr::read`, wrapped in a
+safe API. Then run it under `cargo +nightly miri test`. Miri will almost certainly
+catch a subtle mistake the first time (a misaligned write, an off-by-one in
+capacity, a leaked allocation). Fixing what Miri finds is the single best way to
+build real intuition for what "sound `unsafe`" actually requires.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 20 — [“Unsafe Rust”](https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html)
+- *The Rustonomicon* — [the dark arts of unsafe Rust](https://doc.rust-lang.org/nomicon/)
+- Rust FFI — [the `std::ffi` module](https://doc.rust-lang.org/std/ffi/index.html)
+- Miri — [detecting undefined behaviour](https://github.com/rust-lang/miri)
+
+<Progress />

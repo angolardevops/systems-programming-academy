@@ -1,0 +1,10 @@
+[package]
+name = "appconfig"
+version = "0.1.0"
+edition = "2021"
+description = "Configuration & Secrets (Rust) — Part 2 companion."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"

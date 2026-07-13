@@ -1,0 +1,415 @@
+---
+title: "Projeto: Gerador de Configuração"
+description: Gere configs de nginx e systemd a partir de um spec de serviço validado, em Rust, Go e Python — saída byte-idêntica, testes golden-file, e uma análise porquê-X onde a manutenibilidade, não a velocidade, decide.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+Metade do DevOps é transformar *intenção* ("corre o serviço api, duas réplicas,
+atrás de api.example.com") em *configuração* (um upstream de nginx, uma unit de
+systemd) — mecanicamente, consistentemente, sem um humano a copiar-colar um
+template e esquecer-se de mudar uma porta. Este projeto constrói esse tradutor:
+um **gerador de configuração** que lê um pequeno spec validado e emite dois
+artefactos com forma de produção. E porque texto gerado nunca pode mudar por
+acidente, introduz o padrão que guarda todo o gerador: **testes golden-file**.
+
+Ao contrário do [analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/)
+(throughput) e do [exporter](/systems-programming-academy/pt/part-3-devops/prometheus-exporter/)
+(residência), um gerador corre ocasionalmente e termina instantaneamente em
+qualquer linguagem — por isso a análise porquê-X pivota para o eixo que a spec
+chama **manutenibilidade**.
+
+<Aside type="note" title="Pré-requisitos">
+  A [lição de Configuração e Segredos](/systems-programming-academy/pt/part-2-engineering/configuration/)
+  (parse-depois-valida, falhar cedo) — este projeto é a sua imagem no espelho:
+  config a *sair* em vez de config a *entrar*.
+</Aside>
+
+Código:
+[`examples/part3-confgen-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um fmt/lint limpo, 5 testes cada. Os três CLIs correram sobre o mesmo spec
+e as suas saídas foram **verificadas byte-idênticas com diff**.
+
+## Spec a entrar, artefactos a sair
+
+```text
+$ cat service.conf
+# demo service
+name = api
+domain = api.example.com
+port = 8080
+replicas = 2
+
+$ confgen service.conf
+--- nginx: api.conf
+upstream api {
+    server 127.0.0.1:8080;
+    server 127.0.0.1:8081;
+}
+
+server {
+    listen 80;
+    server_name api.example.com;
+    ...
+--- systemd: api@.service
+[Unit]
+Description=api service (instance %i)
+...
+```
+
+<Mermaid title="Valida primeiro, renderiza depois — má intenção nunca vira má config" code={`flowchart LR
+  S["service.conf (key = value)"] --> P["parse_spec: valida, defaults, erros precisos"]
+  P -->|Spec ok| N["render_nginx(spec)"]
+  P -->|Spec ok| U["render_systemd(spec)"]
+  P -->|erro| X["exit 1: 'invalid value banana for key port'"]
+  N --> O["artefactos determinísticos"]
+  U --> O`} />
+
+O pipeline é a [lição de config](/systems-programming-academy/pt/part-2-engineering/configuration/) ao
+contrário, com a mesma disciplina: **parse e validação para um `Spec` tipado
+primeiro** (`name` em falta? `port` mau? `replicas = 0`? — erro preciso, exit 1),
+e só depois renderizar. Um gerador que emite config de um spec não validado
+entrega o seu lixo diretamente ao nginx.
+
+## Templating, de três formas
+
+A parte mais "com sabor a linguagem" do projeto — como cada uma constrói o texto
+do artefacto:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn render_nginx(spec: &Spec) -> String {
+    let mut servers = String::new();
+    for i in 0..spec.replicas {
+        servers.push_str(&format!(
+            "    server 127.0.0.1:{};\n",
+            spec.port + u16::from(i)
+        ));
+    }
+    format!(
+        "upstream {name} {{\n{servers}}}\n\nserver {{\n    listen 80;\n    server_name {domain};\n\n    location / {{\n        proxy_pass http://{name};\n ...",
+        name = spec.name,
+        domain = spec.domain,
+    )
+}
+```
+`format!` com argumentos nomeados; chavetas literais escapam como `{{`.
+Interpolação verificada por tipos — um nome com typo é erro de compilação.
+</TabItem>
+<TabItem label="Go">
+```go title="confgen.go"
+func RenderNginx(spec Spec) string {
+	var servers strings.Builder
+	for i := 0; i < spec.Replicas; i++ {
+		fmt.Fprintf(&servers, "    server 127.0.0.1:%d;\n", spec.Port+i)
+	}
+	return fmt.Sprintf(`upstream %[1]s {
+%[3]s}
+
+server {
+    listen 80;
+    server_name %[2]s;
+    ...`, spec.Name, spec.Domain, servers.String())
+}
+```
+Raw string literals (crases) mantêm o template legível; verbos indexados `%[1]s`
+reutilizam argumentos. Para templates maiores o Go tem o motor `text/template`
+na stdlib — o cavalo de trabalho dos geradores de YAML (o Helm assenta nele).
+</TabItem>
+<TabItem label="Python">
+```python title="confgen.py"
+def render_nginx(spec: Spec) -> str:
+    servers = "".join(
+        f"    server 127.0.0.1:{spec.port + i};\n" for i in range(spec.replicas)
+    )
+    return f"""upstream {spec.name} {{
+{servers}}}
+
+server {{
+    listen 80;
+    server_name {spec.domain};
+    ..."""
+```
+F-strings de aspas triplas são as mais WYSIWYG das três — o template parece o
+artefacto. As chavetas escapam como `{{` dentro de f-strings.
+</TabItem>
+</Tabs>
+
+## Testes golden-file: a rede de segurança do gerador
+
+Todo o contrato de um gerador é a sua saída exata. O **teste golden** fixa-a byte
+a byte:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+// TESTE GOLDEN: o artefacto esperado exato, byte a byte. Se uma mudança de
+// template for intencional, o texto golden é atualizado no mesmo commit.
+#[test]
+fn nginx_golden() {
+    let spec = parse_spec(SPEC).unwrap();
+    let expected = "\
+upstream api {
+    server 127.0.0.1:8080;
+    server 127.0.0.1:8081;
+}
+...
+";
+    assert_eq!(render_nginx(&spec), expected);
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="confgen_test.go"
+func TestNginxGolden(t *testing.T) {
+	s, _ := ParseSpec(spec)
+	expected := `upstream api {
+    server 127.0.0.1:8080;
+    server 127.0.0.1:8081;
+}
+...
+`
+	if got := RenderNginx(s); got != expected {
+		t.Errorf("nginx golden mismatch:\n%s", got)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_confgen.py"
+def test_nginx_golden(self) -> None:
+    expected = """upstream api {
+    server 127.0.0.1:8080;
+    server 127.0.0.1:8081;
+}
+...
+"""
+    self.assertEqual(render_nginx(parse_spec(SPEC)), expected)
+```
+</TabItem>
+</Tabs>
+
+O fluxo: muda um template → o teste golden falha → *lê o diff* — é exatamente a
+mudança que eu queria? — e atualiza o texto golden no mesmo commit. O review
+mostra a mudança do template e a mudança da saída lado a lado. Em escala, os
+goldens vivem em ficheiros (`testdata/expected_nginx.conf`) com um modo de
+regeneração `UPDATE_GOLDEN=1`.
+
+<Quiz
+  question={'Um colega "limpa espaços em branco" no template de systemd e o teste golden falha. Qual a reação correta?'}
+  options={[
+    { text: "Apagar o teste golden — é frágil demais.", },
+    { text: "Ler o diff: em config gerada, espaço em branco pode ser significado (systemd/YAML/nginx). Se a mudança for verificada inofensiva e intencional, atualizar o texto golden no mesmo commit.", correct: true },
+    { text: "Fazer o teste comparar ignorando todo o espaço em branco.", },
+    { text: "Regenerar os goldens automaticamente no CI para nunca falhar.", },
+  ]}
+  explanation="O teste golden fez o seu trabalho: transformou uma mudança de saída silenciosa numa decisão visível. Os formatos de config gerada são sensíveis a espaço em branco mais vezes do que se pensa (YAML sempre, systemd às vezes, nginx ocasionalmente) — por isso o diff tem de ser revisto, não suprimido. Regenerar automaticamente no CI derrota todo o propósito: o golden é um checkpoint humano no contrato da ferramenta."
+/>
+
+## A análise porquê-X: a manutenibilidade decide
+
+As três terminam em milissegundos — o desempenho não é fator. O que difere:
+
+| Eixo | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Legibilidade do template | `format!`, ruído de escaping | raw strings + `text/template` | f-strings: mais WYSIWYG |
+| Ergonomia de validação | enum `SpecError` tipado + `?` | sentinelas envolvidos | exceções |
+| Segurança de refactor | compilador apanha tudo | compilador apanha quase tudo | mypy + testes |
+| Pool de contribuidores (equipas ops) | o menor | grande | o maior |
+| Implantação | binário estático | binário estático | precisa de interpretador |
+| Passo seguinte no ecossistema | `tera`, `minijinja` | `text/template` (stdlib!) | `jinja2` |
+
+**Porquê Python?** Os geradores são editados constantemente — cada padrão novo de
+infra é cirurgia de template — e as f-strings mais a fluência de Python do mundo
+ops tornam-no a escolha de menor fricção. É por isso que o templating do Ansible
+é Jinja2. **Porquê Go?** Quando o gerador vai *dentro* de uma ferramenta
+distribuída (um operator, um CLI que outros instalam), o binário estático e o
+`text/template` da stdlib são decisivos — este é o mundo do Helm e do
+Kubernetes. **Porquê Rust?** Quando o gerador embute num sistema Rust maior ou a
+linguagem do spec cresce para algo que precisa de um parser a sério — o rigor de
+erros tipados mostrado aqui escala para isso.
+
+Para um gerador autónomo que a sua equipa edita semanalmente: **Python, e não é
+renhido.** No momento em que passa a ser distribuído para as máquinas de outros:
+Go.
+
+## Erros comuns & depuração
+
+### 1. Gerar a partir de input não validado
+
+`replicas = 0` a renderizar um bloco nginx `upstream {}` vazio é uma paragem de
+produção da autoria da sua ferramenta. Valide para um spec tipado *antes* de
+qualquer renderização — as três implementações recusam com precisão (`invalid
+value '0' for key replicas`, exit 1).
+
+### 2. Editar ficheiros gerados à mão
+
+No momento em que alguém corrige à pressa o nginx.conf gerado, o gerador e a
+realidade divergem e a próxima execução destrói a correção. Marque as saídas
+(`# GENERATED by confgen — do not edit`), e faça do pipeline o único escritor.
+
+### 3. Templates que ultrapassam a formatação de strings
+
+Quando condicionais e ciclos se multiplicam dentro de f-strings/`format!`, o
+template torna-se código ilegível. É o sinal para graduar para um motor de
+templates (Jinja2 / `text/template` / minijinja) — a lógica na sintaxe do motor,
+os dados num objeto de contexto.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar TLS ao template de nginx.">
+
+Acrescente uma chave opcional `tls = true` que muda o bloco server para
+`listen 443 ssl;` mais as linhas de certificado. O que tem de mudar além do
+template?
+
+**Solução (esboço, Python):**
+
+```python
+# Spec ganha: tls: bool = False
+# parse_spec: tls = values.get("tls", "false") in ("1", "true")
+# render_nginx ramifica:
+listen = "listen 443 ssl;" if spec.tls else "listen 80;"
+cert_lines = (
+    f"    ssl_certificate /etc/ssl/{spec.name}.pem;\n"
+    f"    ssl_certificate_key /etc/ssl/{spec.name}.key;\n"
+) if spec.tls else ""
+```
+
+Além do template: o parser do spec (chave nova + default), **e ambos os testes
+golden** — um golden novo para a variante TLS, e o existente a provar que a saída
+não-TLS não mudou. Os goldens são o que torna a cirurgia de templates segura.
+
+</Interview>
+
+<Interview question="Exercício 2 — Porque tem replicas default e port não?">
+
+Justifique a assimetria: `replicas` tem default 1, mas um `port` em falta é erro.
+
+**Resposta:** Um default tem de ser *seguro quando passa despercebido*. Uma
+réplica é a interpretação óbvia e inofensiva de "não disse". Mas não há porta
+default inofensiva — 8080 pode colidir com outro serviço, e o autor não estar a
+pensar em portas é exatamente quando as colisões acontecem. Regra prática:
+default para as coisas cujo default nunca precisaria de consultar; obrigatório
+para as coisas onde um palpite silencioso pode magoar.
+
+</Interview>
+
+<Interview question="Exercício 3 — O marcador de gerado.">
+
+Escreva a mudança de uma linha que carimba cada artefacto, e diga porque merece a
+sua linha.
+
+**Solução (Go):**
+
+```go
+const header = "# GENERATED by confgen — do not edit; change service.conf instead\n"
+// prefixado no RenderNginx / RenderSystemd
+```
+
+Merece a sua linha na primeira vez que um engenheiro de on-call, às 3 da manhã,
+está prestes a editar o ficheiro à mão — o marcador redireciona a correção para a
+fonte de verdade, prevenindo a divergência gerador/realidade do erro nº 2.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Validar para um spec tipado, depois renderizar | Interpolar input cru na config |
+| Testes golden sobre a saída exata | "Parece bem" depois de editar templates |
+| Marcadores `# GENERATED` nos artefactos | Ficheiros gerados editados à mão a divergir |
+| Defaults só onde qualquer valor é seguro | Adivinhar portas/domínios em silêncio |
+| Graduar para motor de templates quando a lógica cresce | F-strings de 200 linhas com condicionais aninhados |
+| Saída determinística (ordenação estável) | Artefactos que se baralham a cada execução |
+
+## Mini-projeto
+
+**Faça-o crescer para um gerador de frota** numa linguagem: aceite uma diretoria
+de specs `*.conf`, valide todos (reportando *todos* os erros, não só o primeiro),
+e emita um ficheiro nginx com todos os upstreams mais uma unit systemd por
+serviço — com um modo `--check` que sai com código não-zero se a saída gerada
+diferir do que está no disco (o modo de deteção de drift que todo o gerador real
+precisa, e exatamente como o `terraform plan` ganha o seu lugar). Teste golden a
+saída multi-serviço.
+
+## Perguntas de entrevista
+
+<Interview question="O que é o teste golden-file (snapshot) e quando é a ferramenta certa?">
+
+Um teste golden compara a saída completa de uma função contra um artefacto
+esperado guardado (o "golden"), byte a byte, em vez de afirmar propriedades aos
+pedaços. Brilha quando a saída *é* o contrato — config gerada, templates
+renderizados, formatos serializados, saída de compiladores — onde qualquer
+mudança não intencional importa e enumerar asserções seria reimplementar o
+template. A disciplina: os goldens só mudam em commits onde o diff foi revisto
+como intencional.
+
+</Interview>
+
+<Interview question="Porquê gerar configuração em vez de a escrever à mão?">
+
+Consistência e escala: um template revisto codifica os padrões da equipa
+(headers de segurança, políticas de restart, nomenclatura) e carimba-os em cada
+serviço identicamente — sem a linha esquecida no serviço nº 37. As mudanças
+tornam-se tratáveis: atualizar o template e regenerar bate editar N ficheiros à
+mão. E o spec é uma superfície de review mais pequena e segura do que sintaxe
+crua de nginx/systemd. O custo é indireção, que marcadores, goldens e checks de
+drift gerem.
+
+</Interview>
+
+<Interview question="Formatação de strings vs motor de templates — onde está a linha?">
+
+A interpolação de strings (f-strings, `format!`, `Sprintf`) é adequada enquanto
+os templates são sobretudo texto estático com substituição de valores. A linha
+cruza-se quando o *fluxo de controlo* entra no template — condicionais repetidos,
+ciclos aninhados, includes/partials partilhados entre templates. Os motores
+(Jinja2, `text/template`) dão a essa lógica sintaxe dedicada, regras de escaping
+e sub-templates reutilizáveis. Cruzar cedo demais adiciona dependência e
+indireção; tarde demais cria código de format-strings ilegível.
+
+</Interview>
+
+<Interview question="Como funciona um modo --check (deteção de drift) e porque importa?">
+
+Regenera os artefactos em memória e compara-os com o que está no disco, saindo
+com código não-zero em qualquer diferença sem escrever — o gémeo só-leitura do
+gerador. Importa porque transforma "a config de produção é o que os specs
+dizem?" numa verificação de CI: edições à mão, regenerações obsoletas e drift de
+templates aparecem todos como um job a falhar em vez de uma surpresa às 3 da
+manhã. É a mesma ideia plan-antes-de-apply que o Terraform institucionalizou.
+
+</Interview>
+
+## Desafio
+
+Encontre os ficheiros de config que a sua equipa mais edita e conte os
+quase-duplicados — vhosts, unit files, definições de jobs de CI que diferem em
+três valores. Escreva um formato de spec de 20 linhas para as *diferenças*, gere
+o resto com a forma deste projeto (validar → renderizar → golden), e adicione o
+modo `--check` ao CI. Depois observe o que acontece à qualidade dos reviews: as
+pessoas passam a rever diffs de spec de três linhas em vez de diffs de config de
+oitenta. Essa compressão da superfície de review é o verdadeiro produto do
+gerador.
+
+## Referências & leitura adicional
+
+- Go — [`text/template`](https://pkg.go.dev/text/template) · Python — [Jinja2](https://jinja.palletsprojects.com/) · Rust — [minijinja](https://docs.rs/minijinja)
+- systemd — [unit templates e especificadores `%i`](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html)
+- nginx — [módulo upstream](https://nginx.org/en/docs/http/ngx_http_upstream_module.html)
+- Google Testing Blog — [testing on the golden master](https://testing.googleblog.com/2015/01/testing-on-toilet-prefer-testing-public.html)
+
+<Progress />

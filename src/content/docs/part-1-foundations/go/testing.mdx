@@ -1,0 +1,409 @@
+---
+title: "Go: Testing & Documentation"
+description: Go's testing tool is built in — no framework needed. Table-driven tests, subtests, runnable examples that double as docs, and benchmarks, all with a tested companion module.
+difficulty: beginner
+estimatedMinutes: 28
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={28} languages={["go"]} />
+
+Testing in Go is not a library you add — it ships with the toolchain. Write a
+function called `TestXxx` in a `_test.go` file, run `go test`, and you're done. Go
+also gives you two things most ecosystems bolt on separately: **example functions**
+that appear in your documentation *and* run as tests, and **benchmarks** built into
+the same tool. This lesson covers the whole kit, with a module whose tests all
+pass.
+
+<Aside type="note" title="Prerequisites">
+  You should know Go functions and
+  [Structs, Methods & Interfaces](/systems-programming-academy/part-1-foundations/go/interfaces/). The
+  table-driven pattern reuses slices and structs.
+</Aside>
+
+All code is from the tested module
+[`examples/go-testing/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` green, `go vet` clean). Every snippet is **complete**.
+
+## Your first test
+
+A test lives in a file ending `_test.go`, in the same package. It's a function
+`TestXxx(t *testing.T)`. Use `t.Errorf` to report a failure (and keep going) or
+`t.Fatalf` to stop the current test.
+
+```go title="stringutil_test.go"
+func TestReverseASCII(t *testing.T) {
+	if got := Reverse("Hello"); got != "olleH" {
+		t.Errorf("Reverse(\"Hello\") = %q, want %q", got, "olleH")
+	}
+}
+```
+
+Run it:
+
+```bash
+go test ./...          # run all tests
+go test -v ./...       # verbose: show each test
+go test -run Reverse   # only tests whose name matches "Reverse"
+```
+
+```text
+=== RUN   TestReverseASCII
+--- PASS: TestReverseASCII (0.00s)
+PASS
+ok  	academy.example/stringutil	0.002s
+```
+
+<Aside type="tip" title="There is no assertion library — and that's on purpose">
+  Go's standard testing has no `assertEqual`. You write plain `if got != want`
+  checks. It's a deliberate choice: tests are just Go code, easy to read and
+  debug, with no DSL to learn. For repeated checks, write a small helper (below).
+</Aside>
+
+## Table-driven tests and subtests
+
+The dominant Go pattern: list your cases as a slice of structs, loop, and run each
+as a **subtest** with `t.Run`. Each subtest gets its own name in the output and
+can be run individually.
+
+```go title="stringutil_test.go"
+func TestIsPalindrome(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", true},
+		{"simple", "level", true},
+		{"mixed case", "RaceCar", true},
+		{"phrase", "A man, a plan, a canal: Panama", true},
+		{"not", "hello", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPalindrome(tc.in); got != tc.want {
+				t.Errorf("IsPalindrome(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+```text
+=== RUN   TestIsPalindrome
+=== RUN   TestIsPalindrome/phrase
+--- PASS: TestIsPalindrome (0.00s)
+    --- PASS: TestIsPalindrome/phrase (0.00s)
+```
+
+Run one case with `go test -run TestIsPalindrome/phrase`.
+
+<Quiz
+  question={'What is the main advantage of the table-driven test pattern in Go?'}
+  options={[
+    { text: "It runs tests in parallel automatically.", },
+    { text: "It covers many cases with one block of logic, and t.Run names each case so failures are easy to locate.", correct: true },
+    { text: "It replaces the need for assertions.", },
+    { text: "It is required by the go test tool.", },
+  ]}
+  explanation="A table-driven test keeps the assertion logic in one place and lists each scenario as a data row. Wrapping the body in t.Run gives every row a named subtest, so a failure report points straight at the case (e.g. TestIsPalindrome/phrase), and you can run or debug a single case in isolation. Adding a case is one line."
+/>
+
+## Test helpers with `t.Helper()`
+
+Repeated checks belong in a helper. Call `t.Helper()` inside it so a failure's
+line number points at the **caller**, not at the helper:
+
+```go title="stringutil_test.go"
+func assertEqual(t *testing.T, got, want string) {
+	t.Helper() // failures report the caller's line, not this one
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestReverseTwiceIsIdentity(t *testing.T) {
+	in := "testing"
+	assertEqual(t, Reverse(Reverse(in)), in)
+}
+```
+
+## Runnable examples: docs that are tested
+
+An `ExampleXxx` function whose body ends with an `// Output:` comment is **run by
+`go test`**, and its printed output is compared to the comment. It also appears in
+the generated documentation — so your examples can never go stale.
+
+```go title="stringutil_test.go"
+func ExampleReverse() {
+	fmt.Println(Reverse("Go"))
+	// Output: oG
+}
+
+func ExampleIsPalindrome() {
+	fmt.Println(IsPalindrome("RaceCar"))
+	fmt.Println(IsPalindrome("hello"))
+	// Output:
+	// true
+	// false
+}
+```
+
+If `Reverse` ever stops producing `oG`, `go test` fails — the documentation is
+guaranteed correct.
+
+<Mermaid title="One tool runs three things from your _test.go files" code={`flowchart TD
+  G["go test"] --> T["TestXxx: assertions"]
+  G --> E["ExampleXxx: output compared to // Output:"]
+  B["go test -bench ."] --> M["BenchmarkXxx: timing over b.N iterations"]`} />
+
+## Benchmarks
+
+A `BenchmarkXxx(b *testing.B)` function runs its body `b.N` times; the framework
+picks `b.N` to get a stable measurement. Run with `go test -bench .`.
+
+```go title="stringutil_test.go"
+func BenchmarkReverse(b *testing.B) {
+	s := "the quick brown fox jumps over the lazy dog"
+	for i := 0; i < b.N; i++ {
+		_ = Reverse(s)
+	}
+}
+```
+
+```text
+$ go test -bench .
+BenchmarkReverse-20    	 3941736	       303.4 ns/op
+PASS
+```
+
+That reports ~303 nanoseconds per call. Add `-benchmem` to also see allocations
+per operation.
+
+## Coverage
+
+Measure how much of your code the tests exercise:
+
+```bash
+go test -cover ./...                     # print a coverage percentage
+go test -coverprofile=cover.out ./...    # write a profile
+go tool cover -html=cover.out            # open an annotated HTML report
+```
+
+<Aside type="tip" title="Aim for meaningful coverage, not 100%">
+  Coverage tells you what code *ran*, not whether the assertions were meaningful.
+  Chase the important branches — every error path, every boundary — rather than a
+  vanity number. A 100%-covered function with weak assertions is still untested in
+  spirit.
+</Aside>
+
+## Common mistakes & debugging
+
+### 1. Wrong file name or function signature
+
+A test file must end in `_test.go`, and the function must be `func TestXxx(t
+*testing.T)` with an exported-style capitalised name after `Test`. Miss any of
+these and `go test` silently doesn't run it. If your test "passes" but the count
+didn't change, check the name.
+
+### 2. A wrong `// Output:` comment
+
+```go
+func ExampleReverse() {
+	fmt.Println(Reverse("Go"))
+	// Output: Go   <-- wrong; actual is "oG"
+}
+```
+
+```text
+--- FAIL: ExampleReverse
+got:
+oG
+want:
+Go
+```
+
+Examples are real tests — the `// Output:` must match exactly (whitespace matters).
+
+### 3. Sharing state between table cases
+
+If your loop mutates a shared variable that later cases read, tests become
+order-dependent and flaky. Keep each case self-contained; construct fresh inputs
+inside the `t.Run` body.
+
+## Exercises
+
+<Interview question="Exercise 1 — Write a table-driven test.">
+
+For `func Double(n int) int { return n * 2 }`, write a table-driven test with
+subtests covering positive, zero, and negative.
+
+**Solution:**
+
+```go
+package mathx
+
+import "testing"
+
+func Double(n int) int { return n * 2 }
+
+func TestDouble(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"positive", 21, 42},
+		{"zero", 0, 0},
+		{"negative", -3, -6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Double(tc.in); got != tc.want {
+				t.Errorf("Double(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Write a runnable Example.">
+
+Add an `ExampleDouble` whose output `go test` verifies.
+
+**Solution:**
+
+```go
+package mathx
+
+import "fmt"
+
+func Double(n int) int { return n * 2 }
+
+func ExampleDouble() {
+	fmt.Println(Double(21))
+	// Output: 42
+}
+```
+
+Because of the `// Output:` line, `go test` runs this and fails if `Double`
+changes. It also shows up in `go doc`.
+
+</Interview>
+
+<Interview question="Exercise 3 — A benchmark.">
+
+Write a benchmark for `Double`.
+
+**Solution:**
+
+```go
+package mathx
+
+import "testing"
+
+func Double(n int) int { return n * 2 }
+
+func BenchmarkDouble(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = Double(21)
+	}
+}
+```
+
+Run with `go test -bench .`. The framework picks `b.N` for a stable timing.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Table-driven tests with named `t.Run` subtests | A separate near-identical test function per case |
+| `ExampleXxx` with `// Output:` for docs + tests | Prose examples that were never compiled |
+| `t.Helper()` in assertion helpers | Helpers that report their own line on failure |
+| Self-contained cases (fresh inputs each row) | Cases that share and mutate state |
+| Test error paths and boundaries | Testing only the happy path for coverage points |
+| `t.Parallel()` for independent, slow tests | Forcing serial tests that could run concurrently |
+
+## Mini-project
+
+**Test-drive a `Set[string]`-like type** (using `map[string]struct{}` internally)
+with `Add`, `Contains`, `Remove`, and `Len`. Before/while writing it, add:
+table-driven tests with subtests for each method, an `ExampleSet` showing typical
+use with verified output, and a benchmark for `Add`. Then run `go test -cover` and
+push the important branches (adding a duplicate, removing a missing key) to full
+coverage.
+
+Requirements: all tests pass, at least one Example with `// Output:`, one
+benchmark, and `go vet` clean.
+
+## Interview questions
+
+<Interview question="How does Go's built-in testing differ from frameworks like JUnit?">
+
+Go's testing is part of the standard toolchain, not a third-party framework. You
+write `TestXxx(t *testing.T)` functions using ordinary Go code and plain `if`
+checks — there is no assertion DSL, no annotations, no test runner to configure.
+`go test` discovers and runs them. It also unifies unit tests, runnable
+documentation examples, and benchmarks into one tool, which frameworks usually
+split across separate libraries.
+
+</Interview>
+
+<Interview question="What is a table-driven test and why is it idiomatic in Go?">
+
+It's a test that defines its cases as a slice of structs (the "table") and loops
+over them, running the same assertion logic against each. Wrapping the body in
+`t.Run(name, ...)` gives each case a named subtest. It's idiomatic because adding a
+case is one line, the logic isn't duplicated, and failures name the exact case —
+all without any framework support, just slices and a loop.
+
+</Interview>
+
+<Interview question="What are Example functions and what makes them special?">
+
+`ExampleXxx` functions serve double duty: they appear in the package's generated
+documentation as usage examples, and — if they end with an `// Output:` comment —
+`go test` runs them and compares their printed output to that comment. This means
+documented examples are guaranteed to compile and produce the stated result, so
+docs can't silently drift from the code.
+
+</Interview>
+
+<Interview question="How does go test decide how many benchmark iterations to run?">
+
+The benchmark function receives `b.N` and must loop that many times. `go test`
+starts with a small `b.N`, measures, and increases it until the run takes long
+enough (about a second by default) to give a stable per-operation time. You never
+set `b.N` yourself; you just loop `for i := 0; i < b.N; i++`. Use `-benchtime` to
+change the target duration or fix an iteration count.
+
+</Interview>
+
+## Challenge
+
+Take a function you wrote in an earlier Go lesson (`ParseUser`, `WordCount`,
+`TotalArea`) and give it a full table-driven test suite with a named subtest per
+case, an `ExampleXxx` with verified output, and — where it makes sense — a
+benchmark. Then run `go test -cover` and add cases until every error path and
+boundary is covered. The goal isn't the percentage; it's the discipline of listing
+"what could go wrong" as a table and watching each row turn green.
+
+## References & further reading
+
+- Go docs — [the `testing` package](https://pkg.go.dev/testing)
+- *A Tour of Go* and the [Go blog on table-driven tests](https://go.dev/wiki/TableDrivenTests)
+- Go blog — [examples in tests](https://go.dev/blog/examples)
+- `go help test` and `go help testflag` for the full flag set
+
+<Progress />

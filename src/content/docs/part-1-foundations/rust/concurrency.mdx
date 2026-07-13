@@ -1,0 +1,467 @@
+---
+title: "Rust: Concurrency Basics"
+description: Fearless concurrency — how Rust's ownership rules stop data races at compile time. Threads, move closures, channels, and shared state with Arc<Mutex>, all with deterministic, tested examples.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["rust"]} />
+
+Concurrency is where most languages get dangerous: two threads touch the same
+data, one writes, and you get a **data race** — a bug that is nondeterministic,
+hard to reproduce, and often catastrophic. Rust's headline feature is *fearless
+concurrency*: the very same ownership and borrowing rules you already know make
+data races a **compile error**. This lesson introduces threads, channels, and
+shared state, and shows how the compiler keeps them safe.
+
+<Aside type="note" title="Prerequisites">
+  You need [Ownership](/systems-programming-academy/part-1-foundations/rust/ownership/) and
+  [Smart Pointers](/systems-programming-academy/part-1-foundations/rust/smart-pointers/) (`Arc` is the
+  thread-safe `Rc`). This is an advanced Foundations topic.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-concurrency/`](https://github.com/angolardevops/systems-programming-academy)
+(5 passing tests, clean `cargo clippy`). Every result is **deterministic** — the
+same answer every run — which is what lets us test concurrent code at all.
+
+<Aside type="tip" title="This is the on-ramp">
+  Part 1 covers the fundamentals. The deep material — async/await, Tokio,
+  lock-free algorithms, memory models — lives in **Part 4 · Concurrency &
+  Parallelism**. Master these building blocks first.
+</Aside>
+
+## Spawning threads
+
+`thread::spawn` starts a new OS thread running a closure. It returns a
+`JoinHandle`; calling `.join()` waits for the thread to finish and collects its
+return value.
+
+```rust title="main.rs — complete, runnable"
+use std::thread;
+
+fn main() {
+    // Spawn three threads, each computing a square. Join to get their results.
+    let handles: Vec<_> = (1..=3)
+        .map(|n| thread::spawn(move || n * n)) // `move` gives the closure its own `n`
+        .collect();
+
+    let squares: Vec<i32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    println!("{squares:?}"); // [1, 4, 9]
+}
+```
+
+Output:
+
+```text
+[1, 4, 9]
+```
+
+The `move` keyword is essential: it transfers ownership of captured variables
+(here `n`) **into** the thread, because the thread may outlive the function that
+spawned it. Without `move`, the closure would borrow `n`, and the compiler cannot
+prove the borrow lives long enough.
+
+## The compiler stops data races
+
+Try to share mutable data between threads the naive way and it simply won't
+compile:
+
+```rust
+use std::thread;
+
+fn main() {
+    let mut counter = 0;
+    let handle = thread::spawn(|| {
+        counter += 1; // ✗ borrows `counter`, but the thread may outlive main
+    });
+    handle.join().unwrap();
+}
+```
+
+```text
+error[E0373]: closure may outlive the current function, but it borrows `counter`
+  = help: to force the closure to take ownership, use the `move` keyword
+```
+
+And even with `move`, two threads can't each take a `&mut` to the same value —
+that's the aliasing rule again, now enforced *across threads*. The safe answer is
+a type designed for sharing: `Arc<Mutex<T>>`.
+
+<Mermaid title="Shared mutable state: Arc shares ownership, Mutex serialises access" code={`flowchart TD
+  A["Arc<Mutex<i64>>"] --> T1["thread 1: lock -> +1 -> unlock"]
+  A --> T2["thread 2: lock -> +1 -> unlock"]
+  A --> T3["thread 3: lock -> +1 -> unlock"]
+  T1 --> R["total = sum of all increments, no lost updates"]
+  T2 --> R
+  T3 --> R`} />
+
+## Shared state with `Arc<Mutex<T>>`
+
+- **`Arc<T>`** ("atomic reference counted") is `Rc` for threads: multiple owners,
+  safe to send across thread boundaries.
+- **`Mutex<T>`** ("mutual exclusion") guards the data so only one thread holds it
+  at a time. `lock()` returns a guard; mutating happens through the guard; when
+  the guard drops, the lock releases.
+
+```rust title="src/lib.rs"
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+pub fn shared_counter(threads: usize, per_thread: usize) -> i64 {
+    let counter = Arc::new(Mutex::new(0i64));
+
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let counter = Arc::clone(&counter); // a handle for this thread
+            thread::spawn(move || {
+                for _ in 0..per_thread {
+                    let mut guard = counter.lock().unwrap();
+                    *guard += 1; // exclusive access while the guard is alive
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+    *counter.lock().unwrap()
+}
+```
+
+A complete program — 8 threads, 10,000 increments each, **always** 80,000:
+
+```rust title="main.rs — complete, runnable"
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    let counter = Arc::new(Mutex::new(0i64));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let counter = Arc::clone(&counter);
+            thread::spawn(move || {
+                for _ in 0..10_000 {
+                    *counter.lock().unwrap() += 1;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    println!("total = {}", *counter.lock().unwrap()); // total = 80000
+}
+```
+
+Output:
+
+```text
+total = 80000
+```
+
+In C, that same counter without a lock would race and print a different wrong
+number every run. In Rust, forgetting to share it safely doesn't compile in the
+first place.
+
+## Channels: message passing
+
+Instead of sharing memory, threads can **send messages**. Rust's `std::sync::mpsc`
+("multi-producer, single-consumer") channel gives a `Sender` and a `Receiver`;
+whatever you `send` on one end, you receive on the other. This follows Go's motto
+"don't communicate by sharing memory; share memory by communicating".
+
+```rust title="src/lib.rs"
+use std::sync::mpsc;
+use std::thread;
+
+pub fn square_via_channel(inputs: Vec<i64>) -> Vec<i64> {
+    let (tx, rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        for n in inputs {
+            tx.send(n * n).unwrap();
+        }
+        // tx dropped here -> channel closes -> the receiver's iterator ends.
+    });
+    let results: Vec<i64> = rx.iter().collect();
+    worker.join().unwrap();
+    results
+}
+```
+
+A complete program:
+
+```rust title="main.rs — complete, runnable"
+use std::sync::mpsc;
+use std::thread;
+
+fn main() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for word in ["hello", "from", "the", "thread"] {
+            tx.send(word.to_uppercase()).unwrap();
+        }
+    });
+    for received in rx {
+        println!("{received}");
+    }
+}
+```
+
+Output:
+
+```text
+HELLO
+FROM
+THE
+THREAD
+```
+
+## Scoped threads: borrow instead of move
+
+Since Rust 1.63, `thread::scope` lets threads **borrow** local data (no `Arc`,
+no `'static`) because the scope guarantees every thread finishes before it
+returns. Perfect for "fan out over a slice, join, combine":
+
+```rust title="src/lib.rs"
+use std::thread;
+
+pub fn parallel_sum(data: &[i64], threads: usize) -> i64 {
+    let threads = threads.max(1);
+    if data.is_empty() {
+        return 0;
+    }
+    let chunk_size = data.len().div_ceil(threads);
+    thread::scope(|scope| {
+        let handles: Vec<_> = data
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().sum::<i64>()))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    })
+}
+```
+
+<Quiz
+  question={'Why does thread::spawn usually require a `move` closure?'}
+  options={[
+    { text: "For performance — move is faster than borrow.", },
+    { text: "Because the thread may outlive the spawning function, so it must own its captured data rather than borrow it.", correct: true },
+    { text: "It is just a style convention.", },
+    { text: "Because closures cannot borrow at all.", },
+  ]}
+  explanation="A spawned thread can keep running after the function that created it returns. If the closure borrowed a local, that borrow could dangle. `move` transfers ownership of captured values into the thread, so they live as long as the thread does. `thread::scope` is the exception — it guarantees threads finish first, so they may borrow."
+/>
+
+## Common mistakes & debugging
+
+### 1. Using `Rc` across threads
+
+```rust
+use std::rc::Rc;
+use std::thread;
+
+fn main() {
+    let data = Rc::new(5);
+    let d = Rc::clone(&data);
+    thread::spawn(move || println!("{d}")); // ✗
+}
+```
+
+```text
+error[E0277]: `Rc<i32>` cannot be sent between threads safely
+  = note: the trait `Send` is not implemented for `Rc<i32>`
+```
+
+**Fix:** use `Arc` instead of `Rc`. `Rc`'s counter isn't atomic, so it isn't
+thread-safe (`!Send`); `Arc`'s is. The `Send`/`Sync` marker traits are how the
+compiler tracks what may cross threads.
+
+### 2. Forgetting to `join`
+
+If `main` returns before a thread finishes, that thread is killed mid-work. Always
+`join()` handles whose completion you depend on (or use `thread::scope`, which
+joins for you).
+
+### 3. Deadlock: locking twice or in different orders
+
+Locking the same `Mutex` twice on one thread, or two mutexes in different orders on
+two threads, freezes the program. **Fix:** keep lock scopes small (drop the guard
+as soon as you can) and always acquire multiple locks in a consistent global
+order.
+
+## Exercises
+
+<Interview question="Exercise 1 — Sum with two threads.">
+
+Split `[1..=100]` into two halves, sum each on its own thread with `thread::scope`,
+and add the results. Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::thread;
+
+fn main() {
+    let data: Vec<i64> = (1..=100).collect();
+    let mid = data.len() / 2;
+    let total = thread::scope(|s| {
+        let a = s.spawn(|| data[..mid].iter().sum::<i64>());
+        let b = s.spawn(|| data[mid..].iter().sum::<i64>());
+        a.join().unwrap() + b.join().unwrap()
+    });
+    println!("total = {total}"); // total = 5050
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — A shared counter with Arc<Mutex>.">
+
+Have 4 threads each increment a shared counter 1,000 times; print the total.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    let counter = Arc::new(Mutex::new(0));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let c = Arc::clone(&counter);
+            thread::spawn(move || {
+                for _ in 0..1_000 {
+                    *c.lock().unwrap() += 1;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    println!("total = {}", *counter.lock().unwrap()); // total = 4000
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Producer/consumer with a channel.">
+
+Send the numbers 1..=5 from a thread and sum them in the main thread.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::sync::mpsc;
+use std::thread;
+
+fn main() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for n in 1..=5 {
+            tx.send(n).unwrap();
+        }
+    });
+    let sum: i32 = rx.iter().sum();
+    println!("sum = {sum}"); // sum = 15
+}
+```
+
+The `for`/`iter()` on the receiver ends automatically when the sender is dropped.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| `Arc<Mutex<T>>` for shared mutable state | `Rc<RefCell<T>>` across threads (won't compile) |
+| `thread::scope` to borrow local data | Cloning everything to get `'static` |
+| Small lock scopes; drop guards early | Holding a lock across I/O or `.await` |
+| Channels to hand off ownership | Sharing memory when a message would do |
+| Consistent lock ordering | Acquiring locks in different orders (deadlock) |
+| `join()` (or scope) every thread you rely on | Detaching threads and hoping they finish |
+
+## Mini-project
+
+**Build a parallel word counter.** Given a big `&str`, split it into N chunks,
+count word frequencies per chunk on N threads (`thread::scope`), then merge the
+per-chunk `HashMap`s into one. Compare the result to a single-threaded count to
+prove correctness.
+
+Requirements: uses `thread::scope` (or `Arc<Mutex<HashMap>>`), produces the
+**same** map as the sequential version, at least four `#[test]` cases, and `cargo
+clippy` clean.
+
+## Interview questions
+
+<Interview question="What is a data race, and how does Rust prevent it at compile time?">
+
+A data race is two threads accessing the same memory concurrently, at least one
+writing, with no synchronisation — causing undefined behaviour. Rust prevents it
+with the same aliasing rule as single-threaded code (one `&mut` xor many `&`) plus
+the `Send`/`Sync` marker traits: the compiler only lets a type cross a thread
+boundary if it is `Send`, and only lets it be shared by reference across threads if
+it is `Sync`. Types that aren't safe to share (like `Rc`, `RefCell`) simply won't
+compile in a threaded context.
+
+</Interview>
+
+<Interview question="What do the Send and Sync traits mean?">
+
+`Send` means a type's ownership can be transferred to another thread. `Sync` means
+it is safe to share a `&T` reference across threads (equivalently, `&T` is `Send`).
+Most types are both, derived automatically. `Rc` is neither (non-atomic count);
+`Arc` is both; `Mutex<T>` is `Sync` if `T` is `Send`, which is what makes
+`Arc<Mutex<T>>` the standard shared-state building block.
+
+</Interview>
+
+<Interview question="When would you use a channel instead of a shared Mutex?">
+
+Use a channel when you can model the problem as **handing off ownership** of data
+between stages — producer/consumer pipelines, work queues, event streams. It
+avoids locks entirely and tends to be easier to reason about. Use a `Mutex` when
+threads must repeatedly read and update the *same* piece of shared state in place
+(a counter, a cache, a registry) where copying via messages would be wasteful.
+
+</Interview>
+
+<Interview question="What is a deadlock and how do you avoid it?">
+
+A deadlock is when threads wait on each other forever — e.g. thread A holds lock 1
+and wants lock 2 while thread B holds lock 2 and wants lock 1. Avoid it by keeping
+critical sections small (release locks quickly), never holding a lock across a
+blocking call, and always acquiring multiple locks in one consistent global order
+so a cycle can never form.
+
+</Interview>
+
+## Challenge
+
+Take the parallel word counter from the mini-project and make it *measurably*
+faster than the sequential version on a large input (a few megabytes of text) —
+then discover it often isn't, because of lock contention or the overhead of
+merging. Experiment: replace the shared `Mutex<HashMap>` with per-thread maps
+merged at the end, and vary the thread count. Learning *when parallelism helps*
+(and when it just adds overhead) is more valuable than any single primitive.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 16 — [“Fearless Concurrency”](https://doc.rust-lang.org/book/ch16-00-concurrency.html)
+- `std::thread` — [documentation](https://doc.rust-lang.org/std/thread/)
+- `std::sync::mpsc` — [channels](https://doc.rust-lang.org/std/sync/mpsc/index.html)
+- `std::sync::{Arc, Mutex}` — [shared-state concurrency](https://doc.rust-lang.org/std/sync/index.html)
+
+<Progress />

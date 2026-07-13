@@ -1,0 +1,32 @@
+---
+// Renders the difficulty indicator, estimated reading time and language pills
+// at the top of a lesson. Values come from frontmatter (see content.config.ts).
+interface Props {
+  difficulty?: 'beginner' | 'intermediate' | 'advanced' | 'expert';
+  minutes?: number;
+  languages?: Array<'python' | 'go' | 'rust'>;
+}
+const { difficulty, minutes, languages = [] } = Astro.props;
+
+const labels: Record<string, string> = {
+  beginner: 'Beginner',
+  intermediate: 'Intermediate',
+  advanced: 'Advanced',
+  expert: 'Expert',
+};
+const langLabel: Record<string, string> = { python: 'Python', go: 'Go', rust: 'Rust' };
+---
+
+<div class="spa-meta-row" role="group" aria-label="Lesson metadata">
+  {difficulty && (
+    <span class="spa-difficulty" data-level={difficulty}>● {labels[difficulty]}</span>
+  )}
+  {minutes && (
+    <span class="spa-meta-chip" aria-label={`Estimated reading time ${minutes} minutes`}>
+      ⏱ {minutes} min read
+    </span>
+  )}
+  {languages.map((l) => (
+    <span class="spa-lang" data-lang={l}>{langLabel[l]}</span>
+  ))}
+</div>

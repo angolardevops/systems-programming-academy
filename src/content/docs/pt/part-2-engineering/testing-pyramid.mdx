@@ -1,0 +1,435 @@
+---
+title: "A Pirâmide de Testes"
+description: Muitos testes unitários rápidos, menos testes de integração, um teste end-to-end — a mesma funcionalidade de signup testada nos três níveis em Rust, Go e Python, mostrando o que cada nível apanha e custa.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+A Parte 1 ensinou *como* escrever testes em cada linguagem. Esta lição é sobre
+**que testes escrever** — a estratégia. A pirâmide de testes diz: construa **muitos
+testes unitários rápidos** na base, **menos testes de integração** no meio, e
+**poucos testes end-to-end** no topo. Para tornar a forma concreta em vez de
+teórica, implementamos uma funcionalidade de signup nas três linguagens e
+testamo-la nos três níveis — o mesmo código, para ver exatamente o que cada nível
+apanha, o que custa, e porque a pirâmide tem a forma que tem.
+
+<Aside type="note" title="Pré-requisitos">
+  As lições de testes por linguagem
+  ([Rust](/systems-programming-academy/pt/part-1-foundations/rust/testing/), [Go](/systems-programming-academy/pt/part-1-foundations/go/testing/),
+  [Python](/systems-programming-academy/pt/part-1-foundations/python/testing/)) e
+  [Repository & DI](/systems-programming-academy/pt/part-2-engineering/repository-pattern/) — a divisão
+  portas/adaptadores é o que *torna possível* a pirâmide.
+</Aside>
+
+Todo o código vem de três módulos testados —
+[`examples/part2-pyramid-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um com a pirâmide visível no seu ficheiro de testes: ~6 unitários, 2 de
+integração, 1 e2e.
+
+## A forma, e porquê
+
+<Mermaid title="A pirâmide: quantidade e velocidade em cada nível" code={`flowchart TD
+  E["E2E: 1 teste — a app inteira pela entrada pública (mais lento, mais lato)"] --> I["Integração: 2 testes — serviço + adaptadores reais a colaborar"]
+  I --> U["Unitários: 6+ testes — validador puro, cada regra e limite (instantâneo)"]`} />
+
+- **Testes unitários** exercitam uma peça isolada — idealmente uma *função pura*.
+  São instantâneos e apontam a falha com precisão, por isso pode ter um por regra,
+  por limite, por fronteira. Formam a base larga.
+- **Testes de integração** ligam peças reais e verificam a **colaboração** —
+  coisas que nenhum teste unitário vê, como "o signup guarda o utilizador *e*
+  envia as boas-vindas". Mais lentos, menos precisos, em menor número.
+- **Testes end-to-end** conduzem o sistema montado pela sua entrada pública e
+  afirmam só resultados visíveis ao utilizador. Apanham erros de composição e dão
+  a confiança final — mas são os mais lentos, mais flaky, e mais vagos sobre
+  *onde* está a falha. Quer poucos.
+
+O anti-padrão é o **cone de gelado**: uma suíte manual/E2E gigante sobre poucos
+testes unitários — CI lento, vermelhos flaky, e cada falha uma expedição de
+depuração.
+
+## A funcionalidade sob teste
+
+Um fluxo de signup com três camadas, cada uma mapeada a um nível da pirâmide:
+
+1. `validate_email` — uma **função pura** (testável à unidade em microssegundos),
+2. `SignupService` — lógica a coordenar duas portas, `UserRepo` + `Notifier`
+   (testável à integração com adaptadores em memória),
+3. `App` — a **raiz de composição** que devolve mensagens visíveis ao utilizador
+   (testável e2e pelo seu método público).
+
+## Nível 1 — Unitário: cada regra do validador puro
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (unit_tests)"
+#[test]
+fn rejects_missing_at() {
+    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
+}
+
+#[test]
+fn rejects_bad_domain() {
+    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
+    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
+}
+// ...seis testes unitários no total: um por regra, um por limite.
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+// Table-driven: uma linha por regra/limite — a base da pirâmide numa função.
+func TestValidateEmail(t *testing.T) {
+	cases := []struct {
+		name  string
+		email string
+		want  error
+	}{
+		{"valid", "ada@example.com", nil},
+		{"empty", "", ErrEmpty},
+		{"missing at", "ada.example.com", ErrBadFormat},
+		{"multiple at", "a@b@c.com", ErrBadFormat},
+		{"no dot in domain", "ada@nodot", ErrBadFormat},
+		{"whitespace", "a da@example.com", ErrWhitespace},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValidateEmail(tc.email)
+			if !errors.Is(got, tc.want) && got != tc.want {
+				t.Errorf("ValidateEmail(%q) = %v, want %v", tc.email, got, tc.want)
+			}
+		})
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+class UnitValidatorTests(unittest.TestCase):
+    """Nível UNITÁRIO: muitos testes minúsculos no validador puro — instantâneos."""
+
+    def test_accepts_a_normal_address(self):
+        validate_email("ada@example.com")  # sem exceção
+
+    def test_rejects_bad_inputs(self):
+        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
+               "@example.com", "a da@x.com"]
+        for email in bad:
+            with self.subTest(email=email):
+                with self.assertRaises(InvalidEmailError):
+                    validate_email(email)
+```
+</TabItem>
+</Tabs>
+
+Os testes unitários são baratos **porque a função é pura** — desenhar a lógica
+como funções puras é o que compra uma base larga da pirâmide.
+
+## Nível 2 — Integração: as peças colaboram
+
+O que os testes unitários não conseguem ver: após um signup com sucesso, o
+utilizador é guardado **e** as boas-vindas são enviadas; após um duplicado, **não
+sai segunda mensagem**. Adaptadores reais (em memória), serviço real, interação
+real:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (integration_tests)"
+#[test]
+fn duplicate_signup_is_rejected_and_not_notified_twice() {
+    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
+    svc.signup("ada@example.com").unwrap();
+    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
+    assert_eq!(svc.notifier().sent.len(), 1); // sem segunda mensagem
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+func TestDuplicateSignupRejectedAndNotNotifiedTwice(t *testing.T) {
+	notifier := &RecordingNotifier{}
+	svc := NewService(NewInMemoryRepo(), notifier)
+
+	svc.Signup("ada@example.com")
+	if err := svc.Signup("ada@example.com"); !errors.Is(err, ErrDuplicate) {
+		t.Errorf("expected ErrDuplicate, got %v", err)
+	}
+	if len(notifier.Sent) != 1 { // sem segunda mensagem
+		t.Errorf("Sent = %v, want exactly one", notifier.Sent)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_duplicate_rejected_and_not_notified_twice(self):
+    self.service.signup("ada@example.com")
+    with self.assertRaises(DuplicateEmailError):
+        self.service.signup("ada@example.com")
+    self.assertEqual(len(self.notifier.sent), 1)  # sem segunda mensagem
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Fakes em memória vs mocks">
+  Estes testes usam implementações em memória reais e funcionais das portas (da
+  [lição de Repository](/systems-programming-academy/pt/part-2-engineering/repository-pattern/)) em vez de
+  mocks. Os fakes comportam-se como a coisa real, por isso os testes sobrevivem a
+  refactors; os mocks afirmam sobre *como* algo foi chamado e tendem a partir
+  quando os internos mudam. Prefira fakes neste nível; guarde os mocks para
+  fronteiras externas incómodas.
+</Aside>
+
+## Nível 3 — End-to-end: a vista do utilizador
+
+Um teste, a conduzir a raiz de composição exatamente como um chamador viraado ao
+utilizador faria, afirmando só o que o utilizador vê — sem internos:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (e2e_tests)"
+#[test]
+fn full_signup_flow_through_the_app() {
+    let mut app = App::new();
+    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
+    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
+    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+func TestFullSignupFlowThroughTheApp(t *testing.T) {
+	app := NewApp()
+	if got := app.Signup("ada@example.com"); got != "Welcome, ada@example.com! Check your inbox." {
+		t.Errorf("first signup: %q", got)
+	}
+	if got := app.Signup("ada@example.com"); got != "ada@example.com is already registered." {
+		t.Errorf("duplicate signup: %q", got)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_full_signup_flow_through_the_app(self):
+    app = App()
+    self.assertEqual(app.signup("ada@example.com"),
+                     "Welcome, ada@example.com! Check your inbox.")
+    self.assertEqual(app.signup("ada@example.com"),
+                     "ada@example.com is already registered.")
+```
+</TabItem>
+</Tabs>
+
+Num sistema real este nível conduz um endpoint HTTP ou CLI contra uma instância a
+correr (com uma base de dados real num contentor). O princípio é idêntico: entrada
+pública, resultado observável, internos invisíveis.
+
+<Quiz
+  question={'O bug do signup duplicado ("o segundo signup envia segunda mensagem de boas-vindas") escapa a todos os testes unitários. Porquê?'}
+  options={[
+    { text: "Os testes unitários são lentos demais para o apanhar.", },
+    { text: "É um bug de colaboração entre a verificação no repo e o notifier — visível só quando as peças reais correm juntas, que é o que os testes de integração exercitam.", correct: true },
+    { text: "Só QA manual encontra bugs de duplicados.", },
+    { text: "O validador devia tê-lo apanhado.", },
+  ]}
+  explanation="Cada peça funciona sozinha: o validador valida, o repo guarda, o notifier envia. O bug vive na coordenação — o serviço verifica a existência antes de notificar? Os testes unitários das peças isoladas passam todos enquanto a interação está errada. É precisamente a lacuna que o nível de integração existe para cobrir, e a razão de a pirâmide ter um meio."
+/>
+
+## O que cada nível custa e apanha
+
+| | Unitário | Integração | E2E |
+| --- | --- | --- | --- |
+| Velocidade | microssegundos | milissegundos | segundos–minutos (sistemas reais) |
+| Precisão da falha | a função exata | a interação | "algures na app" |
+| Apanha | bugs de lógica/limites | bugs de colaboração/ligação | bugs de composição/config |
+| Fragilidade | muito estável | moderada | a mais flaky (timing, ambiente) |
+| Quantos | muitos (um por regra) | alguns (um por colaboração) | poucos (jornadas-chave) |
+
+O mesmo fio de DI atravessa cada lição da Parte 2 por uma razão: **portas
+injetadas são o que permite a cada nível existir**. Sem elas, tudo é um teste e2e.
+
+## Erros comuns & depuração
+
+### 1. O cone de gelado
+
+Uma suíte Selenium/E2E gigante e quase nenhum teste unitário: o CI demora uma
+hora, um vermelho flaky bloqueia toda a gente, e cada falha precisa de um
+arqueólogo. **Correção:** empurre cada verificação para o nível mais baixo que a
+apanha — regras de validação para unitário, colaborações para integração, e só
+jornadas-chave em e2e.
+
+### 2. Testar a implementação, não o comportamento
+
+Afirmar que um método privado foi chamado, ou sobre estado interno, solda os
+testes à implementação atual — refactors partem testes que *deviam* passar.
+**Correção:** afirme resultados observáveis na fronteira de cada nível (valores
+devolvidos, estado guardado via a porta, a mensagem visível ao utilizador).
+
+### 3. Testes de integração que secretamente não testam nada
+
+Se o seu teste "de integração" faz mock de *todos* os colaboradores, é um teste
+unitário de código de cola — prova que os mocks se chamam uns aos outros.
+**Correção:** use implementações reais (em memória) das peças cuja interação está
+a verificar.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar um teste unitário para uma regra nova.">
+
+Adicione a regra "a parte local não pode começar por ponto" e o seu teste
+unitário. (Escolha a sua linguagem.)
+
+**Solução (Python):**
+
+```python
+# regra, no validate_email:
+if parts[0].startswith("."):
+    raise InvalidEmailError("local part may not start with a dot")
+
+# teste unitário:
+def test_rejects_leading_dot(self):
+    with self.assertRaises(InvalidEmailError):
+        validate_email(".ada@example.com")
+```
+
+Uma regra nova é uma linha de lógica e um teste unitário instantâneo — é por isso
+que as regras vivem na base da pirâmide.
+
+</Interview>
+
+<Interview question="Exercício 2 — Escrever o caso de integração em falta.">
+
+Teste que um email *inválido* não é guardado nem notificado. (Escolha a sua
+linguagem.)
+
+**Solução (Go):**
+
+```go
+func TestInvalidEmailIsNotStoredOrNotified(t *testing.T) {
+	repo := NewInMemoryRepo()
+	notifier := &RecordingNotifier{}
+	svc := NewService(repo, notifier)
+
+	if err := svc.Signup("nope"); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if repo.Exists("nope") || len(notifier.Sent) != 0 {
+		t.Error("invalid signup must not store or notify")
+	}
+}
+```
+
+Outra propriedade de colaboração: a guarda tem de disparar *antes* de ambos os
+efeitos secundários.
+
+</Interview>
+
+<Interview question="Exercício 3 — Classifique estes testes.">
+
+Para cada um, diga o nível certo da pirâmide: (a) "ordenar uma lista vazia devolve
+uma lista vazia", (b) "POST /orders devolve 201 e a encomenda aparece em GET
+/orders", (c) "o serviço de descontos pede o tier ao repo de fidelização antes de
+calcular o preço".
+
+**Resposta:** (a) unitário — caso-limite de lógica pura; (b) end-to-end —
+superfície HTTP pública, resultado observável; (c) integração — uma colaboração
+entre serviço e porta.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Empurrar verificações para o nível mais baixo que as apanha | Tudo testado através da UI |
+| Funções puras para alargar a base unitária | Lógica enterrada em código de I/O, intestável sozinha |
+| Fakes (adaptadores em memória) para integração | Fazer mock de tudo até não significar nada |
+| Poucos testes e2e em jornadas-chave | Um teste e2e por ticket de funcionalidade |
+| Afirmar comportamento na fronteira de cada nível | Afirmar internos privados |
+| Suíte rápida → correr a cada gravação | CI de uma hora que ninguém espera |
+
+## Mini-projeto
+
+**Dê o tratamento da pirâmide a uma funcionalidade de "reset de password"** numa
+linguagem: `validate_token` (puro — expiração, formato), um `ResetService` a
+coordenar as portas `TokenRepo` e `PasswordStore`, e uma entrada `App` que devolve
+mensagens visíveis ao utilizador. Escreva ~5 testes unitários, 2 de integração
+(incluindo "um token expirado não muda nada"), e 1 e2e. Verifique a forma: se
+acabou com mais e2e do que unitários, refatore lógica para funções puras até a
+pirâmide ficar de pé.
+
+## Perguntas de entrevista
+
+<Interview question="O que é a pirâmide de testes e que problema resolve?">
+
+Uma heurística de estratégia: muitos testes unitários rápidos na base, menos de
+integração no meio, poucos end-to-end no topo. Resolve a economia dos testes — os
+e2e são lentos, flaky, e vagos sobre a localização da falha, por isso confiar
+neles para tudo torna o CI lento e a depuração cara. A pirâmide empurra cada
+verificação para o nível mais barato que apanha o bug visado, dando feedback
+rápido com cobertura alta da lógica e cobertura dirigida da ligação.
+
+</Interview>
+
+<Interview question="O que apanha um teste de integração que os unitários não conseguem?">
+
+Bugs de colaboração: as peças funcionam isoladas mas interagem mal — o serviço
+notifica antes de verificar duplicados, passa argumentos na ordem errada,
+esquece-se de guardar antes de publicar um evento, ou dois adaptadores discordam
+de um formato de dados. Os testes unitários das peças isoladas passam todos
+nestes cenários; só correr as peças reais juntas expõe a interação defeituosa.
+
+</Interview>
+
+<Interview question="Fakes vs mocks — quando usar cada um?">
+
+Um fake é uma implementação leve mas *funcional* (um repositório em memória); um
+mock é uma casca que regista chamadas e devolve respostas programadas, com
+asserções sobre como foi usado. Prefira fakes nos testes de nível de integração:
+verificam comportamento e sobrevivem a refactors. Use mocks em fronteiras externas
+incómodas (APIs de terceiros, relógios, SMTP) onde um fake funcional é
+impraticável — e afirme com parcimónia sobre interações, porque asserções de
+interação acoplam os testes a detalhes de implementação.
+
+</Interview>
+
+<Interview question="Como evita que os testes end-to-end se tornem um gargalo flaky?">
+
+Mantenha-os poucos — só jornadas críticas de utilizador; torne-os determinísticos
+— dados de teste controlados, sem ambientes partilhados, esperas explícitas por
+condições em vez de sleeps; corra-os em paralelo onde possível; e ponha os flakes
+em quarentena-e-conserto em vez de retries eternos. Acima de tudo, quando um teste
+e2e apanha um bug, acrescente um teste de nível mais baixo que o teria apanhado e
+pergunte se o caso e2e ainda merece o seu lugar.
+
+</Interview>
+
+## Desafio
+
+Pegue no seu projeto mais recente e desenhe a forma real dos testes: conte
+unitários vs integração vs e2e. Se for um cone (ou uma ampulheta, ou
+só-unitários-e-nada-mais), escolha a pior lacuna e conserte-a estruturalmente —
+normalmente extraindo funções puras (alargar a base) ou acrescentando os dois ou
+três testes de colaboração que faltam no meio. Depois cronometre a suíte: a
+verdadeira promessa da pirâmide é uma execução tão rápida que a corre a cada
+mudança sem pensar. Esse hábito, não o diagrama, é o objetivo.
+
+## Referências & leitura adicional
+
+- Martin Fowler — [Test Pyramid](https://martinfowler.com/bliki/TestPyramid.html) e [Practical Test Pyramid](https://martinfowler.com/articles/practical-test-pyramid.html) (Ham Vocke)
+- Google Testing Blog — [Just say no to more end-to-end tests](https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html)
+- Kent C. Dodds — [The Testing Trophy](https://kentcdodds.com/blog/the-testing-trophy-and-testing-classifications) (um contraponto moderno)
+- *Software Engineering at Google*, cap. 11–14 — testes em escala
+
+<Progress />

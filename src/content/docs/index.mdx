@@ -1,0 +1,61 @@
+---
+title: Systems Programming Academy
+description: Learn production software engineering from absolute beginner to advanced with Python, Go, and Rust.
+template: splash
+hero:
+  tagline: From first principles to production — with Python, Go, and Rust.
+  actions:
+    - text: Start with the Welcome guide
+      link: /systems-programming-academy/welcome/
+      icon: right-arrow
+      variant: primary
+    - text: Jump into the first lesson
+      link: /systems-programming-academy/part-1-foundations/rust/ownership/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Not a syntax tour. An engineering education.
+
+Most language tutorials stop at syntax. This Academy teaches how real software is
+**designed, built, tested, benchmarked, and shipped** — using three languages that
+sit at different points on the systems-programming spectrum.
+
+<CardGrid stagger>
+  <Card title="Python" icon="seti:python">
+    Readability and velocity. We follow the philosophy of Guido van Rossum:
+    there should be one obvious way to do it.
+  </Card>
+  <Card title="Go" icon="seti:go">
+    Simplicity at scale. In the spirit of Rob Pike: clear is better than clever;
+    a little copying beats a little dependency.
+  </Card>
+  <Card title="Rust" icon="seti:rust">
+    Safety without a garbage collector. In the tradition of Graydon Hoare:
+    the compiler is your pair-programmer.
+  </Card>
+</CardGrid>
+
+## Every lesson is executable and tested
+
+- ✅ **No pseudo-code.** Every snippet compiles and runs.
+- ✅ **No placeholders, no TODOs.** Code ships with tests you can run yourself.
+- ✅ **Real benchmarks.** Numbers come from code you can re-run, not hand-waving.
+- ✅ **Bilingual.** Read in English or Português (top-right language switch).
+
+## How the Academy is organised
+
+| Part | Focus |
+| --- | --- |
+| **1 · Foundations** | Language cores: memory, types, ownership, error handling, testing. |
+| **2 · Real-World Engineering** | Architecture, CI/CD, observability, security — compared across languages. |
+| **3 · DevOps Automation** | Build real tooling: CLIs, exporters, config generators. |
+| **4 · Concurrency & Parallelism** | Threads, async, channels — culminating in a mini-NGINX. |
+| **5 · Building Frameworks** | Rebuild an ORM, a web framework, and a green-thread runtime from scratch. |
+| **Capstone** | A production microservice platform, no frameworks, each language where it fits. |
+
+:::note[Status]
+This is an actively developed open educational resource. **Part 1 → Rust → Ownership**
+is complete and fully tested; more lessons are being built to the same bar.
+:::

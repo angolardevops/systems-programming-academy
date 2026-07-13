@@ -1,0 +1,475 @@
+---
+title: "Go: Generics"
+description: Type parameters (Go 1.18+) let one function or type work for many element types with compile-time safety. Constraints, the ~ operator, comparable and any, and generic types — with complete tested examples.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["go"]} />
+
+For most of its life Go had no generics — you either wrote `SumInts`, `SumFloats`,
+… by hand, or reached for `interface{}` and lost all type safety. Go 1.18 added
+**type parameters**: write a function or type once, parameterised over the types
+it works with, checked at compile time and with no boxing. True to Go's style,
+generics are deliberately modest — just enough to remove the copy-paste, no more.
+This lesson covers the whole feature.
+
+<Aside type="note" title="Prerequisites">
+  You need [Structs, Methods & Interfaces](/systems-programming-academy/part-1-foundations/go/interfaces/) —
+  constraints are a special kind of interface.
+</Aside>
+
+All code is from the tested module
+[`examples/go-generics/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` green, `go vet` clean). Every snippet is **complete** — a runnable
+`package main`, or a whole declaration from the module.
+
+## A generic function
+
+A type parameter goes in square brackets after the function name, with a
+**constraint** that says what the type must support. `any` (an alias for
+`interface{}`) is the most permissive.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+// [T any] declares a type parameter T with no restrictions.
+func first[T any](s []T) T {
+	return s[0]
+}
+
+func main() {
+	fmt.Println(first([]int{10, 20, 30}))       // 10
+	fmt.Println(first([]string{"a", "b", "c"})) // a
+}
+```
+
+Output:
+
+```text
+10
+a
+```
+
+The compiler **infers** the type argument from the call, so you write `first(xs)`,
+not `first[int](xs)` (though you can be explicit when inference can't decide).
+
+## Constraints: type sets
+
+A constraint is an interface listing the operations — or, more powerfully, a **set
+of types** — the parameter must belong to. To sum values you need `+`, so the
+constraint enumerates the numeric types:
+
+```go title="generics.go"
+// The ~ means "any type whose underlying type is this", so named types count too.
+type Number interface {
+	~int | ~int64 | ~float64
+}
+
+func Sum[T Number](values []T) T {
+	var total T
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+```
+
+A complete program:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Number interface {
+	~int | ~int64 | ~float64
+}
+
+func Sum[T Number](values []T) T {
+	var total T
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+
+// Celsius has underlying type float64, so ~float64 admits it.
+type Celsius float64
+
+func main() {
+	fmt.Println(Sum([]int{1, 2, 3, 4}))      // 10
+	fmt.Println(Sum([]float64{1.5, 2.5}))    // 4
+	fmt.Println(Sum([]Celsius{20, 22}))      // 42
+}
+```
+
+Output:
+
+```text
+10
+4
+42
+```
+
+<Aside type="tip" title="What the ~ tilde does">
+  `~int` means "any type whose underlying type is `int`", not just `int` itself.
+  Without it, a named type like `type ID int` would be rejected by an `int`-only
+  constraint. Nearly all numeric/ordered constraints use `~` so they accept named
+  types. The standard library ships these in `golang.org/x/exp/constraints`.
+</Aside>
+
+## Two type parameters, and `comparable`
+
+`Map` transforms `[]T` into `[]U` — two independent type parameters. `Keys` needs
+its key type to be usable as a map key, which is exactly what the built-in
+`comparable` constraint means.
+
+```go title="generics.go"
+func Map[T, U any](s []T, f func(T) U) []U {
+	out := make([]U, len(s))
+	for i, v := range s {
+		out[i] = f(v)
+	}
+	return out
+}
+
+func Keys[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+```
+
+A complete program:
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"sort"
+)
+
+func Map[T, U any](s []T, f func(T) U) []U {
+	out := make([]U, len(s))
+	for i, v := range s {
+		out[i] = f(v)
+	}
+	return out
+}
+
+func main() {
+	nums := []int{1, 2, 3}
+	squares := Map(nums, func(n int) int { return n * n })
+	fmt.Println(squares) // [1 4 9]
+
+	labels := Map(nums, func(n int) string { return fmt.Sprintf("#%d", n) })
+	sort.Strings(labels)
+	fmt.Println(labels) // [#1 #2 #3]
+}
+```
+
+Output:
+
+```text
+[1 4 9]
+[#1 #2 #3]
+```
+
+<Mermaid title="Constraints form a hierarchy from most to least permissive" code={`flowchart TD
+  A["any: no operations (interface{})"] --> C["comparable: supports == and map keys"]
+  C --> O["Ordered / Number: type sets supporting < and +"]`} />
+
+## Generic types
+
+The type parameter can be on a **type**, giving you containers like a type-safe
+stack. `Stack[int]` and `Stack[string]` are distinct types, fully checked.
+
+```go title="generics.go"
+type Stack[T any] struct {
+	items []T
+}
+
+func (s *Stack[T]) Push(v T) { s.items = append(s.items, v) }
+
+func (s *Stack[T]) Pop() (T, bool) {
+	var zero T // the zero value of T, whatever T is
+	if len(s.items) == 0 {
+		return zero, false
+	}
+	top := s.items[len(s.items)-1]
+	s.items = s.items[:len(s.items)-1]
+	return top, true
+}
+
+func (s *Stack[T]) Len() int { return len(s.items) }
+```
+
+A complete program:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Stack[T any] struct {
+	items []T
+}
+
+func (s *Stack[T]) Push(v T)  { s.items = append(s.items, v) }
+func (s *Stack[T]) Len() int  { return len(s.items) }
+func (s *Stack[T]) Pop() (T, bool) {
+	var zero T
+	if len(s.items) == 0 {
+		return zero, false
+	}
+	top := s.items[len(s.items)-1]
+	s.items = s.items[:len(s.items)-1]
+	return top, true
+}
+
+func main() {
+	var s Stack[string]
+	s.Push("a")
+	s.Push("b")
+	v, ok := s.Pop()
+	fmt.Println(v, ok, s.Len()) // b true 1
+}
+```
+
+Output:
+
+```text
+b true 1
+```
+
+<Quiz
+  question={'What does the ~ operator mean in a constraint like ~int?'}
+  options={[
+    { text: "It negates the type — everything except int.", },
+    { text: "It matches any type whose underlying type is int, so named types like `type ID int` are included.", correct: true },
+    { text: "It makes the type a pointer.", },
+    { text: "It means the type is optional.", },
+  ]}
+  explanation="`~int` denotes the set of all types whose underlying type is int — both int itself and named types defined as `type X int`. A constraint written as just `int` (no tilde) would reject `type ID int`. Because reusable numeric constraints should accept named types, they almost always use the ~ form."
+/>
+
+## Common mistakes & debugging
+
+### 1. Using an operation the constraint doesn't allow
+
+```go
+func Sum[T any](values []T) T { // ✗ any doesn't permit +
+	var total T
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+```
+
+```text
+invalid operation: operator + not defined on total (variable of type T constrained by any)
+```
+
+**Fix:** tighten the constraint to a type set that supports `+` (like `Number`).
+The constraint is a promise the body may rely on.
+
+### 2. Forgetting `~` and rejecting named types
+
+A constraint of `int | float64` (no `~`) accepts only those exact types, so a
+caller's `type Money float64` won't compile. **Fix:** write `~int | ~float64`.
+
+### 3. Over-reaching for generics
+
+Not every function needs to be generic. If you only ever call it with one type, a
+plain function is clearer. Go's designers kept generics minimal on purpose — reach
+for them to remove real duplication, not preemptively.
+
+## Exercises
+
+<Interview question="Exercise 1 — A generic Contains.">
+
+Write `Contains[T comparable](s []T, target T) bool`. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+func Contains[T comparable](s []T, target T) bool {
+	for _, v := range s {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
+func main() {
+	fmt.Println(Contains([]int{1, 2, 3}, 2))         // true
+	fmt.Println(Contains([]string{"a", "b"}, "z"))   // false
+}
+```
+
+`comparable` is required because the body uses `==`.
+
+</Interview>
+
+<Interview question="Exercise 2 — A generic Min over an Ordered constraint.">
+
+Write `Min[T Ordered](a, b T) T` with a suitable constraint. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+type Ordered interface {
+	~int | ~int64 | ~float64 | ~string
+}
+
+func Min[T Ordered](a, b T) T {
+	if a <= b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	fmt.Println(Min(3, 8))          // 3
+	fmt.Println(Min("pear", "fig")) // fig
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — A generic Pair type.">
+
+Define `Pair[A, B any]` with fields and a `Swap` method returning the reversed
+pair. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+type Pair[A, B any] struct {
+	First  A
+	Second B
+}
+
+func (p Pair[A, B]) Swap() Pair[B, A] {
+	return Pair[B, A]{First: p.Second, Second: p.First}
+}
+
+func main() {
+	p := Pair[string, int]{First: "age", Second: 42}
+	fmt.Printf("%+v\n", p.Swap()) // {First:42 Second:age}
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Use the narrowest constraint the body needs | `any` on a body that uses `+` (won't compile) |
+| `~int \| ~float64` so named types work | `int \| float64` that rejects `type X int` |
+| `comparable` for `==` / map keys | Custom constraint duplicating `comparable` |
+| Let type inference pick the type argument | Spelling `f[int](xs)` everywhere needlessly |
+| Generics to remove real duplication | Making a one-type helper generic "just in case" |
+| Prefer `slices`/`maps` stdlib generics when they fit | Reimplementing `slices.Contains` yourself |
+
+## Mini-project
+
+**Build a generic `OrderedSet[T]`** backed by a slice, with `Add` (ignores
+duplicates), `Contains`, `Len`, and a `Sorted() []T` method that returns elements
+in order. Constrain `T` to an `Ordered` type set so `Sorted` can compare. Write
+table-driven tests exercising each method with both `int` and `string` element
+types, and `go vet` clean.
+
+Requirements: one generic type, a meaningful constraint, tests over at least two
+concrete types, and no third-party packages.
+
+## Interview questions
+
+<Interview question="What are constraints in Go generics?">
+
+A constraint is an interface that specifies what a type parameter must support. It
+can list method requirements (like any interface) and/or a **type set** using
+unions (`~int | ~float64`). The body of a generic function may only use operations
+the constraint guarantees. Built-in constraints include `any` (no restriction) and
+`comparable` (supports `==`); the `constraints` package and the `slices`/`maps`
+stdlib packages provide common ones.
+
+</Interview>
+
+<Interview question="How does Go implement generics — monomorphization or boxing?">
+
+Go uses a hybrid strategy called **GC shape stenciling**. Rather than generating a
+separate copy for every concrete type (full monomorphization) or boxing everything
+through interfaces, the compiler generates one instantiation per distinct "GC
+shape" (memory layout), and passes a dictionary of type-specific information. This
+keeps binary size down compared to full monomorphization while avoiding the runtime
+cost of interface dispatch for most operations.
+
+</Interview>
+
+<Interview question="When should you NOT use generics in Go?">
+
+When a plain function or a single interface would be clearer. If a function is only
+ever used with one type, generics add ceremony for no benefit. If the behaviour
+varies by type (not just the type of data), an interface with methods is usually
+the better tool. Go's guidance is to reach for generics to eliminate genuine,
+repeated boilerplate over container-like code — not as a default.
+
+</Interview>
+
+<Interview question="What is the difference between any and comparable?">
+
+`any` is an alias for `interface{}` — it imposes no requirements, so a body
+constrained by `any` can only move values around, not compare or operate on them.
+`comparable` is a built-in constraint for types that support `==` and `!=` (and can
+therefore be map keys). Use `any` for pass-through containers and `comparable` when
+you need equality checks, such as membership tests or deduplication.
+
+</Interview>
+
+## Challenge
+
+Rewrite a pair of near-duplicate functions you have — say `MaxInt` and `MaxFloat`,
+or an int-keyed and string-keyed cache — as a single generic function or type with
+the right constraint. Then check whether the standard `slices` and `maps` packages
+already provide it (`slices.Max`, `slices.Contains`, `maps.Keys`) and prefer those.
+Knowing what the stdlib generics already cover is half of using generics well: the
+best generic code is often the one you didn't have to write.
+
+## References & further reading
+
+- Go blog — [an introduction to generics](https://go.dev/blog/intro-generics)
+- *A Tour of Go* — [type parameters](https://go.dev/tour/generics/1)
+- The `slices` and `maps` packages — [pkg.go.dev/slices](https://pkg.go.dev/slices), [pkg.go.dev/maps](https://pkg.go.dev/maps)
+- Go spec — [type parameters and constraints](https://go.dev/ref/spec#Type_parameter_declarations)
+
+<Progress />

@@ -1,0 +1,402 @@
+---
+title: "CI/CD"
+description: Continuous integration and delivery, dissected through a real pipeline — this Academy's own ci.yml, which fmt/lint/tests 38 modules across Rust, Go, and Python matrices and builds the site on every push.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Every quality gate this course has taught — `cargo clippy`, `go vet -race`,
+`ruff`, the tests in every module — is worthless if it only runs when someone
+remembers. **Continuous Integration** makes the gates automatic: every push runs
+the full suite, and a red X blocks the merge. **Continuous Delivery** extends the
+pipeline to produce a deployable artifact from every green build. This lesson has
+an unusual case study: **the Academy's own pipeline** — a real, working
+`ci.yml` that checks *all 38 example modules* you've seen in Parts 1 and 2, in
+three language matrices, plus the site build that publishes these very pages.
+
+<Aside type="note" title="Prerequisites">
+  The per-language quality toolchains from Part 1 (fmt/lint/test in
+  [Rust](/systems-programming-academy/part-1-foundations/rust/testing/), [Go](/systems-programming-academy/part-1-foundations/go/testing/),
+  [Python](/systems-programming-academy/part-1-foundations/python/testing/)) — CI is those tools, made
+  unskippable.
+</Aside>
+
+## The pipeline, end to end
+
+<Mermaid title="The Academy's real pipeline: four parallel jobs gate every push" code={`flowchart LR
+  P["push / pull request"] --> S["site: npm ci + astro build"]
+  P --> R["rust-examples: 15-crate matrix — fmt, clippy -D warnings, test"]
+  P --> G["go-examples: 12-module matrix — gofmt, vet, test"]
+  P --> Y["python-examples: 11-module matrix — ruff format+check, unittest"]
+  S --> M{"all green?"}
+  R --> M
+  G --> M
+  Y --> M
+  M -->|yes| D["merge allowed -> CD: deploy the built site"]
+  M -->|no| X["red X: merge blocked, fix first"]`} />
+
+The whole file is ~120 lines of YAML. Here is its skeleton with one job per
+language — every line of which you have already run by hand in earlier lessons:
+
+```yaml title=".github/workflows/ci.yml (the real file, abridged)"
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  site:
+    name: Build site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: academy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci          # exact, lockfile-pinned install
+      - run: npm run build   # the site must build on every push
+
+  rust-examples:
+    name: Rust examples (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate:
+          - rust-ownership
+          - part2-hexagonal-rust
+          # ...15 crates total: every Rust module in the course
+    defaults:
+      run:
+        working-directory: academy/examples/${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check           # gate 1: formatting
+      - run: cargo clippy -- -D warnings # gate 2: lints are errors
+      - run: cargo test                  # gate 3: behaviour
+
+  go-examples:
+    name: Go examples (gofmt, vet, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [go-interfaces, part2-hexagonal-go] # ...12 total
+    defaults:
+      run:
+        working-directory: academy/examples/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+
+  python-examples:
+    name: Python examples (ruff, unittest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [py-datamodel, part2-hexagonal-py] # ...11 total
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pipx install ruff
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: python -m unittest discover -s . -p 'test_*.py'
+```
+
+## The anatomy, piece by piece
+
+**Triggers (`on:`).** `push` to main and every `pull_request` — the two moments
+integration can break. Nothing merges without a green run against the merge
+result.
+
+**Jobs run in parallel.** The four jobs are independent, so a Rust failure is
+reported in minutes even while the site build continues. Within a job, the steps
+are sequential and **fail fast**: if `cargo fmt --check` fails, clippy and tests
+don't waste time running.
+
+**The matrix.** `strategy.matrix` expands one job definition into N — one runner
+per module. This is the same "table-driven" idea as the
+[testing lessons](/systems-programming-academy/part-2-engineering/testing-pyramid/): adding module #39 to CI
+is one line in a list, not a copied job.
+
+**Gates in the right order.** Cheapest first: format check (instant) → linter
+(seconds) → tests (the real work). A trivially malformed commit fails in the
+first seconds of its first job.
+
+**Pinned, reproducible steps.** `npm ci` (not `install`) respects the lockfile
+exactly; toolchains are pinned (`go-version: '1.23'`, `python-version: '3.12'`);
+actions are versioned (`@v4`). A CI that installs "whatever is latest" produces
+unexplainable Friday failures.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```yaml
+# The Rust gate: warnings are errors, formatting is law.
+- run: cargo fmt --check
+- run: cargo clippy -- -D warnings
+- run: cargo test
+```
+`-D warnings` is the crucial flag: a lint that would merely warn locally **fails
+the build**, so warnings never accumulate.
+</TabItem>
+<TabItem label="Go">
+```yaml
+# The Go gate: gofmt has no options, vet catches suspicious code.
+- run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+- run: go vet ./...
+- run: go test ./...
+```
+`gofmt -l` lists unformatted files; the shell test turns a non-empty list into a
+failing exit code. For concurrent code, add `go test -race` (as the
+[goroutines lesson](/systems-programming-academy/part-1-foundations/go/concurrency/) demonstrated).
+</TabItem>
+<TabItem label="Python">
+```yaml
+# The Python gate: ruff formats and lints, unittest verifies.
+- run: ruff format --check .
+- run: ruff check .
+- run: python -m unittest discover -s . -p 'test_*.py'
+```
+Add `mypy .` here the moment a project adopts
+[type hints](/systems-programming-academy/part-1-foundations/python/type-hints/) — annotations that CI never
+checks are just comments.
+</TabItem>
+</Tabs>
+
+## From CI to CD
+
+CI answers "is this change safe to merge?" **CD** answers "is it deployed?" For
+this site the delivery step is short — the artifact of `astro build` is a static
+directory, published on every green main build:
+
+```yaml title="a deploy job (Cloudflare Pages / any static host)"
+  deploy:
+    needs: [site, rust-examples, go-examples, python-examples] # only after ALL gates
+    if: github.ref == 'refs/heads/main'                        # only from main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: academy
+      - uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}   # from the repo's secret store
+          directory: academy/dist
+```
+
+Two details carry the whole [configuration lesson](/systems-programming-academy/part-2-engineering/configuration/)
+forward: the deploy token comes from the platform's **secret store** (never the
+YAML), and `needs:` makes deployment *conditional on every gate* — delivery is
+the reward for integration, not a parallel gamble.
+
+<Quiz
+  question={'Why does the pipeline run cargo fmt --check before clippy and tests, rather than after?'}
+  options={[
+    { text: "Formatting is the most important check.", },
+    { text: "Gates are ordered cheapest-first so a broken commit fails in seconds without wasting minutes of lint/test compute.", correct: true },
+    { text: "cargo test cannot run before cargo fmt.", },
+    { text: "GitHub Actions requires alphabetical step order.", },
+  ]}
+  explanation="Steps in a job run sequentially and stop at the first failure. Putting the instant checks (format) before the fast ones (lint) before the slow ones (tests) means the most common trivial failures are reported in seconds and no compute is burned running a full test suite on a commit that was never going to pass. Same principle as the testing pyramid: cheap feedback first."
+/>
+
+## What CI taught this very course
+
+This pipeline wasn't decoration — building the Academy exercised it exactly the
+way real projects do:
+
+- **The matrix grew one line at a time.** Every lesson added its module to a
+  list. That's the maintenance property you want: extending CI should be
+  trivial, or people won't do it.
+- **The gates caught real bugs before "merge".** The borrow checker rejected a
+  test in the [caching lesson](/systems-programming-academy/part-2-engineering/caching/); `ruff` reformatted
+  files in nearly every Python module; a doctest failure caught an
+  int-vs-float bug in the [type-hints lesson](/systems-programming-academy/part-1-foundations/python/type-hints/).
+  Locally run gates are CI's dress rehearsal — CI is what makes them binding.
+- **Determinism mattered everywhere.** Injected clocks, injected sinks, sorted
+  outputs — every technique from earlier lessons exists so this pipeline can be
+  **green or red for real reasons**, never flaky.
+
+## Common mistakes & debugging
+
+### 1. Flaky tests eroding trust
+
+One test that fails 5% of the time trains the team to click "re-run" — and then
+a real failure gets re-run too. **Fix:** quarantine flakes immediately and fix
+the nondeterminism at the root (real clocks, sleeps, shared state — everything
+the Part 2 lessons injected away).
+
+### 2. Works locally, fails in CI (or worse, vice versa)
+
+Version drift: local Go 1.25 vs CI 1.23, unpinned dependencies, an uncommitted
+file. **Fix:** pin toolchains in CI *and* locally (rust-toolchain.toml, .python-
+version, go.mod), use lockfile-exact installs (`npm ci`), and treat "passes only
+on my machine" as a bug in the setup, not an inconvenience.
+
+### 3. A slow pipeline nobody waits for
+
+When CI takes 40 minutes, people batch commits, merge on yellow, and the
+feedback loop dies. **Fix:** parallelize with matrices (as here), cache
+dependencies (`actions/cache` for `~/.cargo`, Go's build cache, pip), and push
+slow suites to a nightly run — the PR gate should stay under ~10 minutes.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add dependency caching to the Rust job.">
+
+The Rust matrix recompiles dependencies from scratch each run. Add caching.
+
+**Solution:**
+
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            academy/examples/${{ matrix.crate }}/target
+          key: cargo-${{ matrix.crate }}-${{ hashFiles('**/Cargo.toml') }}
+```
+
+The `key` includes the manifest hash: change dependencies and the cache misses
+(correct); touch only source and it hits (fast).
+
+</Interview>
+
+<Interview question="Exercise 2 — Gate concurrent Go code with the race detector.">
+
+Which single line would you change in the Go job for modules with goroutines,
+and what does it buy?
+
+**Solution:** change `go test ./...` to `go test -race ./...`. The race detector
+instruments memory accesses and fails the build on any data race — turning the
+[fearless-concurrency guarantees](/systems-programming-academy/part-1-foundations/go/concurrency/) into a
+merge gate. (Cost: slower tests; worth it wherever goroutines exist.)
+
+</Interview>
+
+<Interview question="Exercise 3 — Explain `needs:` in the deploy job.">
+
+In one sentence: what does `needs: [site, rust-examples, go-examples,
+python-examples]` guarantee, and what would removing it risk?
+
+**Answer:** It makes the deploy job wait for — and require the success of —
+every gate job, so an artifact can only ship from a fully green build; removing
+it would let a deploy race ahead and publish a site whose example code is
+failing its own tests.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Every gate you run locally, run in CI | "Remember to run the tests before pushing" |
+| Warnings are errors (`-D warnings`) | Warnings accumulating for years |
+| Cheapest checks first, fail fast | A 30-minute suite before the format check |
+| Matrices + caching keep it under ~10 min | Serial jobs nobody waits for |
+| Pinned toolchains, lockfile installs | "latest" everything, Friday mysteries |
+| Deploy `needs:` all gates, secrets from the store | Tokens in YAML, deploys racing the tests |
+
+## Mini-project
+
+**Give one of your own projects the Academy treatment.** Write a CI workflow
+with: the fmt/lint/test gates for its language (steal the exact steps from
+above), a matrix if it has multiple packages, dependency caching, and — if it
+produces an artifact — a deploy job gated by `needs:` with its token in the
+secret store. Then make a deliberately broken PR (bad formatting, a failing
+test) and confirm the pipeline blocks it at the right stage with a readable
+error.
+
+## Interview questions
+
+<Interview question="What is Continuous Integration and what problem does it solve?">
+
+CI is the practice of merging small changes frequently into a shared mainline,
+with an automated pipeline that builds and tests every change. It solves
+integration risk: without it, branches diverge for weeks and merging becomes an
+event with conflicts and surprise breakage. With it, every push gets the full
+quality-gate treatment within minutes, so defects are caught closest to the
+change that introduced them — when they're cheapest to fix.
+
+</Interview>
+
+<Interview question="What is the difference between Continuous Delivery and Continuous Deployment?">
+
+Continuous **Delivery** means every green build produces a deployable,
+verified artifact — deployment to production remains a human decision (a button).
+Continuous **Deployment** removes the button: every change that passes the
+pipeline goes to production automatically. Delivery is the prerequisite;
+deployment is the further step that demands excellent test coverage,
+observability, and fast rollback, because no human reviews each release.
+
+</Interview>
+
+<Interview question="How do you keep a CI pipeline fast as a project grows?">
+
+Parallelize: split independent checks into concurrent jobs and use matrices for
+repeated structures. Cache: dependency downloads and build artifacts keyed on
+lockfile/manifest hashes. Order: cheapest gates first so failures short-circuit.
+Tier: keep the PR gate lean (~10 min) and move exhaustive suites — full e2e,
+benchmarks, mutation tests — to scheduled runs. And measure the pipeline itself:
+CI duration is a latency metric with a real cost curve.
+
+</Interview>
+
+<Interview question="How should secrets be handled in CI/CD pipelines?">
+
+Never in the repository or the workflow file — use the CI platform's secret
+store, injected as environment variables scoped to the jobs that need them.
+Restrict deploy credentials to protected branches, prefer short-lived tokens
+(e.g. OIDC federation to the cloud provider over static keys), never echo
+secrets to logs (CI masks known secrets, but only known ones), and rotate on any
+suspicion. The [configuration lesson](/systems-programming-academy/part-2-engineering/configuration/)'s
+redaction discipline applies doubly in a system that logs everything by design.
+
+</Interview>
+
+## Challenge
+
+Time your project's feedback loop end to end: from `git push` to a red/green
+verdict. If it's over ten minutes, profile the pipeline like you would profile
+code — which job, which step, what's cacheable, what can parallelize? If it's
+under one minute, ask the opposite question: which gate is *missing* (race
+detector? mypy? an architecture test?) that a production project should have.
+The pipeline is a product; this course's own `ci.yml` went through exactly that
+loop, one lesson at a time.
+
+## References & further reading
+
+- Martin Fowler — [Continuous Integration](https://martinfowler.com/articles/continuousIntegration.html)
+- GitHub Actions — [workflow syntax](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions) and [matrices](https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs)
+- *Accelerate* (Forsgren, Humble, Kim) — the research behind delivery performance
+- The Academy's own pipeline — `academy/.github/workflows/ci.yml` in this repository
+
+<Progress />

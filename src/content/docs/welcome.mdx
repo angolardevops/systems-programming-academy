@@ -1,0 +1,59 @@
+---
+title: Welcome
+description: What this Academy is, who it is for, and the standards every lesson is held to.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This Academy exists to teach **software engineering**, not just programming
+languages. Syntax is the easy part and it is well covered elsewhere. What is
+rarely taught well — and what separates a coder from an engineer — is how to
+**design systems, reason about trade-offs, test rigorously, and ship software
+that survives production**.
+
+We do that through three languages, chosen because their design philosophies
+disagree in instructive ways:
+
+- **Python** optimises for the programmer's time and clarity.
+- **Go** optimises for teams and operational simplicity.
+- **Rust** optimises for correctness and control without a garbage collector.
+
+Seeing the *same* problem solved in all three teaches you what each design
+choice actually costs.
+
+## Who this is for
+
+- Beginners who want to learn to program **the way it is done in industry** from day one.
+- Working engineers who know one language and want to think across paradigms.
+- Universities and companies looking for a rigorous, freely reusable curriculum.
+
+<Aside type="tip" title="You do not need to know all three languages">
+  Each lesson is self-contained and states its prerequisites. You can follow a
+  single language track top-to-bottom, or read comparatively.
+</Aside>
+
+## The standards every lesson is held to
+
+1. **Everything executes.** No pseudo-code. Companion code lives under
+   [`examples/`](https://github.com/angolardevops) and is compiled and tested in CI.
+2. **Everything is tested.** Each lesson ships with runnable tests; we show you the
+   command and the expected output.
+3. **Benchmarks are real.** Performance claims come with a binary you can run.
+4. **Mistakes are first-class.** Every lesson has a *Common mistakes* section showing
+   the actual compiler/runtime error and the fix.
+5. **Interview-ready.** Each lesson ends with interview questions and a challenge.
+
+## How to read a lesson
+
+Every Foundations lesson follows the same rhythm:
+
+- **Theory** — the mental model, with a diagram.
+- **Examples** — small, runnable, explained line by line.
+- **Common mistakes & debugging** — real errors and how to read them.
+- **Exercises** — with complete solutions.
+- **Performance** — measured, not asserted.
+- **Best practices vs anti-patterns** — side by side.
+- **Interview questions & challenge** — to test real understanding.
+
+Ready? Continue to [How to use this Academy](/systems-programming-academy/how-to-use/), or jump straight into
+[Rust: Ownership & the Borrow Checker](/systems-programming-academy/part-1-foundations/rust/ownership/).

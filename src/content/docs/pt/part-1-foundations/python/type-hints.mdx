@@ -1,0 +1,393 @@
+---
+title: "Python: Type Hints"
+description: O Python é dinâmico, mas os type hints deixam as ferramentas apanhar bugs antes de correr. Anotações, Optional/Union com a sintaxe |, generics e dataclasses — com um módulo testado e a armadilha do default mutável explicada.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["python"]} />
+
+O Python é dinamicamente tipado — as variáveis não têm tipo declarado e o
+interpretador nada verifica sobre elas até runtime. Os **type hints** (introduzidos
+na PEP 484) acrescentam anotações opcionais que um verificador estático como o
+`mypy` ou o `pyright`, e o seu editor, leem para apanhar classes inteiras de bugs
+*antes* de correr o código. Crucialmente, os hints **não são impostos em runtime**:
+são um contrato para ferramentas e leitores, não uma camisa de forças. Bem usados,
+tornam grandes bases de código Python navegáveis e refatoráveis. Esta lição cobre o
+essencial com a sintaxe moderna do 3.10+.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve conhecer funções Python, `class`, e os básicos do
+  [modelo de dados](/systems-programming-academy/pt/part-1-foundations/python/data-model/). O `dataclass`
+  assenta em `__init__`/`__repr__`.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/py-typing/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` verde — 17 testes incl. doctests — `ruff` limpo). Cada bloco
+é **completo**.
+
+## Anotar funções
+
+Um hint vai depois de cada parâmetro (`name: str`) e depois de `->` para o tipo de
+retorno. O interpretador ignora-os; um verificador usa-os.
+
+```python title="main.py — completo, executável"
+def greet(name: str, times: int = 1) -> str:
+    return " ".join([f"Hello, {name}!"] * times)
+
+
+print(greet("Ada"))          # Hello, Ada!
+print(greet("Go", times=2))  # Hello, Go! Hello, Go!
+```
+
+Saída:
+
+```text
+Hello, Ada!
+Hello, Go! Hello, Go!
+```
+
+<Mermaid title="Os hints alimentam o verificador, não o runtime" code={`flowchart LR
+  S["código anotado"] --> C["mypy / pyright / editor"]
+  C --> E["erros apanhados antes de correr"]
+  S --> R["runtime CPython: ignora os hints"]`} />
+
+## Coleções, `Optional` e `Union`
+
+Desde o Python 3.9 anota os generics embutidos diretamente: `list[int]`,
+`dict[str, float]`, `tuple[str, float]`. Desde o 3.10, "isto ou `None`" escreve-se
+`int | None` (um *Optional*), e "qualquer um dos tipos" é `A | B` (uma *Union*).
+
+```python title="main.py — completo, executável"
+def first(items: list[int]) -> int | None:
+    # O tipo de retorno diz: quem chama tem de tratar o caso vazio.
+    if not items:
+        return None
+    return items[0]
+
+
+def total_price(prices: dict[str, float]) -> float:
+    return sum(prices.values(), 0.0)  # o início 0.0 mantém o resultado float
+
+
+print(first([10, 20]))                    # 10
+print(first([]))                          # None
+print(total_price({"a": 1.5, "b": 2.5}))  # 4.0
+```
+
+Saída:
+
+```text
+10
+None
+4.0
+```
+
+<Aside type="tip" title="Optional documenta o caso None">
+  `int | None` (equivalente a `Optional[int]`) é uma promessa de que o valor pode
+  estar ausente. Um verificador vai então assinalar `first(xs) + 1` a menos que
+  primeiro o estreite com `if (x := first(xs)) is not None:`. Esse empurrão — tratar
+  o `None` — evita uma enorme parcela dos bugs reais de Python.
+</Aside>
+
+## Dataclasses: anotações que constroem a classe
+
+O `@dataclass` lê os seus campos anotados e gera `__init__`, `__repr__` e `__eq__`
+por si. Acrescente `frozen=True` e também torna as instâncias imutáveis e hasháveis.
+
+```python title="main.py — completo, executável"
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Point:
+    x: float
+    y: float
+
+
+p = Point(1, 2)
+print(p)                 # Point(x=1, y=2)   (__repr__ gerado)
+print(p == Point(1, 2))  # True              (__eq__ gerado)
+print({p})               # {Point(x=1, y=2)} (frozen => hashável)
+```
+
+Saída:
+
+```text
+Point(x=1, y=2)
+True
+{Point(x=1, y=2)}
+```
+
+## A armadilha do default mutável
+
+Um argumento por defeito (ou campo de dataclass) que é um objeto mutável como `[]`
+é criado **uma vez** e partilhado entre chamadas — um bug clássico de Python. O
+`dataclass` até recusa um default mutável nu; use `field(default_factory=list)`.
+
+```python title="main.py — completo, executável"
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Cart:
+    # ERRADO: `items: list = []` partilharia uma lista entre todos os carts.
+    items: list[tuple[str, float]] = field(default_factory=list)
+
+    def add(self, name: str, price: float) -> None:
+        self.items.append((name, price))
+
+    def total(self) -> float:
+        return sum((price for _, price in self.items), 0.0)  # início 0.0 => float
+
+
+a, b = Cart(), Cart()
+a.add("apple", 1.5)
+print(a.total())  # 1.5
+print(b.total())  # 0.0   (b tem a sua própria lista — não partilhada)
+```
+
+Saída:
+
+```text
+1.5
+0.0
+```
+
+<Quiz
+  question={'Os type hints do Python são impostos quando o programa corre?'}
+  options={[
+    { text: "Sim — passar o tipo errado levanta um TypeError em runtime.", },
+    { text: "Não — o interpretador ignora-os; são para verificadores estáticos, editores e leitores.", correct: true },
+    { text: "Só dentro de dataclasses.", },
+    { text: "Só se importar typing.", },
+  ]}
+  explanation="O CPython não verifica os type hints em runtime — pode passar uma str onde está anotado um int e corre (e talvez se porte mal). Os hints existem para ferramentas: mypy/pyright verificam-nos estaticamente, os editores usam-nos para completação e avisos, e os leitores usam-nos como documentação. Algumas bibliotecas (como o pydantic) aderem a validação em runtime, mas a linguagem em si não."
+/>
+
+## Generics com type variables
+
+Uma type variable deixa uma função trabalhar para qualquer tipo enquanto o
+**preserva** — o tipo do elemento flui do argumento para o retorno. O Python 3.12
+tem uma sintaxe `[T]` limpa.
+
+```python title="main.py — completo, executável"
+def last[T](items: list[T]) -> T | None:
+    return items[-1] if items else None
+
+
+print(last([1, 2, 3]))  # 3    (T = int)
+print(last(["a", "b"]))  # b    (T = str)
+print(last([]))         # None
+```
+
+Saída:
+
+```text
+3
+b
+None
+```
+
+Um verificador sabe que `last([1, 2, 3])` é um `int | None`, não apenas "algum
+objeto" — por isso os erros de tipo a jusante são apanhados.
+
+## Erros comuns & depuração
+
+### 1. O argumento por defeito mutável
+
+```python
+def append_to(item, target=[]):  # ✗ target é criado uma vez, partilhado para sempre
+    target.append(item)
+    return target
+```
+
+Chamar `append_to(1)` e depois `append_to(2)` devolve `[1, 2]`, não `[2]`.
+**Correção:** default a `None` e criar dentro: `def append_to(item, target=None):
+target = [] if target is None else target`.
+
+### 2. Anotar mas nunca correr um verificador
+
+Os hints sozinhos não apanham nada — tem de correr o `mypy` ou o `pyright` (ou
+ativar a verificação de tipos do editor). Acrescente `mypy .` ao CI para as
+anotações serem mesmo verificadas, senão desviam-se do código em silêncio.
+
+### 3. Esquecer de tratar um `Optional`
+
+```python
+name = first(users)  # tipo: int | None
+print(name + 1)      # um verificador assinala: name pode ser None
+```
+
+**Correção:** estreite primeiro — `if name is not None:` — para o verificador (e a
+sua lógica) tratarem o caso vazio.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Anotar uma função.">
+
+Acrescente type hints completos a `def average(nums): return sum(nums) /
+len(nums)`, incluindo um tipo de retorno sensato. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+def average(nums: list[float]) -> float:
+    return sum(nums) / len(nums)
+
+
+print(average([1.0, 2.0, 3.0]))  # 2.0
+```
+
+Se o caso vazio importar, o retorno podia ser `float | None` com um guard; aqui
+assumimos uma lista não-vazia conforme a intenção da anotação.
+
+</Interview>
+
+<Interview question="Exercício 2 — Uma dataclass com uma lista por defeito.">
+
+Escreva uma dataclass `Team` com `name: str` e `members: list[str]` por defeito
+vazia, e um método para adicionar um membro. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Team:
+    name: str
+    members: list[str] = field(default_factory=list)
+
+    def add(self, person: str) -> None:
+        self.members.append(person)
+
+
+t = Team("Platform")
+t.add("Ada")
+t.add("Grace")
+print(t)  # Team(name='Platform', members=['Ada', 'Grace'])
+```
+
+`field(default_factory=list)` dá a cada `Team` a sua própria lista.
+
+</Interview>
+
+<Interview question="Exercício 3 — Uma pesquisa que devolve Optional.">
+
+Escreva `find(users: dict[int, str], uid: int) -> str | None` que devolve o nome ou
+None. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+def find(users: dict[int, str], uid: int) -> str | None:
+    return users.get(uid)
+
+
+db = {1: "Ada", 2: "Grace"}
+print(find(db, 1))   # Ada
+print(find(db, 99))  # None
+```
+
+O `dict.get` já devolve `None` para uma chave em falta, batendo exatamente com o
+tipo de retorno `str | None`.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Anotar assinaturas de funções públicas | Módulos totalmente sem tipos que as ferramentas não verificam |
+| Correr `mypy`/`pyright` no CI | Escrever hints mas nunca os verificar |
+| `int \| None` e estreitar antes de usar | Ignorar um `Optional` e bater em `None` em runtime |
+| `field(default_factory=list)` para defaults mutáveis | `items: list = []` (partilhado entre instâncias) |
+| `@dataclass` para portadores de dados | `__init__`/`__repr__`/`__eq__` escritos à mão |
+| Type variables para preservar tipos de elemento | `Any` em todo o lado, deitando fora toda a verificação |
+
+## Mini-projeto
+
+**Tipe um pequeno módulo de inventário.** Modele `Product` (uma dataclass frozen com
+`sku: str`, `price: float`) e um `Inventory` (uma dataclass a envolver `dict[str,
+Product]`) com `add(product)`, `get(sku) -> Product | None`, e `total_value() ->
+float`. Acrescente um helper genérico `pluck[T](items: list[T], n: int) ->
+list[T]`. Depois corra `mypy` (acrescente-o ao job de CI) e corrija cada erro que
+reportar.
+
+Requisitos: anotações completas, `python3 -m unittest` verde com doctests, `ruff`
+limpo, e `mypy` (se disponível) sem erros.
+
+## Perguntas de entrevista
+
+<Interview question="Os type hints do Python são verificados em runtime?">
+
+Não — o CPython ignora-os durante a execução; pode violar um hint e o programa corre
+na mesma. Os hints são consumidos por analisadores estáticos (`mypy`, `pyright`),
+editores (para completação e avisos inline), e leitores humanos. São guardados em
+`__annotations__` e algumas bibliotecas (pydantic, FastAPI, dataclasses) leem-nos
+para acrescentar comportamento em runtime, mas a linguagem em si não impõe nada. É
+por isso que correr um verificador no CI importa.
+
+</Interview>
+
+<Interview question="O que é Optional e como se escreve em Python moderno?">
+
+`Optional[X]` significa "um `X` ou `None`". Desde o Python 3.10 a escrita idiomática
+é `X | None`. Documenta que um valor pode estar ausente e leva os verificadores
+estáticos a exigir que o estreite (p. ex. `if v is not None:`) antes de o usar como
+`X`. É o equivalente ao nível de tipos do `Option` do Rust ou do comma-ok/`nil` do
+Go — o verificador obriga-o a tratar o caso em falta.
+
+</Interview>
+
+<Interview question="Porque é perigoso um argumento por defeito mutável?">
+
+Um argumento por defeito é avaliado **uma vez**, quando a função é definida, e o
+objeto resultante é reutilizado em cada chamada que não o sobrepõe. Por isso um `def
+f(x, acc=[])` partilha uma lista entre todas as chamadas — as mutações acumulam-se e
+vazam entre chamadores, um bug subtil e dependente da ordem. A correção é usar `None`
+por defeito e criar um objeto novo dentro da função (`acc = [] if acc is None else
+acc`); para dataclasses, use `field(default_factory=list)`.
+
+</Interview>
+
+<Interview question="O que gera o @dataclass, e quando usaria frozen=True?">
+
+O `@dataclass` lê os campos anotados da classe e gera `__init__`, `__repr__` e
+`__eq__` (e opcionalmente métodos de ordenação). Remove o boilerplate de classes
+simples de dados. O `frozen=True` adicionalmente torna as instâncias imutáveis
+(atribuição levanta `FrozenInstanceError`) e hasháveis (gera `__hash__`), que é o que
+quer para value objects usados como chaves de dict ou membros de set, ou onde a
+imutabilidade partilhada evita bugs.
+
+</Interview>
+
+## Desafio
+
+Pegue num módulo sem tipos que tenha e acrescente hints às suas funções públicas,
+depois corra `mypy --strict` e corrija tudo o que assinalar. Vai normalmente
+descobrir pelo menos um bug real — uma função que pode devolver `None` num caminho
+que quem chama nunca tratou, ou uma variável que é secretamente dois tipos
+diferentes. Depois ligue o `mypy` ao CI para as anotações continuarem honestas. O
+valor dos type hints realiza-se inteiramente no momento em que um verificador corre;
+hints não verificados são só comentários.
+
+## Referências & leitura adicional
+
+- Docs do Python — [`typing`](https://docs.python.org/3/library/typing.html) e o [typing HOWTO](https://docs.python.org/3/howto/annotations.html)
+- mypy — [documentação](https://mypy.readthedocs.io/) e [cheat sheet](https://mypy.readthedocs.io/en/stable/cheat_sheet_py3.html)
+- Docs do Python — [`dataclasses`](https://docs.python.org/3/library/dataclasses.html)
+- PEP 604 — [sintaxe de union `X | Y`](https://peps.python.org/pep-0604/) · PEP 695 — [sintaxe de parâmetros de tipo](https://peps.python.org/pep-0695/)
+
+<Progress />

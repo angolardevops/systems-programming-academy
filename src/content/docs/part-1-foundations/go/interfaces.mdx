@@ -1,0 +1,500 @@
+---
+title: "Go: Structs, Methods & Interfaces"
+description: Go's type system in one lesson — structs, value vs pointer receivers, implicitly-satisfied interfaces, and composition by embedding. The Go way to model behaviour, with complete tested examples.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["go"]} />
+
+Go has no classes, no inheritance, and no `implements` keyword — and yet it models
+behaviour beautifully. The trick is three small ideas working together:
+**structs** hold data, **methods** attach behaviour, and **interfaces** describe
+behaviour that any type can satisfy *implicitly*, just by having the right
+methods. In Rob Pike's spirit — "clear is better than clever" — this is a type
+system you can hold in your head. This lesson makes it concrete.
+
+<Aside type="note" title="Prerequisites">
+  You should be able to read basic Go: `func`, `var`, `for`, `package`, and how to
+  run `go test`. Everything about methods and interfaces is built up from scratch.
+</Aside>
+
+All code is from the tested module
+[`examples/go-interfaces/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` green, `go vet` clean, `gofmt`-formatted). Every snippet is
+**complete** — a runnable `package main`, or a whole declaration from the module.
+
+## Structs and methods
+
+A **struct** groups named fields. A **method** is a function with a *receiver* —
+the value it is attached to, written before the name.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Rectangle struct {
+	Width, Height float64
+}
+
+// Method with a value receiver (r Rectangle): it reads fields, doesn't mutate.
+func (r Rectangle) Area() float64 {
+	return r.Width * r.Height
+}
+
+func main() {
+	r := Rectangle{Width: 3, Height: 4}
+	fmt.Println("area:", r.Area()) // area: 12
+}
+```
+
+Output:
+
+```text
+area: 12
+```
+
+## Value vs pointer receivers
+
+If a method needs to **modify** the receiver, it must take a *pointer* receiver
+(`*Counter`); a value receiver would mutate a copy and lose the change.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Counter struct {
+	n int
+}
+
+// Pointer receiver: mutates the original.
+func (c *Counter) Inc() { c.n++ }
+
+// Value receiver: reads only.
+func (c Counter) Value() int { return c.n }
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	c.Inc()
+	fmt.Println("count:", c.Value()) // count: 3
+}
+```
+
+Output:
+
+```text
+count: 3
+```
+
+<Aside type="tip" title="Which receiver should I use?">
+  Use a **pointer receiver** when the method mutates the receiver, or when the
+  struct is large (to avoid copying). Use a **value receiver** for small,
+  immutable-by-nature types. Be consistent within a type: if one method needs a
+  pointer receiver, give them all pointer receivers.
+</Aside>
+
+## Interfaces: satisfied implicitly
+
+An **interface** lists methods. Any type that has those methods satisfies the
+interface — **automatically**, with no declaration. This *structural* typing is
+the heart of Go's flexibility.
+
+```go title="shapes.go"
+type Shape interface {
+	Area() float64
+	Perimeter() float64
+}
+```
+
+Because `Rectangle` and `Circle` both have `Area()` and `Perimeter()`, they are
+`Shape`s — nobody had to say so.
+
+<Mermaid title="Implicit satisfaction: no 'implements', just matching methods" code={`flowchart LR
+  R["Rectangle {Area, Perimeter}"] -->|automatically satisfies| S["interface Shape"]
+  C["Circle {Area, Perimeter}"] -->|automatically satisfies| S
+  S --> F["func TotalArea(shapes []Shape) float64"]`} />
+
+A complete program that mixes two concrete types behind one interface:
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+type Shape interface {
+	Area() float64
+	Perimeter() float64
+}
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64      { return r.Width * r.Height }
+func (r Rectangle) Perimeter() float64 { return 2 * (r.Width + r.Height) }
+
+type Circle struct{ Radius float64 }
+
+func (c Circle) Area() float64      { return math.Pi * c.Radius * c.Radius }
+func (c Circle) Perimeter() float64 { return 2 * math.Pi * c.Radius }
+
+func TotalArea(shapes []Shape) float64 {
+	var total float64
+	for _, s := range shapes {
+		total += s.Area()
+	}
+	return total
+}
+
+func main() {
+	shapes := []Shape{Rectangle{2, 3}, Circle{Radius: 1}}
+	fmt.Printf("total area: %.4f\n", TotalArea(shapes)) // total area: 9.1416
+}
+```
+
+Output:
+
+```text
+total area: 9.1416
+```
+
+<Quiz
+  question={'In Go, how does a type declare that it satisfies an interface?'}
+  options={[
+    { text: "With an `implements Shape` clause on the type.", },
+    { text: "It does not declare anything — having the required methods is enough (implicit satisfaction).", correct: true },
+    { text: "By embedding the interface as a field.", },
+    { text: "By registering it at program start.", },
+  ]}
+  explanation="Go uses structural, implicit interface satisfaction. If a type has all the methods an interface lists, it satisfies that interface automatically — there is no `implements` keyword and no registration. This lets you define an interface *after* the types, even for types you don't own."
+/>
+
+## Composition by embedding
+
+Go replaces inheritance with **embedding**: put a type inside a struct without a
+field name, and the outer type gains its fields and methods. Embed an interface
+and the struct satisfies it.
+
+```go title="shapes.go"
+// Labeled has-a Shape (embedded) and gains its methods, so Labeled is a Shape.
+type Labeled struct {
+	Name string
+	Shape
+}
+
+func (l Labeled) Describe() string {
+	return fmt.Sprintf("%s: area=%.2f perimeter=%.2f", l.Name, l.Area(), l.Perimeter())
+}
+```
+
+A complete program:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64 { return r.Width * r.Height }
+
+// Labeled embeds Shape; l.Area() forwards to the embedded value automatically.
+type Labeled struct {
+	Name string
+	Shape
+}
+
+func main() {
+	l := Labeled{Name: "unit square", Shape: Rectangle{1, 1}}
+	fmt.Printf("%s has area %.0f\n", l.Name, l.Area()) // unit square has area 1
+}
+```
+
+Output:
+
+```text
+unit square has area 1
+```
+
+## Recovering the concrete type: type switch
+
+Sometimes you need the concrete type back out of an interface. A **type switch**
+does it safely:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64 { return r.Width * r.Height }
+
+type Circle struct{ Radius float64 }
+
+func (c Circle) Area() float64 { return 3.14159 * c.Radius * c.Radius }
+
+func kindOf(s Shape) string {
+	switch s.(type) {
+	case Rectangle:
+		return "rectangle"
+	case Circle:
+		return "circle"
+	default:
+		return "unknown"
+	}
+}
+
+func main() {
+	fmt.Println(kindOf(Rectangle{1, 1})) // rectangle
+	fmt.Println(kindOf(Circle{Radius: 1})) // circle
+}
+```
+
+Output:
+
+```text
+rectangle
+circle
+```
+
+<Aside type="tip" title="Keep interfaces small">
+  Go's proverb is "the bigger the interface, the weaker the abstraction". The
+  standard library's most-used interfaces have **one method** — `io.Reader`,
+  `io.Writer`, `fmt.Stringer`, `error`. Prefer many small interfaces over one
+  large one, and accept interfaces, return concrete types.
+</Aside>
+
+## Common mistakes & debugging
+
+### 1. The `nil` interface gotcha
+
+An interface holds a (type, value) pair. An interface wrapping a `nil` *pointer*
+is **not** a `nil` interface — a classic Go trap:
+
+```go
+type MyErr struct{}
+
+func (*MyErr) Error() string { return "boom" }
+
+func do() error {
+	var p *MyErr = nil
+	return p // returns a non-nil interface wrapping a nil *MyErr!
+}
+
+// if do() != nil { ... } // this is TRUE, surprising many
+```
+
+**Fix:** return a literal `nil` (`return nil`) for the no-error case, not a typed
+nil pointer. Only wrap a concrete value when there really is one.
+
+### 2. Calling a pointer-receiver method on an unaddressable value
+
+```go
+// If Inc has receiver *Counter, this fails because a map element isn't addressable:
+// m := map[string]Counter{"a": {}}
+// m["a"].Inc() // ✗ cannot call pointer method on m["a"]
+```
+
+```text
+cannot call pointer method Inc on Counter
+```
+
+**Fix:** store `*Counter` in the map, or pull the value out, mutate, and put it
+back. Pointer-receiver methods need an addressable receiver.
+
+### 3. A large interface nobody can implement
+
+Declaring a 10-method interface forces every implementer to provide all 10.
+**Fix:** split it. Small interfaces compose; large ones ossify.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a Triangle that satisfies Shape.">
+
+Given the `Shape` interface with `Area()`, add a `Triangle{Base, Height float64}`
+and print its area through a `Shape` variable. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Triangle struct{ Base, Height float64 }
+
+func (t Triangle) Area() float64 { return 0.5 * t.Base * t.Height }
+
+func main() {
+	var s Shape = Triangle{Base: 6, Height: 4}
+	fmt.Println("area:", s.Area()) // area: 12
+}
+```
+
+`Triangle` never mentions `Shape`; having `Area()` is all it takes.
+
+</Interview>
+
+<Interview question="Exercise 2 — A pointer receiver that resets.">
+
+Add a `Reset()` method to `Counter` that sets the count back to zero, and show it
+works. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c *Counter) Inc()      { c.n++ }
+func (c *Counter) Reset()    { c.n = 0 }
+func (c Counter) Value() int { return c.n }
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	fmt.Println(c.Value()) // 2
+	c.Reset()
+	fmt.Println(c.Value()) // 0
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Implement fmt.Stringer.">
+
+Make a `Point{X, Y int}` print as `(3, 4)` by implementing `String() string`.
+Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+type Point struct{ X, Y int }
+
+// Implementing String() makes Point satisfy fmt.Stringer, so %v/Println use it.
+func (p Point) String() string { return fmt.Sprintf("(%d, %d)", p.X, p.Y) }
+
+func main() {
+	p := Point{X: 3, Y: 4}
+	fmt.Println(p) // (3, 4)
+}
+```
+
+`fmt.Stringer` is a one-method interface (`String() string`); satisfying it
+changes how `fmt` prints your type.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Small interfaces (1–3 methods) | A giant interface every type must fully implement |
+| Accept interfaces, return concrete types | Returning interfaces "for flexibility" everywhere |
+| Define interfaces where they're **used**, not where types live | Bundling all interfaces in one package up front |
+| Embedding for composition | Reaching for inheritance-style hierarchies |
+| Consistent receiver types per type | Mixing value and pointer receivers on one type |
+| `return nil` for no-error | Returning a typed nil pointer as an interface |
+
+## Mini-project
+
+**Build a `Stringer`-driven report.** Define an `Account` struct with a balance
+and methods `Deposit`/`Withdraw` (pointer receivers) that return an `error` on a
+bad amount. Give it a `String()` method for pretty printing, and an interface
+`Reporter { Report() string }` that `Account` satisfies. Write a function that
+takes `[]Reporter` and prints each report.
+
+Requirements: uses a pointer receiver for mutation, satisfies two interfaces
+implicitly, table-driven tests covering deposit/withdraw/errors, and `go vet`
+clean.
+
+## Interview questions
+
+<Interview question="How do interfaces work in Go compared to Java?">
+
+Java interfaces are satisfied *explicitly* — a class must declare `implements
+Foo`. Go interfaces are satisfied *implicitly and structurally* — any type with
+the required method set satisfies the interface automatically, with no
+declaration. This decouples the interface from its implementers: you can define an
+interface for a type you don't own, and add interfaces after the fact. Go also has
+no classes or inheritance; it uses composition (embedding) instead.
+
+</Interview>
+
+<Interview question="When do you use a pointer receiver vs a value receiver?">
+
+Use a pointer receiver when the method must mutate the receiver, when the struct
+is large enough that copying is wasteful, or when the type contains a mutex or
+other non-copyable field. Use a value receiver for small, naturally immutable
+values. The important rule is consistency: if any method of a type needs a pointer
+receiver, use pointer receivers for all of them, so the method set is uniform.
+
+</Interview>
+
+<Interview question="What is embedding and how does it differ from inheritance?">
+
+Embedding places a type inside a struct without a field name; the outer type
+*promotes* the embedded type's fields and methods, so it can use them directly and
+satisfies any interface the embedded type does. Unlike inheritance, there is no
+subtype relationship, no method overriding through a base-class vtable, and no
+"is-a" hierarchy — it is composition. You can embed multiple types, and you can
+still call the embedded value's methods explicitly.
+
+</Interview>
+
+<Interview question="Why can an interface holding a nil pointer be non-nil?">
+
+An interface value is a (type, value) pair and is `nil` only when *both* are nil.
+If you assign a typed nil pointer (e.g. `(*MyErr)(nil)`) to an interface, the
+type part is set, so the interface is non-nil even though the pointer inside is
+nil. This bites people who return a typed nil as an `error`. The fix is to return
+an untyped `nil` when there is genuinely no value.
+
+</Interview>
+
+## Challenge
+
+Take a small program that uses a `switch` on a "kind" field (a shape kind, an
+event type) and refactor it to an interface with one method per behaviour, one
+struct per kind. Notice what improves — adding a new kind no longer edits every
+switch — and what you lose — you can't see all kinds in one place. Then find one
+place where a **one-method** interface from the standard library (`io.Writer`,
+`sort.Interface`) lets your code plug into existing machinery for free. That
+"plug into the stdlib" moment is when Go interfaces click.
+
+## References & further reading
+
+- *A Tour of Go* — [methods and interfaces](https://go.dev/tour/methods/1)
+- *Effective Go* — [interfaces and embedding](https://go.dev/doc/effective_go#interfaces)
+- *Go by Example* — [interfaces](https://gobyexample.com/interfaces)
+- Rob Pike — [Go Proverbs](https://go-proverbs.github.io/) ("the bigger the interface, the weaker the abstraction")
+
+<Progress />

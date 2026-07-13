@@ -1,0 +1,531 @@
+---
+title: "Arquitetura Clean e Hexagonal"
+description: Domínio, casos de uso, adaptadores, raiz de composição — a Regra da Dependência tornada concreta com um task tracker em camadas idênticas em Rust, Go e Python, incluindo um teste de arquitetura executável que falha se uma camada importar para fora.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+Cada lição da Parte 2 até aqui usou silenciosamente a mesma arquitetura: portas
+definidas pelo código que precisa delas, adaptadores injetados de fora, lógica de
+negócio que nunca nomeia uma base de dados. Esta lição torna essa arquitetura
+explícita. A **Clean Architecture** (Robert C. Martin) e a **Arquitetura
+Hexagonal / Portas e Adaptadores** (Alistair Cockburn) são duas formulações de
+uma só ideia — camadas concêntricas governadas por uma única lei, a **Regra da
+Dependência**: *as dependências de código-fonte apontam apenas para dentro.*
+Construímos o mesmo task tracker, em camadas idênticas, nas três linguagens — e
+em Python vamos um passo além: um **teste de arquitetura executável** que falha o
+build se alguém violar a regra.
+
+<Aside type="note" title="Pré-requisitos">
+  Isto sintetiza todo o arco da Parte 2:
+  [Repository & DI](/systems-programming-academy/pt/part-2-engineering/repository-pattern/)
+  (portas/adaptadores), [a Pirâmide de Testes](/systems-programming-academy/pt/part-2-engineering/testing-pyramid/)
+  (testar camada-por-nível). Se essas fizeram clique, esta é o mapa onde vivem.
+</Aside>
+
+Todo o código vem de três módulos testados —
+[`examples/part2-hexagonal-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um `fmt`/`lint` limpo com testes em cada camada.
+
+## As camadas e a única regra
+
+<Mermaid title="A Regra da Dependência: todas as dependências apontam para dentro" code={`flowchart TD
+  C["Raiz de composição (main): liga tudo — conhece todas as camadas"] --> A["Adaptadores: InMemoryRepo, PostgresRepo, HTTP, CLI"]
+  A --> U["Aplicação: casos de uso + PORTAS (TaskRepo definida aqui)"]
+  U --> D["Domínio: entidades + regras de negócio — não depende de NADA"]`} />
+
+- **Domínio** (mais interno): entidades e os seus invariantes. Puro. Não depende
+  de nada — nem do framework web, nem da base de dados, nem sequer da camada de
+  aplicação.
+- **Aplicação**: casos de uso a orquestrar o domínio, mais as **portas**
+  (interfaces) de que precisam do mundo exterior — definidas *aqui*, na camada
+  que as usa, não ao lado da base de dados.
+- **Adaptadores**: implementações concretas das portas (memória, Postgres,
+  handlers HTTP, CLI). Dependem para dentro; nada interno sabe que existem.
+- **Raiz de composição**: o único sítio (normalmente o `main`) que conhece todas
+  as camadas e liga adaptadores aos casos de uso.
+
+A recompensa é tudo o que a Parte 2 demonstrou aos poucos: trocar o
+armazenamento sem tocar na lógica, testar cada camada no seu nível da pirâmide,
+e manter as regras de negócio legíveis num só lugar sem dependências.
+
+## O domínio: regras com zero infraestrutura
+
+As regras de negócio vivem na entidade, testáveis em microssegundos:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod domain)"
+pub struct Task {
+    pub id: u32,
+    pub title: String,
+    pub done: bool,
+}
+
+impl Task {
+    /// Regra de negócio: uma tarefa tem de ter título não-vazio.
+    pub fn new(id: u32, title: &str) -> Result<Task, DomainError> {
+        if title.trim().is_empty() {
+            return Err(DomainError::EmptyTitle);
+        }
+        Ok(Task { id, title: title.trim().to_string(), done: false })
+    }
+
+    /// Regra de negócio: completar duas vezes é um erro, não um no-op.
+    pub fn complete(&mut self) -> Result<(), DomainError> {
+        if self.done {
+            return Err(DomainError::AlreadyDone);
+        }
+        self.done = true;
+        Ok(())
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="domain/task.go"
+// O package domain não importa NADA das camadas exteriores.
+type Task struct {
+	ID    int
+	Title string
+	Done  bool
+}
+
+// NewTask impõe a regra do título na construção.
+func NewTask(id int, title string) (Task, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return Task{}, ErrEmptyTitle
+	}
+	return Task{ID: id, Title: title}, nil
+}
+
+// Complete impõe a regra de não-completar-duas-vezes.
+func (t *Task) Complete() error {
+	if t.Done {
+		return ErrAlreadyDone
+	}
+	t.Done = true
+	return nil
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="domain.py"
+@dataclass
+class Task:
+    """A entidade; os seus invariantes vivem aqui, junto aos dados."""
+
+    id: int
+    title: str
+    done: bool = False
+
+    @classmethod
+    def new(cls, task_id: int, title: str) -> Task:
+        title = title.strip()
+        if not title:
+            raise EmptyTitleError("a task needs a title")
+        return cls(id=task_id, title=title)
+
+    def complete(self) -> None:
+        if self.done:
+            raise AlreadyDoneError(f"task {self.id} already done")
+        self.done = True
+```
+</TabItem>
+</Tabs>
+
+## A camada de aplicação: os casos de uso são donos das portas
+
+O detalhe crucial e muitas vezes falhado: **a porta pertence à camada que a
+usa.** A `TaskRepo` é declarada na camada de aplicação, descrevendo o que os
+casos de uso precisam — o adaptador da base de dados conforma-se então a *ela*,
+invertendo a dependência:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod app)"
+use crate::domain::{DomainError, Task}; // import para dentro — a única direção
+
+/// Porta: definida AQUI, na camada que a usa.
+pub trait TaskRepo {
+    fn next_id(&self) -> u32;
+    fn save(&mut self, task: Task);
+    fn get(&self, id: u32) -> Option<Task>;
+}
+
+pub struct TaskService<R: TaskRepo> { repo: R }
+
+impl<R: TaskRepo> TaskService<R> {
+    pub fn add(&mut self, title: &str) -> Result<u32, AppError> {
+        let id = self.repo.next_id();
+        let task = Task::new(id, title).map_err(AppError::Domain)?;
+        self.repo.save(task);
+        Ok(id)
+    }
+
+    pub fn complete(&mut self, id: u32) -> Result<(), AppError> {
+        let mut task = self.repo.get(id).ok_or(AppError::NotFound(id))?;
+        task.complete().map_err(AppError::Domain)?;
+        self.repo.save(task);
+        Ok(())
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="app/service.go"
+import "academy.example/hexagonal/domain" // import para dentro — a única direção
+
+// TaskRepo é a porta: definida AQUI, na camada que a usa.
+type TaskRepo interface {
+	NextID() int
+	Save(t domain.Task)
+	Get(id int) (domain.Task, bool)
+}
+
+type Service struct{ repo TaskRepo }
+
+func (s *Service) Add(title string) (int, error) {
+	id := s.repo.NextID()
+	task, err := domain.NewTask(id, title)
+	if err != nil {
+		return 0, err
+	}
+	s.repo.Save(task)
+	return id, nil
+}
+```
+
+O Go impõe a regra estruturalmente: se o `domain` importasse o `app` (que
+importa o `domain`), o compilador rejeita o **ciclo de imports**.
+</TabItem>
+<TabItem label="Python">
+```python title="application.py"
+from domain import Task  # import para dentro — a única direção
+
+
+class TaskRepo(Protocol):
+    """A porta: definida AQUI, na camada que a usa."""
+
+    def next_id(self) -> int: ...
+    def save(self, task: Task) -> None: ...
+    def get(self, task_id: int) -> Task | None: ...
+
+
+class TaskService:
+    def __init__(self, repo: TaskRepo) -> None:
+        self._repo = repo
+
+    def add(self, title: str) -> int:
+        task_id = self._repo.next_id()
+        task = Task.new(task_id, title)  # regra do domínio imposta aqui
+        self._repo.save(task)
+        return task_id
+```
+</TabItem>
+</Tabs>
+
+## Adaptadores e a raiz de composição
+
+O adaptador em memória implementa a porta (um de Postgres ficaria ao lado); a
+raiz de composição é o *único* código que toca em todas as camadas:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (mod composition)"
+pub struct App {
+    service: TaskService<InMemoryRepo>,
+}
+
+impl App {
+    pub fn new() -> Self {
+        App { service: TaskService::new(InMemoryRepo::default()) } // a ligação
+    }
+
+    pub fn complete(&mut self, id: u32) -> String {
+        match self.service.complete(id) {
+            Ok(()) => format!("Task #{id} done."),
+            Err(AppError::NotFound(_)) => format!("No task #{id}."),
+            Err(AppError::Domain(DomainError::AlreadyDone)) => {
+                format!("Task #{id} was already done.")
+            }
+            Err(e) => format!("Unexpected error: {e:?}"),
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="hexagonal.go"
+// A raiz de composição: o único sítio que conhece todas as camadas.
+func NewApp() *App {
+	return &App{service: app.NewService(adapters.NewInMemoryRepo())} // a ligação
+}
+
+func (a *App) Complete(id int) string {
+	err := a.service.Complete(id)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("Task #%d done.", id)
+	case errors.Is(err, app.ErrNotFound):
+		return fmt.Sprintf("No task #%d.", id)
+	case errors.Is(err, domain.ErrAlreadyDone):
+		return fmt.Sprintf("Task #%d was already done.", id)
+	default:
+		return fmt.Sprintf("Unexpected error: %v", err)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="main_app.py"
+class App:
+    def __init__(self) -> None:
+        self._service = TaskService(InMemoryRepo())  # a ligação
+
+    def complete(self, task_id: int) -> str:
+        try:
+            self._service.complete(task_id)
+        except NotFoundError:
+            return f"No task #{task_id}."
+        except AlreadyDoneError:
+            return f"Task #{task_id} was already done."
+        return f"Task #{task_id} done."
+```
+</TabItem>
+</Tabs>
+
+## Impor a regra com um teste
+
+Os diagramas apodrecem; os testes não. O módulo Python traz um **teste de
+arquitetura** que analisa os imports de cada camada com `ast` e falha se algum
+apontar para fora:
+
+```python title="test_hexagonal.py"
+class ArchitectureTests(unittest.TestCase):
+    """A Regra da Dependência como verificação executável: se alguém acrescentar
+    `from adapters import ...` ao domain.py, ESTE TESTE FALHA."""
+
+    FORBIDDEN = {
+        "domain.py": {"application", "adapters", "main_app"},
+        "application.py": {"adapters", "main_app"},
+        "adapters.py": {"application", "main_app"},
+    }
+
+    def test_dependencies_point_inward(self) -> None:
+        for filename, forbidden in self.FORBIDDEN.items():
+            with self.subTest(layer=filename):
+                illegal = self.imports_of(filename) & forbidden
+                self.assertEqual(illegal, set(),
+                                 f"{filename} must not import outward: {illegal}")
+```
+
+As outras duas linguagens têm a mesma garantia estruturalmente: o **Go** proíbe
+ciclos de imports de raiz (quando o `app` importa o `domain`, o `domain`
+importar o `app` é erro de compilação), e a árvore de módulos do **Rust** torna
+um `use crate::adapters` para fora dentro do `domain` gritantemente visível em
+review (e impossível entre crates sem declarar a dependência no `Cargo.toml`).
+
+<Quiz
+  question={'Onde deve a porta TaskRepo (interface) ser definida, e porquê?'}
+  options={[
+    { text: "Ao lado do adaptador da base de dados, já que descreve armazenamento.", },
+    { text: "Na camada de aplicação que a usa — para o adaptador depender das necessidades dos casos de uso, invertendo a dependência.", correct: true },
+    { text: "No domínio, já que tudo depende do domínio.", },
+    { text: "Na raiz de composição, que conhece tudo.", },
+  ]}
+  explanation="Definir a porta na camada consumidora é a inversão da ‘inversão de dependência’: a interface exprime o que os casos de uso precisam, e o adaptador de armazenamento tem de se conformar a ela — a dependência de código aponta do adaptador (exterior) para a aplicação (interior). Ponha a interface ao lado da base de dados e a direção inverte-se: a camada de aplicação importaria código de armazenamento, violando a Regra da Dependência."
+/>
+
+## Como as três linguagens se comparam
+
+| Aspeto | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Fronteira de camada | módulos (ou crates) | packages | módulos (ou packages) |
+| Regra imposta por | árvore de módulos / deps de crates | proibição de ciclos de import | o teste de arquitetura |
+| Porta | `trait` no `app` | `interface` no `app` | `Protocol` no `application` |
+| Estilo de ligação | generics (DI estática) | valores de interface | construtor duck-typed |
+| Verificação de pureza do domínio | review + fronteiras de crates | compilador | teste baseado em `ast` |
+
+## Erros comuns & depuração
+
+### 1. Entidades do domínio a importar tipos de framework
+
+No momento em que a `Task` carrega uma classe-base de ORM, uma anotação JSON, ou
+um tipo HTTP, o domínio fica soldado à infraestrutura e os seus testes arrastam
+essa infraestrutura. **Correção:** mantenha as entidades simples; mapeie para
+tipos de framework na fronteira do adaptador.
+
+### 2. Portas definidas ao lado dos adaptadores
+
+Uma interface no package `postgres` que a camada de aplicação importa aponta a
+dependência *para fora* — os mesmos ficheiros, a arquitetura oposta.
+**Correção:** declare a porta na camada que a consome (como os três módulos
+daqui fazem).
+
+### 3. Lógica de negócio a fugir para a raiz de composição ou handlers
+
+Um `if task.done { return "already done" }` dentro de um handler HTTP é uma
+regra que escapou do domínio — agora existe uma vez por interface (HTTP, CLI,
+fila). **Correção:** os handlers traduzem; o domínio decide.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar um caso de uso sem tocar nos adaptadores.">
+
+Adicione um caso de uso `rename(id, new_title)`, reutilizando a regra do título
+do domínio. Que camadas mudam?
+
+**Solução (Python):**
+
+```python
+# application.py — a ÚNICA camada que muda (mais uma reutilização do domínio):
+def rename(self, task_id: int, new_title: str) -> None:
+    task = self._repo.get(task_id)
+    if task is None:
+        raise NotFoundError(f"task {task_id} not found")
+    renamed = Task.new(task.id, new_title)  # reutiliza a regra do título
+    renamed.done = task.done
+    self._repo.save(renamed)
+```
+
+Domínio: inalterado (regra reutilizada). Adaptadores: inalterados (mesma porta).
+Composição: um mapeamento de mensagem. Essa localidade é a arquitetura a
+funcionar.
+
+</Interview>
+
+<Interview question="Exercício 2 — Estender o teste de arquitetura.">
+
+Acrescentou um adaptador `notifications.py`. Estenda o teste de arquitetura para
+as camadas internas não o poderem importar.
+
+**Solução:**
+
+```python
+FORBIDDEN = {
+    "domain.py": {"application", "adapters", "main_app", "notifications"},
+    "application.py": {"adapters", "main_app", "notifications"},
+    "adapters.py": {"application", "main_app"},
+    "notifications.py": {"application", "main_app"},  # adaptadores são pares
+}
+```
+
+Cada novo módulo exterior entra no conjunto proibido de cada camada interna — o
+teste cresce com a base de código.
+
+</Interview>
+
+<Interview question="Exercício 3 — Nomeie a camada.">
+
+Onde pertence cada um: (a) "uma encomenda acima de €10.000 exige aprovação",
+(b) "SELECT * FROM orders WHERE id = $1", (c) "devolver HTTP 404 quando a
+encomenda não existe", (d) "ligar o repo Postgres ao serviço de encomendas"?
+
+**Resposta:** (a) domínio (regra de negócio); (b) adaptador (detalhe de
+armazenamento); (c) adaptador (tradução HTTP de um NotFound da aplicação);
+(d) raiz de composição (ligação).
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Regras nas entidades, num domínio sem dependências | Lógica de negócio em handlers/controllers |
+| Portas declaradas na camada consumidora | Interfaces a viver ao lado do código da base de dados |
+| Uma raiz de composição que liga tudo | Camadas a construir as próprias dependências |
+| Arquitetura imposta por testes/compilador | Arquitetura que só existe num diagrama |
+| Adaptadores traduzem; o domínio decide | Tipos de framework enfiados no núcleo |
+| Começar simples; acrescentar camadas quando pagam | Camadas cargo-cult num script de 200 linhas |
+
+## Mini-projeto
+
+**Re-arquitete a funcionalidade de signup** da
+[lição da Pirâmide de Testes](/systems-programming-academy/pt/part-2-engineering/testing-pyramid/) em
+camadas explícitas numa linguagem: `domain` (value object de email + regras),
+`application` (SignupService + portas `UserRepo`/`Notifier`), `adapters` (ambos
+em memória), e uma raiz de composição. Migre os testes existentes para as suas
+camadas, e — se Python — acrescente o teste de arquitetura. Confirme que a
+pirâmide inteira continua a passar e que o domínio não importa nada.
+
+## Perguntas de entrevista
+
+<Interview question="O que é a Regra da Dependência?">
+
+A lei única da arquitetura Clean/Hexagonal: as dependências de código-fonte só
+podem apontar para dentro — da infraestrutura para a aplicação para o domínio.
+As camadas internas nada sabem das externas: nem nomes, nem tipos, nem imports.
+Os dados podem fluir nos dois sentidos em runtime (um adaptador chama um caso de
+uso, que devolve resultados para fora), mas o conhecimento em *tempo de
+compilação* só aponta para dentro. É o que torna o núcleo testável isoladamente
+e a infraestrutura substituível.
+
+</Interview>
+
+<Interview question="Como se relacionam a Clean Architecture e a Arquitetura Hexagonal?">
+
+São duas formulações da mesma ideia. A Hexagonal (Cockburn, 2005) formula-a como
+um núcleo rodeado de **portas** (interfaces que o núcleo define) e
+**adaptadores** (implementações para tecnologias específicas), sem número de
+camadas inerente. A Clean Architecture (Martin, 2012) generaliza para círculos
+concêntricos — entidades, casos de uso, adaptadores de interface, frameworks —
+governados pela Regra da Dependência. Na prática as equipas misturam-nas: o
+vocabulário portas/adaptadores da hexagonal com a divisão domínio/aplicação da
+Clean, como esta lição faz.
+
+</Interview>
+
+<Interview question="Como se impõem fronteiras arquiteturais mecanicamente?">
+
+Depende das ferramentas da linguagem. Go: ciclos de imports entre packages são
+erros de compilação, por isso violações de camadas muitas vezes nem compilam; o
+review guarda o resto. Rust: divida as camadas em crates e o grafo de
+dependências no `Cargo.toml` é a arquitetura. Python/JS: acrescente testes de
+arquitetura que analisam imports (como o teste `ast` desta lição) ou use
+ferramentas dedicadas (import-linter, dependency-cruiser, ArchUnit para Java).
+O princípio: uma fronteira que o CI não verifica vai erodir.
+
+</Interview>
+
+<Interview question="Quando é esta arquitetura exagero?">
+
+Para scripts pequenos, protótipos, e ferramentas com uma interface e lógica
+trivial — as camadas acrescentam indireção sem nada para proteger. A heurística
+honesta: introduza a costura porta/adaptador quando aparecer a *segunda*
+implementação (um fake de teste conta!) ou a *segunda* interface, e cresça para
+camadas completas à medida que a lógica de domínio passa a merecer isolamento.
+A arquitetura é um meio de gerir a mudança; onde a mudança é barata, a cerimónia
+é desperdício.
+
+</Interview>
+
+## Desafio
+
+Pegue num serviço seu e desenhe o seu grafo de dependências *real* (imports, não
+intenções). Encontre as setas a apontar para fora — código de domínio a importar
+o ORM, handlers a calcular regras de negócio — e conserte **uma**: extraia a
+regra para um objeto de domínio simples, defina a porta onde é consumida, e
+acrescente o teste ou lint que impede a seta de voltar. Repita semanalmente. As
+arquiteturas não se adotam num rewrite; recuperam-se uma dependência invertida
+de cada vez.
+
+## Referências & leitura adicional
+
+- Alistair Cockburn — [Hexagonal Architecture](https://alistair.cockburn.us/hexagonal-architecture/)
+- Robert C. Martin — [The Clean Architecture](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html) e *Clean Architecture* (2017)
+- [import-linter](https://import-linter.readthedocs.io/) (Python) · [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) (JS) — imposição mecânica de fronteiras
+- *Architecture Patterns with Python* (Percival & Gregory) — grátis online, as mesmas ideias em profundidade
+
+<Progress />

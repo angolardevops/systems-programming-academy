@@ -1,0 +1,50 @@
+---
+// Per-lesson "mark complete" control. Persists to localStorage keyed by the
+// page pathname so the reader's progress survives reloads and works offline.
+interface Props {
+  labelTodo?: string;
+  labelDone?: string;
+}
+const { labelTodo = 'Mark lesson complete', labelDone = '✓ Completed' } = Astro.props;
+---
+
+<div class="spa-progress not-content" data-progress>
+  <button type="button" data-todo={labelTodo} data-done={labelDone}>{labelTodo}</button>
+  <span data-progress-summary aria-live="polite"></span>
+</div>
+
+<script>
+  const KEY = 'spa:progress';
+  function load(): Record<string, boolean> {
+    try {
+      return JSON.parse(localStorage.getItem(KEY) || '{}');
+    } catch {
+      return {};
+    }
+  }
+  function initProgress() {
+    document.querySelectorAll<HTMLElement>('[data-progress]').forEach((root) => {
+      const btn = root.querySelector<HTMLButtonElement>('button');
+      const summary = root.querySelector<HTMLElement>('[data-progress-summary]');
+      if (!btn) return;
+      const path = location.pathname;
+      const state = load();
+      const render = () => {
+        const done = !!load()[path];
+        btn.textContent = done ? btn.dataset.done! : btn.dataset.todo!;
+        btn.classList.toggle('done', done);
+        const total = Object.values(load()).filter(Boolean).length;
+        if (summary) summary.textContent = total ? `${total} lesson(s) completed` : '';
+      };
+      btn.onclick = () => {
+        const s = load();
+        s[path] = !s[path];
+        localStorage.setItem(KEY, JSON.stringify(s));
+        render();
+      };
+      render();
+    });
+  }
+  initProgress();
+  document.addEventListener('astro:page-load', initProgress);
+</script>

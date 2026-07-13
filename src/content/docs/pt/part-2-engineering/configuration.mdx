@@ -1,0 +1,430 @@
+---
+title: "Configuração e Segredos"
+description: Faça parsing do ambiente para config tipada uma vez, falhe cedo, injete a fonte para testabilidade, e redija os segredos para os logs não os vazarem. O mesmo design em Rust, Go e Python — com módulos testados nos três.
+difficulty: advanced
+estimatedMinutes: 28
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={28} languages={["python", "go", "rust"]} />
+
+Todo o serviço de produção é configurado a partir do seu ambiente — portas, hosts,
+feature flags, e **segredos** como chaves de API. Feita de forma descuidada, a
+configuração torna-se uma fábrica de bugs: chamadas `os.getenv` espalhadas pelo
+código, strings parseadas no ponto de uso, um serviço que arranca bem e rebenta uma
+hora depois numa variável em falta, e uma chave de API que acaba nos logs. Esta lição
+constrói o mesmo carregador de config disciplinado em Rust, Go e Python, à volta de
+quatro regras que valem em qualquer linguagem.
+
+<Aside type="note" title="Pré-requisitos">
+  Assenta diretamente no
+  [Padrão Repository e Injeção de Dependências](/systems-programming-academy/pt/part-2-engineering/repository-pattern/)
+  — injetar o ambiente é o mesmo movimento que injetar um repositório.
+</Aside>
+
+Todo o código vem de três módulos testados —
+[`examples/part2-config-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um `fmt`/`lint` limpo com testes a passar, incluindo um teste que **prova que
+o segredo nunca aparece na saída**.
+
+## As quatro regras
+
+1. **Parsing, uma vez, no arranque.** Converta strings cruas num objeto de config
+   *tipado* antes de a app correr. Se algo está errado, rebente *agora* — não uma
+   hora depois (fail fast).
+2. **Injete o ambiente.** O carregador recebe um mapa/lookup como parâmetro, para os
+   testes passarem um dict simples em vez de mutar o ambiente real do processo.
+3. **Tipe cada campo.** `port` é um número, `debug` é um bool. Erros de parsing são
+   erros tipados que nomeiam a variável e o valor em causa.
+4. **Redija os segredos.** A representação impressa da config nunca pode conter o
+   segredo — logs, relatórios de erro e dumps `%v`/`repr()` são a fuga clássica.
+
+<Mermaid title="Ambiente -> config tipada validada -> o resto da app" code={`flowchart LR
+  E["env vars (strings)"] --> L["Load / from_env (parse + valida UMA VEZ)"]
+  L -->|ok| C["Config tipada (segredos redigidos na saída)"]
+  L -->|erro| X["falha cedo no arranque: nomeia a variável má"]
+  C --> A["código da aplicação: cfg.port, cfg.debug — sem getenv em mais lado nenhum"]`} />
+
+## O carregador, de três formas
+
+Defaults para variáveis opcionais, parsing tipado com erros precisos, e um segredo
+obrigatório que falha cedo:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+impl Config {
+    // O ambiente é um mapa injetado — não estado global.
+    pub fn from_map(env: &HashMap<String, String>) -> Result<Config, ConfigError> {
+        let host = env
+            .get("APP_HOST")
+            .cloned()
+            .unwrap_or_else(|| "localhost".to_string());
+
+        let port = match env.get("APP_PORT") {
+            None => 8080, // default
+            Some(raw) => raw.parse().map_err(|_| ConfigError::Invalid {
+                key: "APP_PORT",
+                value: raw.clone(),
+            })?,
+        };
+
+        let debug = matches!(
+            env.get("APP_DEBUG").map(String::as_str),
+            Some("1") | Some("true")
+        );
+
+        let api_key = env
+            .get("APP_API_KEY")
+            .cloned()
+            .ok_or(ConfigError::Missing("APP_API_KEY"))?; // fail fast
+
+        Ok(Config { host, port, debug, api_key })
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="config.go"
+// A função de lookup é injetada: os.Getenv em produção, um map nos testes.
+func Load(getenv func(string) string) (Config, error) {
+	cfg := Config{Host: "localhost", Port: 8080} // defaults
+
+	if host := getenv("APP_HOST"); host != "" {
+		cfg.Host = host
+	}
+
+	if raw := getenv("APP_PORT"); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("APP_PORT=%q: %w", raw, ErrInvalid)
+		}
+		cfg.Port = port
+	}
+
+	debug := getenv("APP_DEBUG")
+	cfg.Debug = debug == "1" || debug == "true"
+
+	key := getenv("APP_API_KEY")
+	if key == "" {
+		return Config{}, fmt.Errorf("APP_API_KEY: %w", ErrMissing) // fail fast
+	}
+	cfg.APIKey = key
+
+	return cfg, nil
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="appconfig.py"
+@dataclass(frozen=True)
+class Config:
+    host: str
+    port: int
+    debug: bool
+    api_key: str = field(repr=False)  # segredo: excluído do repr
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> Config:
+        # O ambiente é um mapping injetado — os.environ em produção.
+        host = env.get("APP_HOST", "localhost")
+
+        raw_port = env.get("APP_PORT", "8080")
+        try:
+            port = int(raw_port)
+        except ValueError:
+            raise InvalidConfigError(
+                f"invalid value {raw_port!r} for env var APP_PORT"
+            ) from None
+
+        debug = env.get("APP_DEBUG", "") in ("1", "true")
+
+        api_key = env.get("APP_API_KEY")
+        if api_key is None:
+            raise MissingConfigError("missing required env var APP_API_KEY")  # fail fast
+
+        return cls(host=host, port=port, debug=debug, api_key=api_key)
+```
+</TabItem>
+</Tabs>
+
+Em produção, o ponto de chamada é uma linha: recolha o ambiente real e passe-o
+(`std::env::vars().collect()` / `os.Getenv` / `os.environ`). Em todo o resto da app,
+ninguém toca no ambiente — recebem a `Config` tipada.
+
+## Redigir o segredo
+
+Cada linguagem tem um gancho idiomático para "como este tipo imprime" — a mesma
+ideia do [modelo de dados](/systems-programming-academy/pt/part-1-foundations/python/data-model/) da Parte 1,
+agora a fazer trabalho de segurança:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Debug escrito à mão: tudo EXCETO a api key.
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("debug", &self.debug)
+            .field("api_key", &"***REDACTED***")
+            .finish()
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="config.go"
+// String() satisfaz fmt.Stringer, logo %v/%s nos logs são seguros por defeito.
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"Config{Host:%s Port:%d Debug:%t APIKey:***REDACTED***}",
+		c.Host, c.Port, c.Debug,
+	)
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="appconfig.py"
+# Uma opção de campo chega: repr=False exclui api_key do repr gerado.
+api_key: str = field(repr=False)
+```
+</TabItem>
+</Tabs>
+
+E crucialmente, cada módulo tem um **teste que o prova**:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn debug_output_redacts_the_secret() {
+    let cfg = Config::from_map(&env(&[("APP_API_KEY", "hunter2")])).unwrap();
+    let printed = format!("{cfg:?}");
+    assert!(printed.contains("***REDACTED***"));
+    assert!(!printed.contains("hunter2")); // o segredo nunca aparece
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="config_test.go"
+func TestStringRedactsSecret(t *testing.T) {
+	cfg, _ := Load(mapEnv(map[string]string{"APP_API_KEY": "hunter2"}))
+	printed := cfg.String()
+	if strings.Contains(printed, "hunter2") {
+		t.Errorf("secret leaked in %q", printed)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_appconfig.py"
+def test_repr_excludes_the_secret(self):
+    cfg = Config.from_env({"APP_API_KEY": "hunter2"})
+    self.assertNotIn("hunter2", repr(cfg))  # o segredo nunca aparece
+```
+</TabItem>
+</Tabs>
+
+<Quiz
+  question={'Porque deve o carregador de config receber o ambiente como parâmetro em vez de ler os.environ / os.Getenv lá dentro?'}
+  options={[
+    { text: "É mais rápido em runtime.", },
+    { text: "Os testes podem passar um mapa simples, mantendo-se determinísticos e paralelos, sem mutar o ambiente real do processo.", correct: true },
+    { text: "Os sistemas operativos proíbem ler o ambiente duas vezes.", },
+    { text: "Encripta as variáveis automaticamente.", },
+  ]}
+  explanation="Injetar o ambiente é injeção de dependências aplicada à config. Testes que mutam o ambiente real do processo ficam dependentes da ordem, não podem correr em paralelo, e vazam estado entre testes. Passar um mapa/lookup torna o carregador uma função pura: mesmo input, mesma Config — trivialmente testável. Em produção o ponto de chamada passa o ambiente real uma vez."
+/>
+
+## Como as três linguagens se comparam
+
+| Aspeto | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Fonte injetada | `&HashMap<String, String>` | `func(string) string` | `Mapping[str, str]` |
+| Estilo de erro | `Result` + enum de erro | erros sentinela envolvidos | exceções tipadas |
+| Verificação de var em falta | `ok_or(Missing)` | `errors.Is(err, ErrMissing)` | `raise MissingConfigError` |
+| Gancho de redação | `impl Debug` à mão | `String()` (`fmt.Stringer`) | `field(repr=False)` |
+| Imutabilidade | campos privados por defeito possíveis | convenção | dataclass `frozen=True` |
+| Passo seguinte no ecossistema | `figment`, `config` | `envconfig`, `viper` | `pydantic-settings` |
+
+As mesmas quatro regras; idiomas diferentes. O `repr=False` do Python é a redação
+mais concisa; o enum `ConfigError` tipado do Rust é o mais preciso; a função `getenv`
+injetada do Go é a costura mais leve.
+
+## Erros comuns & depuração
+
+### 1. Chamadas `getenv` espalhadas
+
+Ler variáveis de ambiente no fundo da lógica de negócio esconde a verdadeira
+superfície de configuração da app e adia falhas para momentos aleatórios.
+**Correção:** um carregador no arranque; todo o resto recebe a `Config` tipada.
+
+### 2. Segredos no repositório ou nos logs
+
+Fazer commit de ficheiros `.env` com chaves reais, ou fazer log do objeto de config
+inteiro sem redação, são as duas fugas clássicas. **Correção:** faça commit só de um
+`.env.example` com valores fictícios; adicione `.env` ao `.gitignore`; redija na
+representação impressa *e teste-o* (como acima). Para produção, prefira um gestor de
+segredos (Vault, AWS Secrets Manager, SOPS) a env vars de longa duração.
+
+### 3. Validar preguiçosamente
+
+Se `APP_PORT=banana` só explode quando o primeiro pedido chega, entregou uma bomba
+relógio. **Correção:** faça parsing e valide cada campo no arranque e saia com código
+não-zero e uma mensagem a nomear a variável — o deploy falha visivelmente, de
+imediato.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar um campo numérico validado.">
+
+Adicione um campo `timeout_seconds` (default 30, tem de fazer parse como inteiro
+positivo) ao carregador. (Escolha a sua linguagem.)
+
+**Solução (Python):**
+
+```python
+raw_timeout = env.get("APP_TIMEOUT_SECONDS", "30")
+try:
+    timeout_seconds = int(raw_timeout)
+except ValueError:
+    raise InvalidConfigError(
+        f"invalid value {raw_timeout!r} for env var APP_TIMEOUT_SECONDS"
+    ) from None
+if timeout_seconds <= 0:
+    raise InvalidConfigError("APP_TIMEOUT_SECONDS must be positive")
+```
+
+O mesmo padrão do `port`: parse, depois a regra *semântica*, ambos no arranque.
+
+</Interview>
+
+<Interview question="Exercício 2 — Testar o comportamento fail-fast.">
+
+Escreva o teste que prova que um `APP_API_KEY` em falta falha no carregamento.
+(Escolha a sua linguagem.)
+
+**Solução (Go):**
+
+```go
+func TestMissingSecretFailsFast(t *testing.T) {
+	_, err := Load(mapEnv(map[string]string{}))
+	if !errors.Is(err, ErrMissing) {
+		t.Errorf("expected ErrMissing, got %v", err)
+	}
+}
+```
+
+`mapEnv(map[string]string{})` simula um ambiente vazio; o `errors.Is` bate no
+sentinela envolvido da [lição de erros Go](/systems-programming-academy/pt/part-1-foundations/go/error-handling/).
+
+</Interview>
+
+<Interview question="Exercício 3 — Explicar porque a redação precisa de um teste.">
+
+Numa frase: porquê escrever um teste a afirmar que o segredo está ausente da config
+impressa, em vez de só escrever o código de redação?
+
+**Resposta:** Porque a redação parte-se em silêncio — alguém acrescenta um campo,
+troca a struct para uma representação derivada/default, ou faz log de outra forma — e
+só um teste que afirma `"hunter2" not in printed` transforma essa regressão numa
+falha de build em vez de uma credencial vazada.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Uma config tipada, parseada no arranque | Chamadas `getenv` espalhadas pelo código |
+| Falhar cedo, nomeando a variável má | Rebentar no primeiro uso, uma hora após o deploy |
+| Injetar o ambiente (mapa/lookup) no carregador | Testes a mutar o ambiente real do processo |
+| Redigir segredos na saída impressa — com teste | Fazer log do objeto de config inteiro cru |
+| `.env.example` commitado; `.env` ignorado | Chaves reais commitadas "temporariamente" |
+| Gestor de segredos para credenciais de produção | Segredos de longa duração em env vars para sempre |
+
+## Mini-projeto
+
+**Construa um carregador `DatabaseConfig` numa linguagem.** Campos: `url`
+(obrigatório, segredo — redigido), `max_connections` (default 10, int positivo),
+`tls` (bool, default true). Falhe cedo com erros tipados a nomear a variável; injete
+o ambiente; escreva testes para defaults, valores explícitos, cada erro, e —
+obrigatório — um teste de redação a provar que a URL nunca imprime. Bónus: suporte
+uma variável `DATABASE_URL_FILE` que lê o segredo de um caminho de ficheiro (a
+convenção de secrets do Docker/Kubernetes).
+
+## Perguntas de entrevista
+
+<Interview question="Porquê configurar aplicações através de variáveis de ambiente?">
+
+As variáveis de ambiente desacoplam a configuração do artefacto: o mesmo build corre
+em dev, staging e produção com definições diferentes, que é o fator III da
+metodologia Twelve-Factor App. São suportadas em todo o lado (shells, Docker,
+Kubernetes, systemd, CI), agnósticas de linguagem, e mantêm os segredos fora do
+código. As suas fraquezas — valores em string e visibilidade em todo o processo — são
+o que o padrão do carregador tipado desta lição resolve.
+
+</Interview>
+
+<Interview question="O que significa 'fail fast' para configuração e porque importa?">
+
+Significa validar toda a configuração no arranque do processo e sair imediatamente
+com um erro claro se algo falta ou está malformado — em vez de descobrir o problema
+quando o caminho de código que precisa do valor corre pela primeira vez. Falhar no
+arranque torna um deploy mau visível em segundos (o orquestrador vê o crash loop),
+enquanto a falha preguiçosa pode aparecer horas depois como um erro confuso a meio de
+um pedido, possivelmente já depois de a versão antiga ter sido desmantelada.
+
+</Interview>
+
+<Interview question="Como mantém segredos fora dos logs?">
+
+Controle a representação impressa do tipo: exclua ou mascare o campo secreto no
+`Debug`/`String()`/`repr` (impl `Debug` próprio em Rust, `fmt.Stringer` em Go,
+`field(repr=False)` em Python), e fixe-o com um teste a afirmar que a string do
+segredo está ausente da saída. Para lá do nível do tipo: nunca faça log de config
+crua nem de headers de pedidos, limpe padrões de segredos conhecidos no pipeline de
+logging, e prefira credenciais de curta duração de um gestor de segredos para
+qualquer fuga ter um raio de dano pequeno.
+
+</Interview>
+
+<Interview question="Variáveis de ambiente vs ficheiros de config vs gestores de segredos — quando usar cada um?">
+
+As env vars servem para definições pequenas por deploy e integram com qualquer
+orquestrador — o default Twelve-Factor. Ficheiros de config (TOML/YAML) servem para
+configuração maior, estruturada e versionável que não é secreta. Gestores de segredos
+(Vault, KMS/Secrets Manager da cloud, ficheiros encriptados com SOPS) são para
+credenciais: acrescentam controlo de acesso, auditoria, rotação e leases de curta
+duração. Sistemas reais combinam-nos — ficheiros para estrutura, env para overrides
+por deploy, um gestor para segredos — parseados numa única config tipada no arranque.
+
+</Interview>
+
+## Desafio
+
+Audite um serviço real seu: faça `grep` a cada chamada `getenv`/`env::var`/`os.environ`
+fora do caminho de arranque, liste cada variável que ele realmente lê (vai
+provavelmente encontrar não documentadas), e refatore para um único carregador tipado
+com validação fail-fast. Depois verifique os logs de uma semana — procure por
+qualquer valor dos seus segredos. As descobertas desconfortáveis que esta auditoria
+produz na maioria das bases de código são exatamente a razão de ser da disciplina
+desta lição.
+
+## Referências & leitura adicional
+
+- The Twelve-Factor App — [III. Config](https://12factor.net/config)
+- OWASP — [Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
+- Kubernetes — [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) e a convenção `*_FILE`
+- Bibliotecas: [`figment`](https://docs.rs/figment) (Rust) · [`envconfig`](https://pkg.go.dev/github.com/kelseyhightower/envconfig) (Go) · [`pydantic-settings`](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (Python)
+
+<Progress />

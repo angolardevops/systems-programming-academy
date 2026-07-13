@@ -1,0 +1,463 @@
+---
+title: "Projeto: Agente de Health-Check"
+description: Sonde uma frota de alvos TCP em paralelo com timeouts de ligação — scoped threads, goroutines e um thread pool a fazer trabalho de ops real. Relatórios determinísticos, exit codes para scripting, e testes contra sockets reais.
+difficulty: advanced
+estimatedMinutes: 32
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={32} languages={["python", "go", "rust"]} />
+
+O quarto projeto da Parte 3 fecha um ciclo de volta à Parte 1: as **primitivas de
+concorrência** que lá aprendeu — `thread::scope`, goroutines com `WaitGroup`,
+`ThreadPoolExecutor` — fazem finalmente trabalho de operações real. Um **agente
+de health-check** sonda uma lista de alvos TCP e reporta quais estão up. O
+detalhe que torna a concorrência *necessária* em vez de decorativa: cada sonda a
+um host morto custa um **timeout** de ligação inteiro. Sequencialmente, 50 alvos
+mortos custam 25 segundos; em paralelo, custam um timeout — ~500 ms. Medimos
+exatamente isso.
+
+Duas disciplinas de produção acompanham: um **relatório determinístico**
+(ordenado, diff-ável — verificado byte-idêntico entre as três linguagens) e um
+**exit code para scripting** (0 tudo-up, 1 caso contrário, 2 erro de uso) para o
+agente encaixar em cron jobs, gates de CI e cadeias `&&`.
+
+<Aside type="note" title="Pré-requisitos">
+  As lições de concorrência da Parte 1
+  ([Rust](/systems-programming-academy/pt/part-1-foundations/rust/concurrency/), [Go](/systems-programming-academy/pt/part-1-foundations/go/concurrency/))
+  e o método da Parte 3 do [analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/).
+</Aside>
+
+Código:
+[`examples/part3-healthcheck-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um fmt/lint limpo, 5 testes cada, e os testes sondam **sockets reais**,
+não mocks.
+
+## A ferramenta
+
+```text
+$ cat targets.conf
+# fleet
+web = 127.0.0.1:8043
+api = 127.0.0.1:8043
+cache = 127.0.0.1:59999
+
+$ healthcheck targets.conf
+UP api
+DOWN cache
+UP web
+---
+2 up, 1 down
+$ echo $?
+1
+```
+
+<Mermaid title="Fan out, sonda com timeout, fan in, reporta deterministicamente" code={`flowchart LR
+  F["targets.conf"] --> P["parse_targets"]
+  P --> C["check_all: uma thread/goroutine por alvo"]
+  C --> T1["sonda web (timeout 500ms)"]
+  C --> T2["sonda api (timeout 500ms)"]
+  C --> T3["sonda cache (timeout 500ms)"]
+  T1 --> R["ordena por nome -> relatório + exit code"]
+  T2 --> R
+  T3 --> R`} />
+
+## O fan-out concorrente, de três formas
+
+Este é o padrão fan-out/fan-in da Parte 1, palavra por palavra — agora com uma
+razão de existir:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Sonda cada alvo em paralelo com scoped threads: N alvos custam um timeout,
+/// não N.
+pub fn check_all(targets: &[Target], timeout: Duration) -> Vec<Probe> {
+    let mut probes: Vec<Probe> = thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|t| {
+                scope.spawn(move || Probe {
+                    name: t.name.clone(),
+                    up: probe(&t.addr, timeout),
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    probes.sort_by(|a, b| a.name.cmp(&b.name)); // ordem determinística
+    probes
+}
+```
+O `thread::scope` (da [lição de concorrência](/systems-programming-academy/pt/part-1-foundations/rust/concurrency/))
+deixa as threads emprestar `targets` — sem `Arc`, sem `'static`.
+</TabItem>
+<TabItem label="Go">
+```go title="healthcheck.go"
+// CheckAll sonda cada alvo em paralelo — goroutines + WaitGroup.
+func CheckAll(targets []Target, timeout time.Duration) []Probe {
+	probes := make([]Probe, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, t Target) {
+			defer wg.Done()
+			probes[i] = Probe{Name: t.Name, Up: ProbeAddr(t.Addr, timeout)}
+		}(i, t)
+	}
+	wg.Wait()
+	sort.Slice(probes, func(i, j int) bool { return probes[i].Name < probes[j].Name })
+	return probes
+}
+```
+Cada goroutine escreve num índice distinto — sem lock, a mesma ideia de
+escritas-disjuntas da [lição de goroutines](/systems-programming-academy/pt/part-1-foundations/go/concurrency/).
+</TabItem>
+<TabItem label="Python">
+```python title="healthcheck.py"
+def check_all(targets: list[Target], timeout: float) -> list[Probe]:
+    """Sonda cada alvo em paralelo — um thread pool em trabalho de ops real."""
+    with ThreadPoolExecutor(max_workers=max(len(targets), 1)) as pool:
+        probes = list(
+            pool.map(lambda t: Probe(name=t.name, up=probe(t.addr, timeout)), targets)
+        )
+    return sorted(probes, key=lambda p: p.name)  # ordem determinística
+```
+As threads são a ferramenta certa aqui apesar do GIL: sondar é **I/O-bound** — o
+GIL é libertado enquanto bloqueado no `connect`.
+</TabItem>
+</Tabs>
+
+**O ganho medido:** contra 5 endereços inalcançáveis (estilo firewall, sem
+resposta) com timeout de ligação de 500 ms cada, o agente Go paralelo terminou
+as cinco sondas em **504 ms** — sequencial teriam sido ~2.500 ms. O speedup é a
+contagem de timeouts, e cresce linearmente com o tamanho da frota.
+
+## Sondar com timeout
+
+A sonda em si são três linhas por linguagem — a disciplina é que o **timeout não
+é opcional**. Sem ele, um único host que descarta pacotes em silêncio (um IP
+atrás de firewall) pendura o agente pelos *minutos* do default do kernel:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn probe(addr: &str, timeout: Duration) -> bool {
+    let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr) else {
+        return false; // irresolúvel => down
+    };
+    let Some(sock_addr) = addrs.next() else { return false };
+    TcpStream::connect_timeout(&sock_addr, timeout).is_ok()
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="healthcheck.go"
+func ProbeAddr(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="healthcheck.py"
+def probe(addr: str, timeout: float) -> bool:
+    host, _, port_text = addr.rpartition(":")
+    try:
+        port = int(port_text)
+    except ValueError:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+```
+</TabItem>
+</Tabs>
+
+## Testar contra sockets reais — deterministicamente
+
+Sem mocks. Os testes criam as condições de rede sobre que afirmam:
+
+- **Up**: fazer bind de um listener real no porto `0` (o SO atribui um porto
+  efémero livre), sondar → ligação aceite.
+- **Down**: fazer bind de um listener, *aprender o porto, fechá-lo*, sondar o
+  porto agora livre → ligação recusada, instantânea e deterministicamente.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn probe_reports_down_for_a_closed_port() {
+    // Bind, aprender o porto, largar o listener: "down" determinístico.
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    assert!(!probe(&addr, Duration::from_millis(500)));
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="healthcheck_test.go"
+// downAddr faz bind e fecha um listener: um porto recusado determinístico.
+func downAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	return addr
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_healthcheck.py"
+def down_addr() -> str:
+    """Faz bind e fecha um socket: um porto recusado determinístico."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    host, port = s.getsockname()
+    s.close()
+    return f"{host}:{port}"
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Nunca assuma um porto 'livre' fixo">
+  Durante a execução ponta-a-ponta deste próprio projeto, um porto que
+  *assumimos* estar morto (19999) revelou ter um listener na máquina de
+  desenvolvimento — o agente reportou-o corretamente UP e "falsificou" a nossa
+  expectativa. Isso é a ferramenta a funcionar e a suposição a falhar. A técnica
+  bind-depois-fechar com porto efémero acima é a correção: o SO dá-lhe um porto
+  comprovadamente seu, e fechá-lo torna-o comprovadamente recusado. Portos
+  "mágicos" fixos em testes são uma fábrica de flakes.
+</Aside>
+
+<Quiz
+  question={'Porque fazem os testes bind de um listener no porto 0 em vez de escolher um porto fixo como 19999?'}
+  options={[
+    { text: "O porto 0 é mais rápido de ligar.", },
+    { text: "O porto 0 pede ao SO um porto efémero garantidamente livre — um porto fixo pode já estar em uso em qualquer máquina (como este projeto descobriu), tornando os testes flaky ou errados.", correct: true },
+    { text: "Portos acima de 1024 exigem root.", },
+    { text: "Evita firewalls.", },
+  ]}
+  explanation="Fazer bind ao porto 0 delega a escolha ao kernel, que devolve um porto livre por construção; depois lê-se o porto real do socket. Um porto hard-coded é uma aposta de que nada na máquina o usa — aposta que este mesmo projeto perdeu na execução e2e quando o 19999 se revelou ocupado. A mesma técnica ao contrário (bind, aprender, fechar) fabrica um porto deterministicamente recusado para o caso down."
+/>
+
+## Relatório e exit code: feitos para scripting
+
+A saída de um agente de ops tem duas audiências — humanos e shells:
+
+```rust title="src/lib.rs"
+pub fn report(probes: &[Probe]) -> (String, i32) {
+    // "UP api\nDOWN cache\n---\n1 up, 1 down\n"  +  exit code 0 ou 1
+}
+```
+
+A renderização exata — `UP api\nDOWN cache\n---\n1 up, 1 down\n` — está fixada
+por um teste idêntico nas três linguagens, e os três CLIs produziram relatórios
+byte-idênticos contra uma lista de alvos viva partilhada. O contrato do exit
+code (0 tudo-up · 1 algum-down · 2 erro de uso) é o que deixa o agente compor:
+
+```bash
+healthcheck targets.conf || alert-oncall "frota degradada"
+```
+
+## A análise porquê-X: a história de concorrência decide
+
+As três paralelizam isto corretamente — as diferenças estão no custo:
+
+| Eixo | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Ferramenta de concorrência | `thread::scope` | goroutines + WaitGroup | ThreadPoolExecutor |
+| 10.000 alvos? | thread-por-alvo pesa; usar pool/async | goroutines: trivialmente ok | pool de ~centenas; asyncio além |
+| API de timeout | `connect_timeout` explícito | `DialTimeout` de primeira classe | `create_connection(timeout=)` |
+| Impacto do GIL | n/a | n/a | nenhum aqui (I/O-bound liberta-o) |
+| Deploy como cron/agente | binário estático | binário estático | interpretador necessário |
+
+**Porquê Go?** Este é o projeto mais Go-shaped da Parte 3: as goroutines tornam
+frotas de 10.000 alvos tão fáceis como 3, o `DialTimeout` é idiomático, e o
+binário estático cai em qualquer cron. **Porquê Python?** Perfeitamente adequado
+até ~centenas de alvos, e o mais rápido de estender (checks HTTP, saída JSON) —
+certo para uma ferramenta local de equipa. **Porquê Rust?** Quando o agente vai
+em sítios restritos (sidecars de contentores, gateways embutidos) — com a nota
+de que thread-por-alvo é a única escolha ingénua aqui; à escala de frota o Rust
+passaria a um pool limitado ou async, que é o tema da Parte 4.
+
+## Erros comuns & depuração
+
+### 1. Sonda sem timeout
+
+O timeout default de ligação TCP no Linux pode exceder dois minutos para um host
+que não responde. Um alvo atrás de firewall sem timeout explícito congela o
+relatório inteiro. Cada sonda aqui recebe o timeout como parâmetro.
+
+### 2. TCP-connect ≠ saudável
+
+Um connect com sucesso prova que existe um listener — não que o serviço atrás
+consegue servir. Bases de dados aceitam ligações em deadlock; servidores web
+aceitam enquanto devolvem 500s. A sonda TCP é *liveness*; a *readiness* real
+precisa de um check ao nível do protocolo (`GET /healthz`, um comando `PING`) —
+o mini-projeto.
+
+### 3. Fan-out sem limite à escala de frota
+
+Thread-por-alvo é elegante com 10 alvos e um problema de recursos com 10.000
+(threads de Rust/Python em especial). Limite a concorrência com um worker pool —
+e repare como as goroutines do Go empurram esse teto muito mais alto, que é
+exatamente o argumento porquê-Go.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar um check de readiness HTTP.">
+
+Estenda a sonda para alvos poderem ser `name = http://host:port/healthz`, up só
+se o status da resposta for 200. (Escolha a sua linguagem.)
+
+**Solução (esboço, Python):**
+
+```python
+def probe_http(url: str, timeout: float) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == 200
+    except OSError:
+        return False
+
+# na lambda do check_all: despacho pela forma do endereço
+up = probe_http(t.addr, timeout) if t.addr.startswith("http") else probe(t.addr, timeout)
+```
+
+Liveness (TCP) e readiness (HTTP 200) tornam-se dois tipos de sonda atrás de um
+relatório.
+
+</Interview>
+
+<Interview question="Exercício 2 — Explicar o contrato do exit code.">
+
+Porquê 0/1/2 em vez de sair sempre 0 e deixar quem chama fazer parse do texto?
+
+**Resposta:** Os exit codes são o sistema de tipos da shell: `healthcheck &&
+deploy` compõe sem parsing, o cron e o CI marcam o job vermelho
+automaticamente, e a distinção 2-para-erro-de-uso deixa os wrappers separar "a
+frota está em baixo" de "chamei mal a ferramenta". O texto é para humanos; o
+exit code é a interface de máquina — um agente precisa de ambos.
+
+</Interview>
+
+<Interview question="Exercício 3 — Limitar o fan-out.">
+
+Limite a concorrência a no máximo 50 sondas em voo. O que muda por linguagem?
+
+**Resposta:** Python: `ThreadPoolExecutor(max_workers=50)` — um argumento. Go:
+um channel com buffer como semáforo (`sem := make(chan struct{}, 50)`; adquirir
+antes do dial, libertar depois) ou `errgroup.SetLimit(50)`. Rust: dividir os
+alvos em blocos e scope-spawn por bloco, ou um crate de worker pool (`rayon` com
+pool dimensionado). O código do relatório fica intocado — o limite é assunto
+exclusivo do `check_all`.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Timeout explícito em cada sonda | Timeouts de connect default do kernel (minutos) |
+| Fan-out paralelo: N alvos ≈ 1 timeout | Sondagem sequencial de uma frota grande |
+| Portos efémeros bind-depois-fechar nos testes | Portos "de certeza livres" hard-coded |
+| Relatório determinístico ordenado | Saída pela ordem de conclusão |
+| Exit codes como interface de máquina | Chamadores a fazer grep de prosa por "DOWN" |
+| Concorrência limitada à escala de frota | 10.000 threads sem pool |
+
+## Mini-projeto
+
+**Torne-o um daemon de monitorização** numa linguagem: ciclo a cada N segundos,
+sonde a frota, e (1) faça log só de *transições* de estado (UP→DOWN, DOWN→UP —
+as linhas estruturadas da [lição de logging](/systems-programming-academy/pt/part-2-engineering/logging/)),
+(2) exponha o estado atual como gauges `probe_up{name="api"} 0|1` via o registry
+do [projeto do exporter](/systems-programming-academy/pt/part-3-devops/prometheus-exporter/), e (3)
+acrescente a sonda de readiness HTTP do Exercício 1. Terá composto três projetos
+da Parte 3 num pequeno sistema de monitorização real.
+
+## Perguntas de entrevista
+
+<Interview question="Porque têm as sondas de rede de definir sempre timeouts explícitos?">
+
+Porque o modo de falha das redes é o silêncio, não os erros: um host atrás de
+firewall ou num buraco negro nunca responde, e o timeout default de connect do
+SO pode ser de minutos. Qualquer caminho de código que espera por uma parte
+remota sem o seu próprio prazo acabará pendurado nela — congelando threads,
+enchendo pools, e em cascata. A regra generaliza muito além dos health checks:
+cada chamada de saída em produção carrega um timeout, escolhido
+deliberadamente, como estas sondas o recebem por parâmetro.
+
+</Interview>
+
+<Interview question="Como se testa código de rede sem mocks nem flakiness?">
+
+Criando condições reais localmente e deterministicamente: bind de um listener no
+porto 0 para um endpoint "up" garantido; bind-depois-fechar para fabricar um
+porto recusado garantido para o "down". Ambos são instantâneos e isolados por
+teste — sem portos fixos partilhados, sem sleeps, sem rede além do loopback.
+Mocks só provariam que chamou uma API de sockets; sockets de loopback reais
+provam connect, recusa e timeout de ponta a ponta.
+
+</Interview>
+
+<Interview question="Liveness vs readiness — qual a diferença e porque as separam os orquestradores?">
+
+Liveness pergunta "o processo está sequer vivo?" (um accept TCP, um PID a
+existir) — falhá-la despoleta um restart. Readiness pergunta "consegue servir
+corretamente agora?" (dependências alcançáveis, warm-up feito) — falhá-la
+remove a instância do balanceamento sem a matar. Confundi-las causa tanto
+restarts falsos (reiniciar um serviço saudável a aquecer) como tráfego falso
+(encaminhar para um listener que dá 500s). O Kubernetes codifica a distinção
+como duas sondas separadas.
+
+</Interview>
+
+<Interview question="Porque é a sondagem paralela um problema I/O-bound, e o que implica por linguagem?">
+
+Cada sonda passa o tempo bloqueada à espera da rede, não a computar — o ganho
+vem de *sobrepor esperas*, não de cores de CPU. É por isso que as threads de
+Python funcionam bem aqui apesar do GIL (é libertado durante I/O bloqueante),
+que as goroutines baratas do Go tornam frotas enormes triviais, e que à escala
+extrema a evolução natural é I/O assíncrono/orientado a eventos (epoll por
+baixo) em vez de mais threads — a transição que a Parte 4 explora.
+
+</Interview>
+
+## Desafio
+
+Aponte o agente à sua infraestrutura real: cada serviço, base de dados e cache
+que a sua equipa corre, num só ficheiro de alvos. A primeira execução costuma
+surpreender — uma dependência não documentada, um host "desativado" ainda a
+responder. Depois ligue-o ao cron com o exit code a alertá-lo, e mantenha o
+ficheiro de alvos no repo, revisto como código. Um inventário honesto da frota
+num ficheiro, que grita quando algo morre, é o maior rácio valor-por-linhas das
+operações.
+
+## Referências & leitura adicional
+
+- Kubernetes — [sondas de liveness, readiness e startup](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
+- Google SRE book — [monitoring distributed systems](https://sre.google/sre-book/monitoring-distributed-systems/)
+- APIs de timeout: [`TcpStream::connect_timeout`](https://doc.rust-lang.org/std/net/struct.TcpStream.html#method.connect_timeout) · [`net.DialTimeout`](https://pkg.go.dev/net#DialTimeout) · [`socket.create_connection`](https://docs.python.org/3/library/socket.html#socket.create_connection)
+- clig.dev — [convenções de exit codes](https://clig.dev/#robustness)
+
+<Progress />

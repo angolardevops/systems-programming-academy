@@ -1,0 +1,12 @@
+[package]
+name = "concurrency"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Concurrency Basics (threads, channels, Arc<Mutex>)."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: uses only std::thread, std::sync. `cargo test` runs offline.
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,419 @@
+---
+title: "Logging e Observabilidade"
+description: Logging estruturado, com níveis e testável — linhas JSON chave-valor, um sink injetado, e campos de contexto por pedido. O mesmo design em Rust, Go (log/slog) e Python (logging) — com módulos testados nos três.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Quando a produção se porta mal às 3 da manhã, os seus logs são a cena do crime.
+`print("here 2")` não o vai salvar; o que o salva é logging **estruturado** — uma
+linha parseável por máquina por evento, com campos chave-valor filtráveis
+(`user_id=42`, `request_id=abc-123`), **níveis** de severidade para separar sinal
+de ruído, e **contexto** que liga todas as linhas de um pedido. Esta lição constrói
+o mesmo logger disciplinado em três linguagens — e, tão importante, mostra como
+**testar** o que o seu código faz log.
+
+<Aside type="note" title="Pré-requisitos">
+  Continua o movimento central da Parte 2: injetar dependências
+  ([Repository & DI](/systems-programming-academy/pt/part-2-engineering/repository-pattern/),
+  [Configuração](/systems-programming-academy/pt/part-2-engineering/configuration/)). Aqui a dependência
+  injetada é o *sink* do log.
+</Aside>
+
+Todo o código vem de três módulos testados —
+[`examples/part2-logging-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um `fmt`/`lint` limpo com testes que afirmam sobre a saída de log capturada.
+
+## As quatro propriedades do logging de produção
+
+1. **Estruturado** — os eventos são dados chave-valor (`{"level":"INFO","msg":"user
+   logged in","user_id":42}`), não prosa. As máquinas agregam-nos; os humanos
+   consultam-nos.
+2. **Com níveis** — `DEBUG` < `INFO` < `WARN` < `ERROR`. Um limiar filtra o ruído
+   sem tocar nos pontos de chamada.
+3. **Testável** — o sink (para onde vão as linhas) é injetado, por isso um teste
+   captura a saída num buffer e afirma sobre ela — tal como injetar um repositório.
+4. **Contextual** — ligue campos como `request_id` uma vez; cada linha seguinte
+   carrega-os, e um grep reconstrói a história inteira de um pedido.
+
+<Mermaid title="Um pedido, um contexto: campos ligados unem as linhas" code={`flowchart LR
+  R["pedido chega"] --> B["logger.with(request_id=abc-123)"]
+  B --> L1["INFO start"]
+  B --> L2["WARN slow query ms=250"]
+  B --> L3["INFO done"]
+  L1 --> Q["grep request_id=abc-123 -> a história completa"]
+  L2 --> Q
+  L3 --> Q`} />
+
+<Aside type="tip" title="Timestamps e determinismo">
+  Os módulos omitem timestamps para os testes poderem afirmar a saída exata. Os
+  deployments reais adicionam-nos (todas as bibliotecas o fazem por defeito); o
+  módulo Go mostra o truque idiomático — um `ReplaceAttr` que remove a chave de
+  tempo **só nos testes**.
+</Aside>
+
+## Um logger estruturado e injetável, de três formas
+
+A resposta do Go vem na biblioteca padrão (`log/slog`); o `logging` do Python ganha
+um pequeno formatter JSON; em Rust fazemos à mão (o Rust de produção usa `tracing`):
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Genérico sobre qualquer sink Write — stderr em prod, Vec<u8> nos testes.
+pub struct Logger<W: Write> {
+    sink: W,
+    min_level: Level,
+    context: Vec<(String, String)>, // campos ligados, em cada linha
+}
+
+impl<W: Write> Logger<W> {
+    pub fn new(sink: W, min_level: Level) -> Self {
+        Logger { sink, min_level, context: Vec::new() }
+    }
+
+    // Ligar um campo de contexto (estilo builder).
+    pub fn with_field(mut self, key: &str, value: &str) -> Self {
+        self.context.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn log(&mut self, level: Level, msg: &str, fields: &[(&str, &str)]) {
+        if level < self.min_level {
+            return; // filtrado
+        }
+        let mut line = format!("{{\"level\":\"{level}\",\"msg\":\"{msg}\"");
+        for (k, v) in self.context.iter().map(|(k, v)| (k.as_str(), v.as_str())).chain(fields.iter().copied()) {
+            line.push_str(&format!(",\"{k}\":\"{v}\""));
+        }
+        line.push('}');
+        let _ = writeln!(self.sink, "{line}");
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="logging.go"
+// log/slog é a resposta da stdlib: níveis, estrutura, handlers plugáveis.
+func New(sink io.Writer, level slog.Level) *slog.Logger {
+	handler := slog.NewJSONHandler(sink, &slog.HandlerOptions{
+		Level: level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{} // remove o tempo para saída reproduzível
+			}
+			return a
+		},
+	})
+	return slog.New(handler)
+}
+
+// Ligar um campo de contexto: cada linha do logger devolvido carrega-o.
+func WithRequestID(logger *slog.Logger, id string) *slog.Logger {
+	return logger.With("request_id", id)
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="structlog_demo.py"
+class JsonFormatter(logging.Formatter):
+    """Uma linha JSON por registo: level, msg, mais quaisquer campos extra=."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _STANDARD_ATTRS:
+                payload[key] = value  # campos passados via extra=
+        return json.dumps(payload)
+
+
+def new_logger(name: str, sink: IO[str], level: int = logging.INFO) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.handlers.clear()
+    logger.propagate = False
+    handler = logging.StreamHandler(sink)  # o sink é injetado
+    handler.setFormatter(JsonFormatter())
+    logger.addHandler(handler)
+    return logger
+```
+</TabItem>
+</Tabs>
+
+Os pontos de chamada são quase idênticos nas três:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust
+log.info("user logged in", &[("user_id", "42")]);
+// {"level":"INFO","msg":"user logged in","user_id":"42"}
+```
+</TabItem>
+<TabItem label="Go">
+```go
+logger.Info("user logged in", "user_id", 42)
+// {"level":"INFO","msg":"user logged in","user_id":42}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+logger.info("user logged in", extra={"user_id": 42})
+# {"level": "INFO", "msg": "user logged in", "user_id": 42}
+```
+</TabItem>
+</Tabs>
+
+## Testar o que o seu código faz log
+
+Os logs são comportamento — um `WARN` num login falhado faz parte do contrato. Como
+o sink é injetado, um teste captura a saída e afirma sobre ela:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn context_fields_appear_on_every_line() {
+    let mut log = Logger::new(Vec::new(), Level::Info).with_field("request_id", "abc-123");
+    log.info("start", &[]);
+    log.warn("slow query", &[("ms", "250")]);
+    let out = lines(log.into_sink());
+    assert!(out.iter().all(|l| l.contains("\"request_id\":\"abc-123\"")));
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="logging_test.go"
+func TestContextFieldOnEveryLine(t *testing.T) {
+	var buf bytes.Buffer
+	logger := WithRequestID(New(&buf, slog.LevelInfo), "abc-123")
+
+	logger.Info("start")
+	logger.Warn("slow query", "ms", 250)
+
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if m := decode(t, line); m["request_id"] != "abc-123" {
+			t.Errorf("linha sem request_id: %v", m)
+		}
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_structlog_demo.py"
+def test_context_field_on_every_line(self):
+    sink = io.StringIO()
+    logger = with_request_id(new_logger("t3", sink), "abc-123")
+
+    logger.info("start")
+    logger.warning("slow query", extra={"ms": 250})
+
+    for line in lines_of(sink):
+        self.assertEqual(line["request_id"], "abc-123")
+```
+</TabItem>
+</Tabs>
+
+<Quiz
+  question={'Porquê fazer log de campos chave-valor como user_id=42 em vez de os embeber no texto da mensagem ("user 42 logged in")?'}
+  options={[
+    { text: "Usa menos espaço em disco.", },
+    { text: "Campos estruturados são consultáveis por máquina: os sistemas de agregação filtram, agrupam e alertam sobre user_id sem parsing frágil de prosa com regex.", correct: true },
+    { text: "O texto da mensagem não pode conter números.", },
+    { text: "Os níveis só funcionam com campos estruturados.", },
+  ]}
+  explanation="Quando os logs chegam a um agregador (Loki, Elasticsearch, CloudWatch), os campos estruturados tornam-se dimensões indexadas: `user_id=42 AND level=ERROR` é uma query, não uma regex. Mensagens em prosa com valores interpolados exigem parsing frágil e partem no momento em que alguém reescreve a mensagem. Mantenha a mensagem estável e legível; ponha cada variável num campo."
+/>
+
+## Os três pilares da observabilidade
+
+O logging é um pilar de três. Os **logs** respondem "o que aconteceu?" (eventos
+discretos). As **métricas** respondem "quanto / com que rapidez?" (números
+agregáveis: contagens de pedidos, histogramas de latência — baratos de guardar,
+ideais para dashboards e alertas). Os **traces** respondem "para onde foi o tempo?"
+(o caminho de um pedido pelos serviços, cada passo um span cronometrado). O
+`request_id` que ligámos é a semente do tracing — promova-o a um trace ID propagado
+entre chamadas de serviço e tem tracing distribuído (o OpenTelemetry padroniza isto
+para as três linguagens).
+
+| Pilar | Pergunta | Forma | Ferramentas típicas |
+| --- | --- | --- | --- |
+| Logs | O que aconteceu? | eventos com campos | slog/tracing/logging → Loki, ELK |
+| Métricas | Quanto? Com que rapidez? | contadores, gauges, histogramas | Prometheus + Grafana |
+| Traces | Para onde foi o tempo? | spans numa árvore de pedido | OpenTelemetry, Jaeger |
+
+## Erros comuns & depuração
+
+### 1. Fazer log de segredos ou PII
+
+A regra de redação da lição de configuração aplica-se aqui com força: as linhas de
+log são copiadas para agregadores, retidas por meses, e lidas por muitos olhos.
+Nunca faça log de passwords, tokens, ou dados pessoais completos; faça log de IDs
+opacos.
+
+### 2. Níveis errados em todo o lado
+
+Se tudo é `ERROR`, os alertas não significam nada; se as falhas reais são `INFO`,
+ninguém acorda. Regra prática: `ERROR` = um humano deve olhar; `WARN` = degradado
+mas auto-recuperável; `INFO` = mudanças de estado dignas de rasto de auditoria;
+`DEBUG` = detalhe de desenvolvimento, desligado em produção.
+
+### 3. Log num ciclo quente
+
+Uma linha de log por item num ciclo de um milhão de itens custa serialização, I/O e
+armazenamento — e enterra o sinal. Faça log do resumo (`processed=1000000
+failed=3`), e use métricas para taxas.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Afirmar que um login falhado faz log de um WARN.">
+
+Escreva o teste que prova que `handle_login(..., ok=false)` emite uma linha de nível
+`WARN` com o id do utilizador. (Escolha a sua linguagem.)
+
+**Solução (Python):**
+
+```python
+def test_failed_login_logged_as_warning(self):
+    sink = io.StringIO()
+    logger = new_logger("t4", sink)
+
+    handle_login(logger, 7, ok=False)
+
+    (line,) = lines_of(sink)
+    self.assertEqual((line["level"], line["user_id"]), ("WARNING", 7))
+```
+
+Isto é um contrato comportamental: os dashboards de operações alertam sobre esta
+linha.
+
+</Interview>
+
+<Interview question="Exercício 2 — Filtrar níveis num componente ruidoso.">
+
+Mostre como correr um componente em WARN enquanto o resto da app faz log em INFO.
+(Escolha a sua linguagem.)
+
+**Solução (Go):**
+
+```go
+appLogger := New(os.Stderr, slog.LevelInfo)       // app inteira: INFO+
+dbLogger := New(os.Stderr, slog.LevelWarn)        // componente falador: WARN+
+dbLogger = dbLogger.With("component", "db")
+```
+
+Dois handlers com limiares diferentes; o campo `component` mantém a origem
+identificável no stream fundido.
+
+</Interview>
+
+<Interview question="Exercício 3 — Explicar o sink injetado.">
+
+Numa frase: porque recebe o logger o seu writer de saída como parâmetro?
+
+**Resposta:** Pela mesma razão por que o repositório e o ambiente foram injetados —
+os testes podem substituir por um buffer em memória e afirmar exatamente o que foi
+logado, enquanto a produção passa stderr ou um ficheiro, sem mudar nenhum ponto de
+chamada.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Campos chave-valor estruturados | Variáveis interpoladas em mensagens de prosa |
+| Ligar contexto `request_id` uma vez | Copiar o ID para cada mensagem à mão |
+| Testar linhas de log importantes | Tratar logs como efeitos secundários não verificáveis |
+| Níveis corretos; DEBUG desligado em prod | Tudo em ERROR (ou tudo em INFO) |
+| Log de IDs, nunca segredos/PII | Tokens e emails no stream de logs |
+| Resumos + métricas para caminhos quentes | Uma linha de log por iteração de um ciclo quente |
+
+## Mini-projeto
+
+**Instrumente um pipeline de pedidos numa linguagem.** Construa um
+`process_order(logger, order)` que faz log de `INFO order received` (com
+`order_id`), `WARN retrying payment` (com `attempt`) quando um pagamento falso
+falha, e `ERROR order abandoned` após 3 tentativas. Ligue contexto `request_id`.
+Escreva testes a afirmar: o caminho feliz faz log de exatamente 2 linhas, o caminho
+de retry faz log dos WARNs com valores de `attempt` corretos, e cada linha carrega o
+`request_id`. Bónus: conte linhas WARN como "métrica" rudimentar e afirme sobre ela.
+
+## Perguntas de entrevista
+
+<Interview question="O que é logging estruturado e porque bate o logging estilo printf?">
+
+O logging estruturado emite cada evento como dados — tipicamente um objeto JSON por
+linha com uma mensagem estável mais campos chave-valor — em vez de formatar valores
+numa string de prosa. Ganha porque os agregadores de logs indexam os campos: pode
+consultar `level=ERROR AND user_id=42`, fazer gráficos de taxas, e alertar, tudo sem
+parsing de texto livre com regex. Também mantém as mensagens estáveis (melhor
+agrupamento) e torna os logs testáveis como dados.
+
+</Interview>
+
+<Interview question="Quais são os três pilares da observabilidade?">
+
+Logs, métricas e traces. Os logs registam eventos discretos com contexto — melhores
+para "o que aconteceu aqui?". As métricas são números agregáveis baratos
+(contadores, gauges, histogramas) — melhores para dashboards, tendências e alertas.
+Os traces seguem um único pedido por componentes e serviços como spans
+cronometrados — melhores para encontrar onde vive a latência. Complementam-se; um
+`request_id`/trace ID liga uma anomalia de métrica aos seus traces e esses traces
+aos seus logs.
+
+</Interview>
+
+<Interview question="Como se testa logging?">
+
+Injete o sink: construa o logger sobre um buffer em memória (`Vec<u8>`,
+`bytes.Buffer`, `StringIO`) nos testes, corra o código, e depois faça parse das
+linhas capturadas e afirme sobre nível, mensagem e campos. Isto trata linhas de log
+importantes como parte do contrato observável — um login falhado *tem* de produzir
+um WARN com o id do utilizador — para os refactors não destruírem em silêncio a
+visibilidade operacional de que o seu on-call depende.
+
+</Interview>
+
+<Interview question="Quando deve algo ser uma métrica em vez de uma linha de log?">
+
+Quando lhe interessa o agregado, não o evento individual — taxas de pedidos,
+percentagens de erro, percentis de latência, profundidades de fila. As métricas
+custam O(1) de armazenamento por série independentemente do tráfego, são
+pré-agregadas para dashboards rápidos, e alimentam alertas de forma limpa. Os logs
+são para eventos que vai precisar de inspecionar individualmente, com contexto. O
+cheiro clássico é derivar uma taxa contando linhas de log — isso é um contador
+métrico mascarado de log.
+
+</Interview>
+
+## Desafio
+
+Pegue num serviço seu e reconstrua um pedido real só a partir dos logs: consegue
+encontrar cada linha que produziu, por ordem, sem faltar nada e sem misturar linhas
+de outros pedidos? Se não — e sem contexto `request_id` ligado, normalmente não
+consegue — aplique o padrão desta lição: linhas estruturadas, um campo de contexto
+por pedido, níveis corretos. Depois parta algo de propósito e cronometre quanto
+tempo os logs demoram a dizer-lhe *o quê* e *porquê*. Esse tempo é o seu MTTR real,
+e esta disciplina é o que o encolhe.
+
+## Referências & leitura adicional
+
+- Go — [`log/slog`](https://pkg.go.dev/log/slog) e o [guia do slog](https://go.dev/blog/slog)
+- Rust — [`tracing`](https://docs.rs/tracing) (spans, campos estruturados, subscribers)
+- Python — [`logging` HOWTO](https://docs.python.org/3/howto/logging.html) e [structlog](https://www.structlog.org/)
+- [OpenTelemetry](https://opentelemetry.io/) — o padrão multi-linguagem para logs, métricas e traces
+
+<Progress />

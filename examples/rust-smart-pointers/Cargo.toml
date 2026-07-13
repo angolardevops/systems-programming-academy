@@ -1,0 +1,12 @@
+[package]
+name = "smart_pointers"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Smart Pointers & Interior Mutability (Box, Rc, RefCell)."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: `cargo test` runs all unit tests offline on stable.
+
+[lib]
+path = "src/lib.rs"

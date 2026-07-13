@@ -1,0 +1,411 @@
+---
+title: "Go: Testes e Documentação"
+description: A ferramenta de testes do Go é embutida — sem framework. Testes table-driven, subtests, exemplos executáveis que também são documentação, e benchmarks, com um módulo companheiro testado.
+difficulty: beginner
+estimatedMinutes: 28
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={28} languages={["go"]} />
+
+Testar em Go não é uma biblioteca que se acrescenta — vem com a toolchain. Escreva
+uma função chamada `TestXxx` num ficheiro `_test.go`, corra `go test`, e está feito.
+O Go dá-lhe ainda duas coisas que a maioria dos ecossistemas acrescenta à parte:
+**funções de exemplo** que aparecem na documentação *e* correm como testes, e
+**benchmarks** integrados na mesma ferramenta. Esta lição cobre o kit inteiro, com
+um módulo cujos testes passam todos.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve conhecer funções Go e
+  [Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/). O padrão
+  table-driven reutiliza slices e structs.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/go-testing/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` verde, `go vet` limpo). Cada bloco é **completo**.
+
+## O seu primeiro teste
+
+Um teste vive num ficheiro terminado em `_test.go`, no mesmo pacote. É uma função
+`TestXxx(t *testing.T)`. Use `t.Errorf` para reportar uma falha (e continuar) ou
+`t.Fatalf` para parar o teste atual.
+
+```go title="stringutil_test.go"
+func TestReverseASCII(t *testing.T) {
+	if got := Reverse("Hello"); got != "olleH" {
+		t.Errorf("Reverse(\"Hello\") = %q, want %q", got, "olleH")
+	}
+}
+```
+
+Corra-o:
+
+```bash
+go test ./...          # correr todos os testes
+go test -v ./...       # verboso: mostra cada teste
+go test -run Reverse   # só testes cujo nome contém "Reverse"
+```
+
+```text
+=== RUN   TestReverseASCII
+--- PASS: TestReverseASCII (0.00s)
+PASS
+ok  	academy.example/stringutil	0.002s
+```
+
+<Aside type="tip" title="Não há biblioteca de asserções — e é de propósito">
+  O testing padrão do Go não tem `assertEqual`. Escreve verificações simples `if
+  got != want`. É uma escolha deliberada: os testes são apenas código Go, fáceis de
+  ler e depurar, sem DSL para aprender. Para verificações repetidas, escreva um
+  pequeno helper (abaixo).
+</Aside>
+
+## Testes table-driven e subtests
+
+O padrão dominante em Go: liste os casos como uma slice de structs, itere, e corra
+cada um como um **subtest** com `t.Run`. Cada subtest recebe o seu próprio nome na
+saída e pode ser corrido individualmente.
+
+```go title="stringutil_test.go"
+func TestIsPalindrome(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", true},
+		{"simple", "level", true},
+		{"mixed case", "RaceCar", true},
+		{"phrase", "A man, a plan, a canal: Panama", true},
+		{"not", "hello", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPalindrome(tc.in); got != tc.want {
+				t.Errorf("IsPalindrome(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+```text
+=== RUN   TestIsPalindrome
+=== RUN   TestIsPalindrome/phrase
+--- PASS: TestIsPalindrome (0.00s)
+    --- PASS: TestIsPalindrome/phrase (0.00s)
+```
+
+Corra um caso com `go test -run TestIsPalindrome/phrase`.
+
+<Quiz
+  question={'Qual a principal vantagem do padrão de teste table-driven em Go?'}
+  options={[
+    { text: "Corre os testes em paralelo automaticamente." },
+    { text: "Cobre muitos casos com um bloco de lógica, e o t.Run nomeia cada caso para as falhas serem fáceis de localizar.", correct: true },
+    { text: "Dispensa a necessidade de asserções.", },
+    { text: "É obrigatório pela ferramenta go test.", },
+  ]}
+  explanation="Um teste table-driven mantém a lógica de asserção num só sítio e lista cada cenário como uma linha de dados. Envolver o corpo em t.Run dá a cada linha um subtest nomeado, por isso um relatório de falha aponta direto ao caso (p. ex. TestIsPalindrome/phrase), e pode correr ou depurar um único caso isolado. Acrescentar um caso é uma linha."
+/>
+
+## Helpers de teste com `t.Helper()`
+
+Verificações repetidas pertencem a um helper. Chame `t.Helper()` lá dentro para o
+número de linha da falha apontar ao **chamador**, não ao helper:
+
+```go title="stringutil_test.go"
+func assertEqual(t *testing.T, got, want string) {
+	t.Helper() // as falhas reportam a linha do chamador, não esta
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestReverseTwiceIsIdentity(t *testing.T) {
+	in := "testing"
+	assertEqual(t, Reverse(Reverse(in)), in)
+}
+```
+
+## Exemplos executáveis: documentação que é testada
+
+Uma função `ExampleXxx` cujo corpo termina com um comentário `// Output:` é **corrida
+pelo `go test`**, e a sua saída impressa é comparada com o comentário. Também aparece
+na documentação gerada — por isso os seus exemplos nunca ficam desatualizados.
+
+```go title="stringutil_test.go"
+func ExampleReverse() {
+	fmt.Println(Reverse("Go"))
+	// Output: oG
+}
+
+func ExampleIsPalindrome() {
+	fmt.Println(IsPalindrome("RaceCar"))
+	fmt.Println(IsPalindrome("hello"))
+	// Output:
+	// true
+	// false
+}
+```
+
+Se o `Reverse` alguma vez deixar de produzir `oG`, o `go test` falha — a
+documentação está garantidamente correta.
+
+<Mermaid title="Uma ferramenta corre três coisas dos seus ficheiros _test.go" code={`flowchart TD
+  G["go test"] --> T["TestXxx: asserções"]
+  G --> E["ExampleXxx: saída comparada com // Output:"]
+  B["go test -bench ."] --> M["BenchmarkXxx: tempo sobre b.N iterações"]`} />
+
+## Benchmarks
+
+Uma função `BenchmarkXxx(b *testing.B)` corre o seu corpo `b.N` vezes; a framework
+escolhe `b.N` para obter uma medição estável. Corra com `go test -bench .`.
+
+```go title="stringutil_test.go"
+func BenchmarkReverse(b *testing.B) {
+	s := "the quick brown fox jumps over the lazy dog"
+	for i := 0; i < b.N; i++ {
+		_ = Reverse(s)
+	}
+}
+```
+
+```text
+$ go test -bench .
+BenchmarkReverse-20    	 3941736	       303.4 ns/op
+PASS
+```
+
+Isso reporta ~303 nanossegundos por chamada. Acrescente `-benchmem` para ver também
+as alocações por operação.
+
+## Cobertura
+
+Meça quanto do seu código os testes exercitam:
+
+```bash
+go test -cover ./...                     # imprime uma percentagem de cobertura
+go test -coverprofile=cover.out ./...    # escreve um perfil
+go tool cover -html=cover.out            # abre um relatório HTML anotado
+```
+
+<Aside type="tip" title="Procure cobertura significativa, não 100%">
+  A cobertura diz-lhe que código *correu*, não se as asserções eram significativas.
+  Persiga os ramos importantes — cada caminho de erro, cada fronteira — em vez de um
+  número de vaidade. Uma função com 100% de cobertura e asserções fracas continua
+  por testar no espírito.
+</Aside>
+
+## Erros comuns & depuração
+
+### 1. Nome de ficheiro ou assinatura de função errados
+
+Um ficheiro de teste tem de terminar em `_test.go`, e a função tem de ser `func
+TestXxx(t *testing.T)` com um nome capitalizado após `Test`. Falhe qualquer um destes
+e o `go test` simplesmente não a corre. Se o teste "passa" mas a contagem não mudou,
+verifique o nome.
+
+### 2. Um comentário `// Output:` errado
+
+```go
+func ExampleReverse() {
+	fmt.Println(Reverse("Go"))
+	// Output: Go   <-- errado; o real é "oG"
+}
+```
+
+```text
+--- FAIL: ExampleReverse
+got:
+oG
+want:
+Go
+```
+
+Os exemplos são testes reais — o `// Output:` tem de bater exatamente (o espaço
+conta).
+
+### 3. Partilhar estado entre casos da tabela
+
+Se o ciclo muta uma variável partilhada que casos posteriores leem, os testes ficam
+dependentes da ordem e flaky. Mantenha cada caso autossuficiente; construa inputs
+novos dentro do corpo do `t.Run`.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Escrever um teste table-driven.">
+
+Para `func Double(n int) int { return n * 2 }`, escreva um teste table-driven com
+subtests a cobrir positivo, zero e negativo.
+
+**Solução:**
+
+```go
+package mathx
+
+import "testing"
+
+func Double(n int) int { return n * 2 }
+
+func TestDouble(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"positive", 21, 42},
+		{"zero", 0, 0},
+		{"negative", -3, -6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Double(tc.in); got != tc.want {
+				t.Errorf("Double(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Escrever um Example executável.">
+
+Acrescente um `ExampleDouble` cuja saída o `go test` verifica.
+
+**Solução:**
+
+```go
+package mathx
+
+import "fmt"
+
+func Double(n int) int { return n * 2 }
+
+func ExampleDouble() {
+	fmt.Println(Double(21))
+	// Output: 42
+}
+```
+
+Por causa da linha `// Output:`, o `go test` corre isto e falha se o `Double` mudar.
+Também aparece no `go doc`.
+
+</Interview>
+
+<Interview question="Exercício 3 — Um benchmark.">
+
+Escreva um benchmark para o `Double`.
+
+**Solução:**
+
+```go
+package mathx
+
+import "testing"
+
+func Double(n int) int { return n * 2 }
+
+func BenchmarkDouble(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = Double(21)
+	}
+}
+```
+
+Corra com `go test -bench .`. A framework escolhe `b.N` para um tempo estável.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Testes table-driven com subtests `t.Run` nomeados | Uma função de teste quase idêntica por caso |
+| `ExampleXxx` com `// Output:` para docs + testes | Exemplos no texto que nunca foram compilados |
+| `t.Helper()` em helpers de asserção | Helpers que reportam a própria linha na falha |
+| Casos autossuficientes (inputs novos por linha) | Casos que partilham e mutam estado |
+| Testar caminhos de erro e fronteiras | Testar só o caminho feliz por pontos de cobertura |
+| `t.Parallel()` para testes lentos e independentes | Forçar testes em série que podiam correr em paralelo |
+
+## Mini-projeto
+
+**Desenvolva por testes um tipo tipo `Set[string]`** (usando `map[string]struct{}`
+por dentro) com `Add`, `Contains`, `Remove` e `Len`. Antes/enquanto o escreve,
+acrescente: testes table-driven com subtests para cada método, um `ExampleSet` a
+mostrar uso típico com saída verificada, e um benchmark para o `Add`. Depois corra
+`go test -cover` e leve os ramos importantes (acrescentar um duplicado, remover uma
+chave em falta) a cobertura total.
+
+Requisitos: todos os testes passam, pelo menos um Example com `// Output:`, um
+benchmark, e `go vet` limpo.
+
+## Perguntas de entrevista
+
+<Interview question="Como difere o testing embutido do Go de frameworks como o JUnit?">
+
+O testing do Go faz parte da toolchain padrão, não de uma framework de terceiros.
+Escreve funções `TestXxx(t *testing.T)` com código Go comum e verificações `if`
+simples — não há DSL de asserções, nem anotações, nem runner para configurar. O `go
+test` descobre-as e corre-as. Também unifica testes unitários, exemplos de
+documentação executáveis, e benchmarks numa só ferramenta, que as frameworks
+costumam dividir por bibliotecas separadas.
+
+</Interview>
+
+<Interview question="O que é um teste table-driven e porque é idiomático em Go?">
+
+É um teste que define os seus casos como uma slice de structs (a "tabela") e itera
+sobre eles, correndo a mesma lógica de asserção contra cada um. Envolver o corpo em
+`t.Run(name, ...)` dá a cada caso um subtest nomeado. É idiomático porque acrescentar
+um caso é uma linha, a lógica não é duplicada, e as falhas nomeiam o caso exato —
+tudo sem apoio de framework, só slices e um ciclo.
+
+</Interview>
+
+<Interview question="O que são funções Example e o que as torna especiais?">
+
+As funções `ExampleXxx` têm dupla função: aparecem na documentação gerada do pacote
+como exemplos de uso, e — se terminarem com um comentário `// Output:` — o `go test`
+corre-as e compara a saída impressa com esse comentário. Isto significa que os
+exemplos documentados estão garantidamente a compilar e a produzir o resultado
+declarado, por isso os docs não se desviam do código em silêncio.
+
+</Interview>
+
+<Interview question="Como decide o go test quantas iterações de benchmark correr?">
+
+A função de benchmark recebe `b.N` e tem de iterar esse número de vezes. O `go test`
+começa com um `b.N` pequeno, mede, e aumenta-o até a execução demorar o suficiente
+(cerca de um segundo por defeito) para dar um tempo-por-operação estável. Nunca define
+`b.N` você mesmo; só itera `for i := 0; i < b.N; i++`. Use `-benchtime` para mudar a
+duração alvo ou fixar uma contagem de iterações.
+
+</Interview>
+
+## Desafio
+
+Pegue numa função que escreveu numa lição Go anterior (`ParseUser`, `WordCount`,
+`TotalArea`) e dê-lhe uma suíte de testes table-driven completa com um subtest
+nomeado por caso, um `ExampleXxx` com saída verificada, e — onde fizer sentido — um
+benchmark. Depois corra `go test -cover` e acrescente casos até cada caminho de erro
+e fronteira estar coberto. O objetivo não é a percentagem; é a disciplina de listar
+"o que pode correr mal" como uma tabela e ver cada linha ficar verde.
+
+## Referências & leitura adicional
+
+- Docs do Go — [o pacote `testing`](https://pkg.go.dev/testing)
+- *A Tour of Go* e o [wiki do Go sobre table-driven tests](https://go.dev/wiki/TableDrivenTests)
+- Blog do Go — [examples in tests](https://go.dev/blog/examples)
+- `go help test` e `go help testflag` para o conjunto completo de flags
+
+<Progress />

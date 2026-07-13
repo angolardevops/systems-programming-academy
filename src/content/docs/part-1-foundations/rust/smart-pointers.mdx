@@ -1,0 +1,435 @@
+---
+title: "Rust: Smart Pointers & Interior Mutability"
+description: Box, Rc and RefCell — heap allocation, shared ownership, and mutation through a shared reference. When you need them, how they compose as Rc<RefCell<T>>, and the cycle trap — with tested examples.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["rust"]} />
+
+Plain ownership — one owner, borrows checked at compile time — covers most code.
+But some shapes don't fit: a type that contains itself, data with several owners,
+or a value you must mutate through a shared reference. **Smart pointers** are
+library types that handle these cases while keeping Rust's safety guarantees.
+This lesson covers the three you will actually use: `Box`, `Rc`, and `RefCell`.
+
+<Aside type="note" title="Prerequisites">
+  You need [Ownership](/systems-programming-academy/part-1-foundations/rust/ownership/) (moves, borrows) and
+  ideally [Traits](/systems-programming-academy/part-1-foundations/rust/traits/). This is an advanced
+  Foundations topic — take it slowly.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-smart-pointers/`](https://github.com/angolardevops/systems-programming-academy)
+(7 passing tests, clean `cargo clippy`). Every snippet is **complete**.
+
+## Which pointer for which job
+
+| Type | Gives you | Cost | Use when |
+| --- | --- | --- | --- |
+| `Box<T>` | Heap allocation, single owner | one allocation | recursive types, large values, trait objects |
+| `Rc<T>` | Shared ownership (many owners) | ref-count bump | a value with several owners, single-threaded |
+| `RefCell<T>` | Mutation through `&`, checked at run time | runtime borrow check | interior mutability |
+| `Rc<RefCell<T>>` | Shared **and** mutable | both | a shared, mutable node |
+
+<Aside type="tip" title="Threads need Arc/Mutex, not Rc/RefCell">
+  `Rc` and `RefCell` are **single-threaded**. Their thread-safe cousins are
+  `Arc<T>` (atomic ref count) and `Mutex<T>`/`RwLock<T>`. We cover those in the
+  [Concurrency Basics](/systems-programming-academy/part-1-foundations/rust/concurrency/) lesson — the ideas
+  here transfer directly.
+</Aside>
+
+## `Box<T>`: one owner, on the heap
+
+`Box<T>` puts a value on the heap and owns it. Its killer use is **recursive
+types**: an `enum` that contains itself has, in principle, infinite size — unless
+the recursive part is behind a pointer of known size, which is exactly what `Box`
+is.
+
+```rust title="src/lib.rs"
+#[derive(Debug, PartialEq, Eq)]
+pub enum List {
+    Cons(i32, Box<List>), // the tail is a pointer, so List has a finite size
+    Nil,
+}
+
+impl List {
+    pub fn sum(&self) -> i32 {
+        match self {
+            List::Cons(value, tail) => value + tail.sum(), // Box derefs automatically
+            List::Nil => 0,
+        }
+    }
+}
+```
+
+A complete program:
+
+```rust title="main.rs — complete, runnable"
+#[derive(Debug)]
+enum List {
+    Cons(i32, Box<List>),
+    Nil,
+}
+use List::{Cons, Nil};
+
+fn sum(list: &List) -> i32 {
+    match list {
+        Cons(v, tail) => v + sum(tail),
+        Nil => 0,
+    }
+}
+
+fn main() {
+    // 1 -> 2 -> 3 -> Nil
+    let list = Cons(1, Box::new(Cons(2, Box::new(Cons(3, Box::new(Nil))))));
+    println!("sum = {}", sum(&list)); // sum = 6
+}
+```
+
+Output:
+
+```text
+sum = 6
+```
+
+Without the `Box`, `enum List { Cons(i32, List), Nil }` fails to compile:
+
+```text
+error[E0072]: recursive type `List` has infinite size
+  = help: insert some indirection (e.g., a `Box`) to break the cycle
+```
+
+## `Rc<T>`: many owners of the same data
+
+Sometimes one value genuinely needs several owners — a node referenced from two
+places, config shared across a tree. `Rc<T>` ("reference counted") tracks how many
+owners exist and frees the value when the last one is dropped. `Rc::clone` is
+**cheap**: it bumps a counter, it does not deep-copy the data.
+
+```rust title="src/lib.rs"
+use std::rc::Rc;
+
+pub fn shared_owners() -> usize {
+    let a = Rc::new(String::from("shared config"));
+    let _b = Rc::clone(&a); // +1 owner
+    let _c = Rc::clone(&a); // +1 owner
+    Rc::strong_count(&a) // 3 while a, _b, _c are alive
+}
+```
+
+A complete program showing the count rise and fall:
+
+```rust title="main.rs — complete, runnable"
+use std::rc::Rc;
+
+fn main() {
+    let a = Rc::new(vec![1, 2, 3]);
+    println!("count after a = {}", Rc::strong_count(&a)); // 1
+    let b = Rc::clone(&a);
+    println!("count after b = {}", Rc::strong_count(&a)); // 2
+    {
+        let c = Rc::clone(&a);
+        println!("count in scope = {}", Rc::strong_count(&a)); // 3
+        println!("b and c see: {:?} {:?}", b, c);
+    }
+    println!("count after scope = {}", Rc::strong_count(&a)); // 2
+}
+```
+
+Output:
+
+```text
+count after a = 1
+count after b = 2
+count in scope = 3
+b and c see: [1, 2, 3] [1, 2, 3]
+count after scope = 2
+```
+
+<Aside type="caution" title="Rc alone is read-only">
+  `Rc<T>` gives you shared **immutable** access — you cannot get a `&mut` through
+  it, because that would let two owners mutate at once. To mutate shared data you
+  combine it with `RefCell`, next.
+</Aside>
+
+## `RefCell<T>`: mutate through a shared reference
+
+Normally the borrow checker enforces "one `&mut` xor many `&`" at compile time.
+`RefCell<T>` moves that check to **run time**: you can call `borrow_mut()` on a
+`RefCell` you only hold a `&` to. If you break the rule (two `borrow_mut` at once),
+it panics instead of failing to compile.
+
+Combine `Rc` (share) with `RefCell` (mutate) to get shared mutable state:
+
+```rust title="src/lib.rs"
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Clone)]
+pub struct Counter {
+    inner: Rc<RefCell<i64>>,
+}
+
+impl Counter {
+    pub fn new() -> Self {
+        Counter { inner: Rc::new(RefCell::new(0)) }
+    }
+    pub fn add(&self, n: i64) {      // note: &self, yet it mutates
+        *self.inner.borrow_mut() += n;
+    }
+    pub fn get(&self) -> i64 {
+        *self.inner.borrow()
+    }
+    pub fn handle(&self) -> Counter { // a second handle to the SAME counter
+        self.clone()
+    }
+}
+```
+
+A complete program — two handles, one shared value:
+
+```rust title="main.rs — complete, runnable"
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn main() {
+    let shared = Rc::new(RefCell::new(0i64));
+    let handle = Rc::clone(&shared); // second owner of the same cell
+
+    *shared.borrow_mut() += 10;
+    *handle.borrow_mut() += 5;       // mutate via the other handle
+
+    println!("value = {}", shared.borrow()); // value = 15
+    println!("owners = {}", Rc::strong_count(&shared)); // owners = 2
+}
+```
+
+Output:
+
+```text
+value = 15
+owners = 2
+```
+
+<Quiz
+  question={'What does RefCell move from compile time to run time?'}
+  options={[
+    { text: "Memory allocation.", },
+    { text: "The borrow check — one &mut xor many & — enforced by panicking if violated at run time.", correct: true },
+    { text: "Type checking of the inner value.", },
+    { text: "Reference counting.", },
+  ]}
+  explanation="`RefCell<T>` still enforces Rust's aliasing rule (one mutable borrow, or many immutable ones), but it checks it dynamically: `borrow()`/`borrow_mut()` track active borrows and panic if you violate the rule. You trade a compile-time guarantee for the flexibility of mutating through a shared reference."
+/>
+
+## Common mistakes & debugging
+
+### 1. Double `borrow_mut()` panics at run time
+
+```rust
+use std::cell::RefCell;
+
+fn main() {
+    let cell = RefCell::new(5);
+    let a = cell.borrow_mut();
+    let b = cell.borrow_mut(); // ✗ second mutable borrow while `a` is alive
+    println!("{a} {b}");
+}
+```
+
+```text
+thread 'main' panicked at src/main.rs:6:18:
+already borrowed: BorrowMutError
+```
+
+**Fix:** keep borrows short — let one `borrow_mut()` end (drop it) before taking
+the next. This bug compiles; only running (or a test) reveals it, which is the
+price of runtime checking.
+
+### 2. Reference cycles leak memory
+
+Two `Rc`s that point at each other (via `RefCell`) keep each other's count above
+zero forever — neither is ever freed. Rust is memory-safe, but this is a leak, not
+undefined behaviour.
+
+**Fix:** make one direction a `Weak<T>` (a non-owning reference that does not keep
+the value alive). Parent → child is `Rc`; child → parent is `Weak`.
+
+### 3. Reaching for `Rc<RefCell<T>>` too early
+
+It is easy to over-use shared mutability. Most problems are cleaner with plain
+ownership, borrows, or passing data by value. Reach for `Rc<RefCell<T>>` only when
+you genuinely have shared, mutable state (graphs, observer lists, some trees).
+
+## Exercises
+
+<Interview question="Exercise 1 — A boxed binary tree depth.">
+
+Define `Tree { Leaf, Node(Box<Tree>, Box<Tree>) }` and a `depth` function.
+Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+enum Tree {
+    Leaf,
+    Node(Box<Tree>, Box<Tree>),
+}
+
+fn depth(t: &Tree) -> u32 {
+    match t {
+        Tree::Leaf => 0,
+        Tree::Node(l, r) => 1 + depth(l).max(depth(r)),
+    }
+}
+
+fn main() {
+    // A tree of depth 2 on the left.
+    let t = Tree::Node(
+        Box::new(Tree::Node(Box::new(Tree::Leaf), Box::new(Tree::Leaf))),
+        Box::new(Tree::Leaf),
+    );
+    println!("depth = {}", depth(&t)); // depth = 2
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Share a Vec between two owners with Rc.">
+
+Create an `Rc<Vec<i32>>`, clone it, and show both handles see the same data and
+the strong count is 2.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::rc::Rc;
+
+fn main() {
+    let data = Rc::new(vec![10, 20, 30]);
+    let alias = Rc::clone(&data);
+    println!("{:?}", data);   // [10, 20, 30]
+    println!("{:?}", alias);  // [10, 20, 30]
+    println!("count = {}", Rc::strong_count(&data)); // count = 2
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — A shared log with Rc<RefCell<..>>.">
+
+Build a log that two handles can append to, then read all lines.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn main() {
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let writer = Rc::clone(&log);
+
+    log.borrow_mut().push("started".to_string());
+    writer.borrow_mut().push("did work".to_string()); // via the other handle
+
+    println!("{:?}", log.borrow()); // ["started", "did work"]
+}
+```
+
+Both handles mutate the same `Vec` because they share one `RefCell` behind one
+`Rc`.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| `Box` for recursion, large values, trait objects | `Box` around a small value for no reason |
+| `Rc` for genuine shared ownership | `Rc` to dodge thinking about ownership |
+| `Rc<RefCell<T>>` only for shared *mutable* state | `Rc<RefCell<T>>` as a default container |
+| `Weak` to break parent↔child cycles | Two `Rc`s pointing at each other (leak) |
+| Keep `RefCell` borrows short | Holding a `borrow_mut()` across other calls |
+| Prefer plain ownership/borrows first | Reaching for smart pointers by habit |
+
+## Mini-project
+
+**Build a `Graph` of shared nodes.** Model a small directed graph where nodes are
+`Rc<RefCell<Node>>` and each `Node` has a `value: i32` and `edges: Vec<Rc<RefCell<Node>>>`.
+Write functions to add an edge, and to sum all node values reachable from a start
+node (track visited nodes to avoid infinite loops on cycles).
+
+Requirements: uses `Rc<RefCell<..>>`, handles a cycle without looping forever, at
+least four `#[test]` cases, and `cargo clippy` clean. Bonus: change one back-edge
+to `Weak` and observe the `strong_count` difference.
+
+## Interview questions
+
+<Interview question="When would you use Box<T>?">
+
+Three main cases: (1) **recursive types**, where a value must contain itself and
+needs a pointer of known size to have a finite size; (2) **large values** you want
+to move cheaply (moving a `Box` moves a pointer, not the whole payload); (3)
+**trait objects**, storing `Box<dyn Trait>` for heterogeneous types. `Box` is the
+simplest smart pointer: single owner, heap allocation, zero extra runtime cost
+beyond the allocation.
+
+</Interview>
+
+<Interview question="What is interior mutability and when do you need it?">
+
+Interior mutability is mutating a value through a shared (`&`) reference, which the
+normal borrow rules forbid. Types like `RefCell<T>` (single-threaded) and
+`Mutex<T>` (multi-threaded) provide it by moving the aliasing check to run time.
+You need it when an API only hands you `&self` but you must mutate internal state —
+caches, counters, observer registrations, shared graph nodes.
+
+</Interview>
+
+<Interview question="What is the difference between Rc and Arc?">
+
+Both provide shared ownership via reference counting. `Rc<T>` uses a plain
+(non-atomic) counter and is therefore **single-threaded** — cheaper, but not
+`Send`/`Sync`. `Arc<T>` ("atomic Rc") uses atomic operations for the count so it
+can be shared across threads, at a small performance cost. Use `Rc` within one
+thread and `Arc` when crossing thread boundaries.
+
+</Interview>
+
+<Interview question="How can safe Rust still leak memory with Rc?">
+
+If two `Rc`s point at each other (a cycle), each keeps the other's strong count at
+1, so neither is ever dropped — the memory is never freed. This is a *leak*, which
+Rust considers safe (no dangling pointers, no undefined behaviour). The fix is to
+make one side a `Weak<T>`, which references the value without incrementing the
+strong count, so the cycle can be collected.
+
+</Interview>
+
+## Challenge
+
+Take the cons `List` from this lesson and extend it to a doubly linked list, where
+each node points to both `next` and `prev`. You will immediately hit the cycle
+problem — `next` as `Rc` and `prev` as `Rc` leaks. Solve it with `Weak` for the
+back-pointers, and write a test using `Rc::strong_count` / `Rc::weak_count` that
+proves nodes are actually freed. Getting one doubly linked list right in safe Rust
+teaches the ownership model more deeply than any amount of reading.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 15 — [“Smart Pointers”](https://doc.rust-lang.org/book/ch15-00-smart-pointers.html)
+- `std::boxed::Box` — [documentation](https://doc.rust-lang.org/std/boxed/struct.Box.html)
+- `std::rc::Rc` and `Weak` — [documentation](https://doc.rust-lang.org/std/rc/index.html)
+- `std::cell::RefCell` — [documentation](https://doc.rust-lang.org/std/cell/struct.RefCell.html)
+
+<Progress />

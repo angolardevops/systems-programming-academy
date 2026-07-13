@@ -1,0 +1,485 @@
+---
+title: "Repository Pattern & Dependency Injection"
+description: Decouple business logic from storage with a port-and-adapter design, and inject the dependency so you can test without a database. The same design in Rust, Go, and Python, side by side — with tested modules in all three.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Welcome to **Part 2**, where we shift from language features to how production
+software is *engineered*. Every lesson here compares the same idea across Rust, Go,
+and Python, because good architecture transcends syntax.
+
+We start with a pattern you'll use constantly: the **Repository Pattern** paired
+with **Dependency Injection**. The problem it solves is universal — business logic
+tangled directly with a database is impossible to test, hard to change, and locked
+to one storage technology. The fix is to depend on an *abstraction* (a "port") and
+*inject* a concrete implementation (an "adapter"). Part 1's traits, interfaces, and
+protocols were building toward exactly this.
+
+<Aside type="note" title="Prerequisites">
+  You need the "capability" abstractions from Part 1:
+  [Rust traits](/systems-programming-academy/part-1-foundations/rust/traits/),
+  [Go interfaces](/systems-programming-academy/part-1-foundations/go/interfaces/), and
+  [Python protocols](/systems-programming-academy/part-1-foundations/python/protocols/). This lesson puts them
+  to work.
+</Aside>
+
+All code is from three tested modules —
+[`examples/part2-repository-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— each `fmt`/`lint` clean with passing tests. The exact same design, three
+languages.
+
+## The problem: logic welded to the database
+
+```python
+# Anti-pattern: the service reaches straight into a concrete database.
+class UserService:
+    def register(self, id, name):
+        db = PostgresConnection("prod-host")  # hard-coded dependency
+        db.execute("INSERT INTO users ...")   # can't test without Postgres
+```
+
+You can't unit-test `register` without a running Postgres, you can't swap storage,
+and the business rule (reject duplicates) is buried in SQL. Three layers are
+tangled into one.
+
+## The design: ports and adapters
+
+Split it into layers connected by an **abstraction**:
+
+<Mermaid title="Ports & Adapters (Hexagonal): the service depends inward on a port" code={`flowchart LR
+  S["UserService (business logic)"] -->|depends on| P["UserRepository (port / abstraction)"]
+  A1["InMemoryRepo (adapter)"] -.implements.-> P
+  A2["PostgresRepo (adapter)"] -.implements.-> P
+  T["tests inject InMemoryRepo"] --> S
+  M["main injects PostgresRepo"] --> S`} />
+
+- **Domain** — the `User` entity, plain data.
+- **Port** — `UserRepository`, an abstraction describing what the service needs
+  from storage (a Rust trait / Go interface / Python protocol).
+- **Adapter** — a concrete implementation (`InMemory…` for tests, `Postgres…` for
+  production).
+- **Service** — the business logic, depending only on the *port*. The adapter is
+  **injected** in, so the service never names a database.
+
+## The port and adapter, three ways
+
+The abstraction and its in-memory implementation — the heart of the pattern:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Port: a trait describing what the service needs.
+pub trait UserRepository {
+    fn add(&mut self, user: User) -> Result<(), RepoError>;
+    fn get(&self, id: u32) -> Option<User>;
+    fn all(&self) -> Vec<User>;
+}
+
+// Adapter: an in-memory implementation.
+#[derive(Default)]
+pub struct InMemoryUserRepository {
+    users: std::collections::HashMap<u32, User>,
+}
+
+impl UserRepository for InMemoryUserRepository {
+    fn add(&mut self, user: User) -> Result<(), RepoError> {
+        if self.users.contains_key(&user.id) {
+            return Err(RepoError::DuplicateId(user.id));
+        }
+        self.users.insert(user.id, user);
+        Ok(())
+    }
+    fn get(&self, id: u32) -> Option<User> { self.users.get(&id).cloned() }
+    fn all(&self) -> Vec<User> { self.users.values().cloned().collect() }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="repository.go"
+// Port: an interface describing what the service needs.
+type UserRepository interface {
+	Add(u User) error
+	Get(id int) (User, bool)
+	All() []User
+}
+
+// Adapter: an in-memory implementation.
+type InMemoryUserRepo struct {
+	users map[int]User
+}
+
+func NewInMemoryUserRepo() *InMemoryUserRepo {
+	return &InMemoryUserRepo{users: make(map[int]User)}
+}
+
+func (r *InMemoryUserRepo) Add(u User) error {
+	if _, exists := r.users[u.ID]; exists {
+		return fmt.Errorf("add user %d: %w", u.ID, ErrDuplicateID)
+	}
+	r.users[u.ID] = u
+	return nil
+}
+func (r *InMemoryUserRepo) Get(id int) (User, bool) { u, ok := r.users[id]; return u, ok }
+func (r *InMemoryUserRepo) All() []User {
+	out := make([]User, 0, len(r.users))
+	for _, u := range r.users {
+		out = append(out, u)
+	}
+	return out
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="repository.py"
+# Port: a structural Protocol describing what the service needs.
+class UserRepository(Protocol):
+    def add(self, user: User) -> None: ...
+    def get(self, user_id: int) -> User | None: ...
+    def all(self) -> list[User]: ...
+
+
+# Adapter: an in-memory implementation (satisfies the Protocol structurally).
+class InMemoryUserRepository:
+    def __init__(self) -> None:
+        self._users: dict[int, User] = {}
+
+    def add(self, user: User) -> None:
+        if user.id in self._users:
+            raise DuplicateIdError(f"duplicate user id {user.id}")
+        self._users[user.id] = user
+
+    def get(self, user_id: int) -> User | None:
+        return self._users.get(user_id)
+
+    def all(self) -> list[User]:
+        return list(self._users.values())
+```
+</TabItem>
+</Tabs>
+
+## The service depends on the port, not the database
+
+The service takes its repository as a constructor argument — **dependency
+injection**. It never mentions a concrete store.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// Generic over the trait => compile-time DI, zero runtime cost.
+pub struct UserService<R: UserRepository> {
+    repo: R,
+}
+
+impl<R: UserRepository> UserService<R> {
+    pub fn new(repo: R) -> Self { UserService { repo } }
+
+    pub fn register(&mut self, id: u32, name: &str) -> Result<(), RepoError> {
+        self.repo.add(User { id, name: name.to_string() })
+    }
+
+    pub fn list_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.repo.all().into_iter().map(|u| u.name).collect();
+        names.sort();
+        names
+    }
+}
+```
+
+Rust can also use `Box<dyn UserRepository>` for **runtime** injection; generics give
+**static** dispatch with no vtable — see the [traits lesson](/systems-programming-academy/part-1-foundations/rust/traits/).
+</TabItem>
+<TabItem label="Go">
+```go title="repository.go"
+// Holds the interface, injected via the constructor.
+type UserService struct {
+	repo UserRepository
+}
+
+func NewUserService(repo UserRepository) *UserService {
+	return &UserService{repo: repo}
+}
+
+func (s *UserService) Register(id int, name string) error {
+	return s.repo.Add(User{ID: id, Name: name})
+}
+
+func (s *UserService) ListNames() []string {
+	names := make([]string, 0)
+	for _, u := range s.repo.All() {
+		names = append(names, u.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="repository.py"
+class UserService:
+    def __init__(self, repo: UserRepository) -> None:  # inject the dependency
+        self._repo = repo
+
+    def register(self, user_id: int, name: str) -> None:
+        self._repo.add(User(id=user_id, name=name))
+
+    def list_names(self) -> list[str]:
+        return sorted(u.name for u in self._repo.all())
+```
+</TabItem>
+</Tabs>
+
+## The payoff: testing without a database
+
+Because the service depends on the abstraction, a test injects the in-memory
+adapter — fast, deterministic, no Postgres. The identical test in all three:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn registers_and_lists_sorted() {
+    let mut svc = UserService::new(InMemoryUserRepository::default());
+    svc.register(2, "Grace").unwrap();
+    svc.register(1, "Ada").unwrap();
+    assert_eq!(svc.list_names(), vec!["Ada".to_string(), "Grace".to_string()]);
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="repository_test.go"
+func TestRegistersAndListsSorted(t *testing.T) {
+	svc := NewUserService(NewInMemoryUserRepo())
+	svc.Register(2, "Grace")
+	svc.Register(1, "Ada")
+	got := svc.ListNames()
+	want := []string{"Ada", "Grace"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListNames() = %v, want %v", got, want)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_repository.py"
+def test_registers_and_lists_sorted(self):
+    svc = UserService(InMemoryUserRepository())  # inject the fake
+    svc.register(2, "Grace")
+    svc.register(1, "Ada")
+    self.assertEqual(svc.list_names(), ["Ada", "Grace"])
+```
+</TabItem>
+</Tabs>
+
+In production you'd write a `PostgresUserRepository` satisfying the same port and
+inject *that* instead — no change to `UserService` or its tests.
+
+## How the three languages compare
+
+| Aspect | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Port is a… | `trait` | `interface` | `Protocol` |
+| Satisfaction | explicit `impl` | implicit (structural) | implicit (structural) |
+| Injection style | generic (static) or `dyn` (dynamic) | interface value (dynamic) | duck-typed argument |
+| Dispatch cost | zero with generics | vtable (small) | dynamic attribute lookup |
+| Checked when | compile time | compile time | static checker (mypy), else runtime |
+| Fake for tests | in-memory `impl` | in-memory struct | in-memory class |
+
+The **design is identical**; only the mechanism differs. Rust gives you a choice of
+static or dynamic dispatch; Go and Python satisfy the port structurally (no
+"implements" needed); Python's check is opt-in via a type checker.
+
+<Quiz
+  question={'What is the main benefit of having UserService depend on a UserRepository abstraction instead of a concrete database?'}
+  options={[
+    { text: "It makes the code run faster.", },
+    { text: "The service can be tested with an in-memory fake and its storage swapped without changing business logic.", correct: true },
+    { text: "It removes the need for a database entirely.", },
+    { text: "It is required by all three languages.", },
+  ]}
+  explanation="Depending on an abstraction (the port) rather than a concrete store means you can inject any implementation: an in-memory fake for fast, deterministic tests, or a Postgres adapter in production — all without touching UserService. This is dependency inversion: high-level policy no longer depends on low-level detail. Testability and swappability are the payoff, not raw speed."
+/>
+
+## Common mistakes & debugging
+
+### 1. A "leaky" port that exposes the database
+
+If your repository interface returns SQL rows, ORM models, or a `*sql.Tx`, the
+abstraction leaks and the service is coupled to the database anyway. **Fix:** the
+port should speak in *domain* terms (`User`, `RepoError`) — not storage details.
+
+### 2. Constructing the dependency inside the service
+
+`UserService` calling `PostgresRepo::new()` internally re-couples it. **Fix:** always
+accept the dependency from outside (constructor/parameter). The rule: a component
+never creates its own dependencies.
+
+### 3. One giant repository interface
+
+A `Repository` with 40 methods forces every fake to stub all of them and couples
+unrelated concerns. **Fix:** keep ports small and focused (interface segregation) —
+one per aggregate or use case.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a second adapter.">
+
+Sketch a second `UserRepository` implementation that stores users in a plain list
+instead of a map, and confirm `UserService` works with it unchanged. (Pick your
+language.)
+
+**Solution (Python):**
+
+```python
+class ListUserRepository:
+    def __init__(self):
+        self._users = []
+
+    def add(self, user):
+        if any(u.id == user.id for u in self._users):
+            raise DuplicateIdError(f"duplicate {user.id}")
+        self._users.append(user)
+
+    def get(self, user_id):
+        return next((u for u in self._users if u.id == user_id), None)
+
+    def all(self):
+        return list(self._users)
+
+
+svc = UserService(ListUserRepository())  # same service, different adapter
+svc.register(1, "Ada")
+print(svc.list_names())  # ['Ada']
+```
+
+`UserService` is untouched — that's the whole point of depending on the port.
+
+</Interview>
+
+<Interview question="Exercise 2 — Add a use case to the service.">
+
+Add a `count()` method to `UserService` that returns how many users exist, using
+only the repository port. (Pick your language.)
+
+**Solution (Go):**
+
+```go
+func (s *UserService) Count() int {
+	return len(s.repo.All())
+}
+```
+
+It relies only on `All()` from the port — no knowledge of the concrete store.
+
+</Interview>
+
+<Interview question="Exercise 3 — Explain the dependency direction.">
+
+In one sentence, which way do the dependencies point in this design, and why does
+that matter?
+
+**Answer:** Both the service and the adapters depend *inward* on the port
+abstraction — the high-level business logic does not depend on the low-level
+storage detail (dependency inversion) — which is what lets you swap or fake storage
+without touching the logic.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Depend on a port (trait/interface/protocol) | Call a concrete database class directly |
+| Inject dependencies from outside | Construct dependencies inside the component |
+| Ports speak in domain terms | Ports return ORM rows / SQL / driver types |
+| Small, focused ports | One mega-repository interface |
+| In-memory adapter for fast tests | Only testing against a real database |
+| Same service, many adapters | A new service per storage backend |
+
+## Mini-project
+
+**Build an `OrderService` with a repository in one language of your choice.** Define
+an `OrderRepository` port (`save`, `find_by_id`, `find_by_customer`), an in-memory
+adapter, and a service with business rules (e.g. reject an order with no line
+items, compute an order total). Write tests that inject the in-memory adapter and
+cover the happy path and each rule. Then sketch (in comments) what a
+`PostgresOrderRepository` would implement — without changing the service.
+
+Requirements: port + adapter + service, dependency injection via the constructor,
+tests against the in-memory fake, and clean `fmt`/`lint`.
+
+## Interview questions
+
+<Interview question="What is the Repository Pattern?">
+
+It's a design that mediates between the domain/business logic and data storage by
+putting an abstraction — the repository — in between. The service works with the
+repository's domain-oriented methods (`add`, `get`, `all`) and never touches SQL or
+a driver. This decouples business rules from persistence, so you can change the
+database, add caching, or test against an in-memory fake without altering the
+domain logic.
+
+</Interview>
+
+<Interview question="What is Dependency Injection and how does it relate to Dependency Inversion?">
+
+Dependency Injection (DI) is providing a component's dependencies from the outside
+(via constructor, parameter, or setter) rather than having it create them.
+Dependency Inversion (the "D" in SOLID) is the principle that high-level modules
+should depend on abstractions, not on low-level details. DI is the technique that
+realises inversion: because `UserService` receives a `UserRepository` abstraction,
+the concrete database now depends on the abstraction the service defines — the
+dependency arrow is inverted.
+
+</Interview>
+
+<Interview question="How do ports-and-adapters differ across Rust, Go, and Python?">
+
+The architecture is the same; the language mechanism differs. In Rust the port is a
+`trait`, satisfied by an explicit `impl`, and you can inject statically (generics,
+zero-cost) or dynamically (`dyn`). In Go it's an `interface`, satisfied implicitly
+by having the methods, injected as an interface value (dynamic dispatch). In Python
+it's a `Protocol`, satisfied structurally, injected as a duck-typed argument and
+checked by mypy statically (or not at all at runtime). All three let you swap
+adapters without changing the service.
+
+</Interview>
+
+<Interview question="Why is a leaky abstraction in a repository harmful?">
+
+If the repository exposes storage details — SQL strings, ORM entities, transaction
+objects — the service becomes coupled to those details, defeating the purpose. You
+can no longer swap the database or write a simple fake, because callers depend on
+the leaked types. A good port speaks purely in domain terms, hiding *how* data is
+stored so that only *what* the service needs is visible.
+
+</Interview>
+
+## Challenge
+
+Find a function in your own code that constructs a database connection, HTTP client,
+or file handle inside itself, and refactor it: extract an interface/trait/protocol
+for what it needs, accept that as a parameter, and write a test that injects a fake.
+You'll likely uncover hidden coupling — a function that "just reads a file" secretly
+depending on a specific path. That refactor, repeated across a codebase, is what
+makes a system testable and changeable; it is the practical core of Clean and
+Hexagonal architecture, which later Part 2 lessons build on.
+
+## References & further reading
+
+- Alistair Cockburn — [Hexagonal Architecture (Ports & Adapters)](https://alistair.cockburn.us/hexagonal-architecture/)
+- Martin Fowler — [Repository](https://martinfowler.com/eaaCatalog/repository.html) and [Dependency Injection](https://martinfowler.com/articles/injection.html)
+- Robert C. Martin — *Clean Architecture* (the Dependency Rule)
+- Go blog — [accept interfaces, return structs](https://go.dev/wiki/CodeReviewComments#interfaces)
+
+<Progress />

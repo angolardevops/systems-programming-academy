@@ -1,0 +1,485 @@
+---
+title: "Go: Goroutines & Channels"
+description: Go's signature feature — lightweight goroutines and typed channels for communicating between them. Buffered vs unbuffered, select, sync.WaitGroup and Mutex, and the race detector, with deterministic tested examples.
+difficulty: intermediate
+estimatedMinutes: 32
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={32} languages={["go"]} />
+
+Concurrency is the feature Go is famous for. A **goroutine** is a function running
+concurrently, so cheap you can start thousands; the runtime multiplexes them onto
+OS threads for you. **Channels** are typed pipes that let goroutines communicate
+and synchronise. Go's guiding proverb — *"Don't communicate by sharing memory;
+share memory by communicating"* — points you toward channels first and locks only
+when you must. This lesson covers goroutines, channels, `select`, and the `sync`
+primitives, and shows how the race detector keeps you honest.
+
+<Aside type="note" title="Prerequisites">
+  You should know Go functions, closures, and
+  [Slices, Maps & Strings](/systems-programming-academy/part-1-foundations/go/collections/). This is the
+  capstone of the Go foundations track.
+</Aside>
+
+All code is from the tested module
+[`examples/go-concurrency/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test -race` green, `go vet` clean). Every result is **deterministic** — the
+same answer every run — which is what lets us test concurrent code.
+
+## Goroutines
+
+Prefix any call with `go` and it runs concurrently. But the program exits when
+`main` returns, so you must **wait** for goroutines to finish — a channel or a
+`sync.WaitGroup` does that.
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	results := make([]int, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = i * i // each goroutine writes a distinct index — no race
+		}(i)
+	}
+	wg.Wait() // block until all three call Done
+	fmt.Println(results) // [0 1 4]
+}
+```
+
+Output:
+
+```text
+[0 1 4]
+```
+
+<Aside type="tip" title="A goroutine is not a thread">
+  Goroutines start with a tiny stack (a few KB) that grows on demand, and the Go
+  scheduler runs many of them on a small pool of OS threads. Starting 10,000
+  goroutines is normal; starting 10,000 OS threads is not. That cheapness is why
+  Go programs express concurrency so freely.
+</Aside>
+
+## Channels: communicate and synchronise
+
+A channel carries values of one type. `ch <- v` sends; `v := <-ch` receives. An
+**unbuffered** channel blocks the sender until a receiver is ready — so it both
+transfers data *and* synchronises.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan string)
+	go func() {
+		ch <- "hello from the goroutine" // blocks until main receives
+	}()
+	msg := <-ch // blocks until the goroutine sends
+	fmt.Println(msg)
+}
+```
+
+Output:
+
+```text
+hello from the goroutine
+```
+
+A **buffered** channel (`make(chan int, n)`) holds up to `n` values before the
+sender blocks. Closing a channel signals "no more values"; ranging over it drains
+until closed.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int, 3) // buffer of 3
+	ch <- 1
+	ch <- 2
+	ch <- 3
+	close(ch) // no more sends after this
+
+	for v := range ch { // ends when the channel is closed and drained
+		fmt.Println(v)
+	}
+}
+```
+
+Output:
+
+```text
+1
+2
+3
+```
+
+<Mermaid title="Fan-out / fan-in: many goroutines, one channel" code={`flowchart LR
+  M["main: for each n, go work(n)"] --> W1["goroutine 1"]
+  M --> W2["goroutine 2"]
+  M --> W3["goroutine 3"]
+  W1 --> C["channel"]
+  W2 --> C
+  W3 --> C
+  C --> R["main: collect len(nums) results"]`} />
+
+Here is that fan-in pattern, made deterministic by sorting — from the module:
+
+```go title="concurrency.go"
+func SquareAll(nums []int) []int {
+	ch := make(chan int)
+	for _, n := range nums {
+		go func(n int) { ch <- n * n }(n) // fan out
+	}
+	out := make([]int, 0, len(nums))
+	for range nums { // fan in: receive exactly len(nums) results
+		out = append(out, <-ch)
+	}
+	sort.Ints(out) // goroutines finish in any order; sort for a stable result
+	return out
+}
+```
+
+## `select`: wait on multiple channels
+
+`select` blocks until one of its channel operations can proceed. It's how you
+merge streams, add timeouts, or listen for a stop signal.
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"sort"
+)
+
+func main() {
+	a := make(chan int)
+	b := make(chan int)
+	go func() { a <- 1; a <- 3; close(a) }()
+	go func() { b <- 2; b <- 4; close(b) }()
+
+	var got []int
+	// Merge two channels until both are closed.
+	for a != nil || b != nil {
+		select {
+		case v, ok := <-a:
+			if !ok {
+				a = nil // a closed: disable this case
+				continue
+			}
+			got = append(got, v)
+		case v, ok := <-b:
+			if !ok {
+				b = nil
+				continue
+			}
+			got = append(got, v)
+		}
+	}
+	sort.Ints(got)
+	fmt.Println(got) // [1 2 3 4]
+}
+```
+
+Output:
+
+```text
+[1 2 3 4]
+```
+
+## Shared state with `sync.Mutex`
+
+Sometimes state is genuinely shared. A `sync.Mutex` serialises access so
+concurrent updates don't corrupt it. Combined with a `WaitGroup`:
+
+```go title="concurrency.go"
+func SharedCounter(workers, perWorker int) int {
+	var (
+		mu    sync.Mutex
+		count int
+		wg    sync.WaitGroup
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perWorker; j++ {
+				mu.Lock()
+				count++ // critical section: one goroutine at a time
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return count // always workers*perWorker
+}
+```
+
+<Aside type="caution" title="Always test concurrent code with -race">
+  Run `go test -race` (and build with `-race` in CI). The race detector
+  instruments memory access and reports data races at runtime — two goroutines
+  touching the same variable without synchronisation, one writing. It is the
+  single most valuable tool for concurrent Go. The module's tests pass under
+  `-race`.
+</Aside>
+
+<Quiz
+  question={'What happens when a goroutine sends on an unbuffered channel and no goroutine is receiving?'}
+  options={[
+    { text: "The value is dropped silently.", },
+    { text: "The send blocks until another goroutine receives — unbuffered channels are synchronous.", correct: true },
+    { text: "It returns an error.", },
+    { text: "It buffers the value automatically.", },
+  ]}
+  explanation="An unbuffered channel has no storage, so a send and a receive must meet: the sender blocks until a receiver is ready (and vice versa). This makes the channel a synchronisation point, not just a data transfer. A buffered channel only blocks the sender once its buffer is full."
+/>
+
+## Common mistakes & debugging
+
+### 1. Deadlock: everyone is blocked
+
+```go
+func main() {
+	ch := make(chan int)
+	ch <- 1 // ✗ no receiver; main blocks forever
+}
+```
+
+```text
+fatal error: all goroutines are asleep - deadlock!
+```
+
+**Fix:** ensure a receiver exists (run the send in a goroutine, or use a buffered
+channel). The runtime detects the total deadlock and aborts.
+
+### 2. Goroutine leak: nobody receives
+
+If a goroutine blocks on a send that no one will ever receive, it leaks — it stays
+alive, holding memory, forever. **Fix:** make sure every started goroutine can
+finish: close channels, use `context` for cancellation, or bound the work.
+
+### 3. Forgetting to synchronise shared data
+
+```go
+// Two goroutines doing count++ with no mutex is a data race:
+// go func(){ count++ }()
+// go func(){ count++ }()
+```
+
+`go run -race` reports it. **Fix:** protect the variable with a `sync.Mutex`, use
+`sync/atomic`, or — better — restructure so each value has a single owner and pass
+it over a channel.
+
+## Exercises
+
+<Interview question="Exercise 1 — Wait for goroutines with a WaitGroup.">
+
+Start 3 goroutines that each append their square to a shared slice at their own
+index, and print the result. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	out := make([]int, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			out[i] = i * i
+		}(i)
+	}
+	wg.Wait()
+	fmt.Println(out) // [0 1 4 9]
+}
+```
+
+Each goroutine writes a distinct index, so no lock is needed; `WaitGroup` makes
+`main` wait for all four.
+
+</Interview>
+
+<Interview question="Exercise 2 — Sum values sent over a channel.">
+
+A goroutine sends 1..5 on a channel then closes it; sum them in main. Complete
+program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int)
+	go func() {
+		defer close(ch)
+		for i := 1; i <= 5; i++ {
+			ch <- i
+		}
+	}()
+
+	sum := 0
+	for v := range ch { // ends when the channel closes
+		sum += v
+	}
+	fmt.Println(sum) // 15
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — A safe shared counter.">
+
+Have 4 goroutines each increment a shared counter 1000 times with a mutex; print
+the total. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var (
+		mu    sync.Mutex
+		count int
+		wg    sync.WaitGroup
+	)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				mu.Lock()
+				count++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(count) // 4000
+}
+```
+
+Run it with `go run -race main.go` to confirm there is no data race.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Channels to hand off ownership of data | Sharing memory with locks when a channel would do |
+| `sync.WaitGroup` to wait for goroutines | Assuming `main` will outlive its goroutines |
+| Close a channel from the **sender**, once | Closing from a receiver, or closing twice (panics) |
+| `select` for multiplexing / cancellation | Busy-looping polling channels |
+| `context.Context` to cancel and time out | Goroutines that can never be stopped (leaks) |
+| Always run `go test -race` | Trusting "it worked once" for concurrent code |
+
+## Mini-project
+
+**Build a bounded worker pool.** Send N jobs into a `jobs` channel; start W worker
+goroutines that each read jobs, process them (e.g. square the number), and send
+results to a `results` channel; the main goroutine collects all N results. Use a
+`WaitGroup` to know when all workers are done so you can close `results` safely.
+
+Requirements: fixed number of workers (not one goroutine per job), deterministic
+aggregate result (e.g. the sum), passes `go test -race`, and `go vet` clean.
+
+## Interview questions
+
+<Interview question="What is a goroutine and how does it differ from an OS thread?">
+
+A goroutine is a function scheduled by the Go runtime to run concurrently. It's far
+cheaper than an OS thread: it starts with a small, growable stack and the runtime
+multiplexes many goroutines onto a small pool of threads (the M:N scheduler). You
+can run hundreds of thousands of goroutines, whereas OS threads are limited by
+memory and kernel overhead. You start one with the `go` keyword.
+
+</Interview>
+
+<Interview question="What is the difference between a buffered and an unbuffered channel?">
+
+An unbuffered channel (`make(chan T)`) has no storage: a send blocks until a
+receiver is ready, so it synchronises the two goroutines as well as passing a
+value. A buffered channel (`make(chan T, n)`) holds up to `n` values; a send only
+blocks when the buffer is full, and a receive only blocks when it is empty.
+Unbuffered is for handoff/synchronisation; buffered decouples sender and receiver
+up to the buffer size.
+
+</Interview>
+
+<Interview question="When would you use a channel versus a sync.Mutex?">
+
+Use a channel when the problem is about **passing ownership** of data between
+goroutines — pipelines, work queues, results aggregation — which is the idiomatic
+Go default. Use a `sync.Mutex` when goroutines must repeatedly read and update the
+*same* in-place shared state (a counter, a cache, a map) where copying via messages
+would be wasteful. The proverb "share memory by communicating" nudges you toward
+channels first.
+
+</Interview>
+
+<Interview question="What does the -race flag do and why is it important?">
+
+`-race` enables the race detector, which instruments memory accesses at runtime and
+reports data races — two goroutines accessing the same memory concurrently with at
+least one write and no synchronisation. Data races cause nondeterministic,
+hard-to-reproduce bugs, so catching them mechanically is invaluable. Run tests with
+`go test -race` and consider building with it in CI; the only cost is slower
+execution during testing.
+
+</Interview>
+
+## Challenge
+
+Take the fan-in `SquareAll` and make it a **bounded** worker pool: instead of one
+goroutine per input, start a fixed number of workers reading from a jobs channel.
+Measure both versions on a large input with `-race` on. You'll discover that
+unbounded goroutine-per-item is fine for small N but a bounded pool is what you
+want under load. Then add a `context.Context` so a caller can cancel the whole
+computation midway. Getting cancellation right — no leaked goroutines, no writes to
+a closed channel — is the real test of understanding Go concurrency.
+
+## References & further reading
+
+- *A Tour of Go* — [concurrency](https://go.dev/tour/concurrency/1)
+- *Effective Go* — [concurrency, goroutines, channels](https://go.dev/doc/effective_go#concurrency)
+- Go blog — [Go concurrency patterns: pipelines](https://go.dev/blog/pipelines)
+- Go blog — [the race detector](https://go.dev/doc/articles/race_detector)
+
+<Progress />

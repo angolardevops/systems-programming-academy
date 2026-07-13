@@ -1,0 +1,376 @@
+---
+title: "Python: Testing"
+description: Testing with the stdlib unittest and pytest — fixtures, exception assertions, subtests/parametrization, mocking with unittest.mock, and doctests. A fully tested bank-account module.
+difficulty: beginner
+estimatedMinutes: 30
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={30} languages={["python"]} />
+
+Python ships a testing framework in the standard library — `unittest` — and the
+ecosystem's favourite, `pytest`, layers a lighter syntax on top. Either way the
+discipline is the same: write small tests that pin down behaviour, run them
+constantly, and let them catch regressions before your users do. This lesson covers
+fixtures, exception assertions, parametrized/subtests, **mocking** external
+dependencies, and doctests — using a bank-account module whose tests all pass.
+
+<Aside type="note" title="Prerequisites">
+  You need Python classes and exceptions, and the
+  [data model](/systems-programming-academy/part-1-foundations/python/data-model/) basics. This mirrors the Rust
+  and Go testing lessons — compare the three.
+</Aside>
+
+All code is from the tested module
+[`examples/py-testing/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` green — 10 tests incl. doctests — `ruff` clean). Every snippet
+is **complete**.
+
+## Your first test with `unittest`
+
+Subclass `unittest.TestCase`, write `test_*` methods, and assert with the `self.assert*`
+helpers. `setUp` runs before each test — a fresh fixture every time.
+
+```python title="test_bank.py"
+import unittest
+from bank import Account
+
+
+class AccountTests(unittest.TestCase):
+    def setUp(self):
+        self.acc = Account(100)  # fresh account before each test
+
+    def test_deposit_increases_balance(self):
+        self.assertEqual(self.acc.deposit(50), 150)
+
+    def test_withdraw_reduces_balance(self):
+        self.assertEqual(self.acc.withdraw(30), 70)
+```
+
+Run it:
+
+```bash
+python3 -m unittest              # discover and run all test_*.py
+python3 -m unittest -v           # verbose
+python3 -m unittest test_bank.AccountTests.test_deposit_increases_balance  # one test
+```
+
+```text
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK
+```
+
+<Aside type="tip" title="pytest: the same tests, less ceremony">
+  With `pytest` installed you can drop the class and use plain functions and the
+  bare `assert`:
+
+  ```python
+  from bank import Account
+
+  def test_deposit():
+      assert Account(100).deposit(50) == 150
+  ```
+
+  `pytest` discovers `test_*` functions, gives rich assertion introspection, and adds
+  fixtures and `@pytest.mark.parametrize`. The concepts below map directly.
+</Aside>
+
+## Asserting exceptions
+
+Use `assertRaises` as a context manager to assert that a block raises:
+
+```python title="test_bank.py"
+def test_overdraw_raises_and_leaves_balance(self):
+    with self.assertRaises(InsufficientFundsError):
+        self.acc.withdraw(150)
+    self.assertEqual(self.acc.balance, 100)  # invariant held after the failure
+```
+
+Testing the failure path — and that state is unchanged after it — is as important as
+testing success.
+
+## Parametrized cases with `subTest`
+
+To cover many inputs without a separate method each, loop and wrap the body in
+`self.subTest`. Each iteration is reported independently, so a failure names the
+exact case.
+
+```python title="test_bank.py"
+def test_rejects_nonpositive_amounts(self):
+    for amount in (0, -5):
+        with self.subTest(amount=amount):
+            with self.assertRaises(ValueError):
+                self.acc.deposit(amount)
+            with self.assertRaises(ValueError):
+                self.acc.withdraw(amount)
+```
+
+<Mermaid title="unittest runs three kinds of check from your test files" code={`flowchart TD
+  U["python -m unittest"] --> T["TestCase methods: assertions"]
+  U --> S["subTest: many cases, each reported"]
+  U --> D["doctests (via load_tests): // Output-style checks"]`} />
+
+## Mocking dependencies
+
+To test code that depends on something slow, external, or nondeterministic (a
+clock, a network call), replace it with a **mock**. `unittest.mock.Mock` records
+calls and returns whatever you tell it.
+
+```python title="test_bank.py"
+from unittest.mock import Mock
+from bank import stamp
+
+
+def test_stamp_uses_injected_clock(self):
+    clock = Mock()
+    clock.now.return_value = "2024-01-01T00:00"     # program the fake
+    self.assertEqual(stamp(clock, "hello"), "[2024-01-01T00:00] hello")
+    clock.now.assert_called_once()                   # verify the interaction
+```
+
+The code under test (`stamp`) takes its `clock` as a parameter — *dependency
+injection* — which is what makes swapping in a mock trivial. Hard-coded
+dependencies are hard to test.
+
+<Quiz
+  question={'Why inject a Clock into stamp() instead of calling a real clock inside it?'}
+  options={[
+    { text: "It runs faster.", },
+    { text: "So a test can pass a mock/fake clock and get a deterministic, verifiable result.", correct: true },
+    { text: "Because unittest requires all functions to take a clock.", },
+    { text: "It reduces memory usage.", },
+  ]}
+  explanation="Dependency injection — passing the clock in rather than reaching for a global — lets a test substitute a Mock with a fixed return value, so the output is deterministic and the interaction (was now() called?) is verifiable. Code that hard-codes a real clock, network client, or database is hard to test without touching those real systems."
+/>
+
+## Doctests
+
+Examples in docstrings that end in the expected output are run by adding them to the
+suite. They double as documentation and tests.
+
+```python title="bank.py"
+class Account:
+    """A minimal account whose balance can never go negative.
+
+    >>> acc = Account(100)
+    >>> acc.deposit(50)
+    150
+    >>> acc.withdraw(30)
+    120
+    """
+```
+
+```python title="test_bank.py"
+import doctest
+import bank
+
+def load_tests(loader, tests, ignore):
+    tests.addTests(doctest.DocTestSuite(bank))  # run bank.py's doctests too
+    return tests
+```
+
+## Common mistakes & debugging
+
+### 1. Test methods not named `test_`
+
+`unittest` only runs methods starting with `test`. A `check_deposit` method is
+silently skipped. If your test count doesn't rise, check the name.
+
+### 2. Sharing mutable state between tests
+
+Relying on one test's mutations in another makes tests order-dependent and flaky.
+Build fresh state in `setUp` (or per test), as above — every test starts from a known
+account.
+
+### 3. Over-mocking
+
+Mock *external* boundaries (clocks, network, filesystem), not the code you're
+testing. Mocking the unit under test proves nothing. If you find yourself mocking a
+lot, the design may need more dependency injection or smaller units.
+
+## Exercises
+
+<Interview question="Exercise 1 — Assert an exception.">
+
+Given `def parse_port(s): return int(s)`, write a test that it raises `ValueError`
+on `"nope"`. Complete test module.
+
+**Solution:**
+
+```python
+import unittest
+
+
+def parse_port(s):
+    return int(s)
+
+
+class ParsePortTests(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(parse_port("8080"), 8080)
+
+    def test_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            parse_port("nope")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Parametrize with subTest.">
+
+Test `def is_even(n): return n % 2 == 0` across several inputs using `subTest`.
+
+**Solution:**
+
+```python
+import unittest
+
+
+def is_even(n):
+    return n % 2 == 0
+
+
+class IsEvenTests(unittest.TestCase):
+    def test_cases(self):
+        cases = [(2, True), (3, False), (0, True), (-4, True)]
+        for n, expected in cases:
+            with self.subTest(n=n):
+                self.assertEqual(is_even(n), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+Each `(n, expected)` pair is reported as its own subtest.
+
+</Interview>
+
+<Interview question="Exercise 3 — Mock a dependency.">
+
+`greet(clock)` returns `f"Hi at {clock.now()}"`. Test it with a mock clock.
+
+**Solution:**
+
+```python
+import unittest
+from unittest.mock import Mock
+
+
+def greet(clock):
+    return f"Hi at {clock.now()}"
+
+
+class GreetTests(unittest.TestCase):
+    def test_with_mock_clock(self):
+        clock = Mock()
+        clock.now.return_value = "noon"
+        self.assertEqual(greet(clock), "Hi at noon")
+        clock.now.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Fresh fixtures in `setUp` (or per test) | Tests that depend on each other's state |
+| `assertRaises` for the failure path | Testing only the happy path |
+| `subTest`/`parametrize` for many inputs | Copy-pasted near-identical test methods |
+| Inject dependencies; mock the boundaries | Hard-coded clocks/network; mocking everything |
+| Doctests on public functions for live docs | Examples in docstrings never run |
+| Run tests in CI on every push | Testing manually, occasionally |
+
+## Mini-project
+
+**Test-drive a `Stack`** with `push`, `pop` (raises `IndexError` when empty), `peek`,
+and `__len__`. Write: `setUp` building an empty stack, tests for push/pop/peek, an
+`assertRaises` for popping empty, a `subTest`-parametrized test over several push
+sequences, and a doctest on `push`. Then, if `pytest` is available, rewrite two tests
+as plain functions to feel the difference.
+
+Requirements: `python3 -m unittest` green (including doctests), `ruff` clean, and
+coverage of every error path.
+
+## Interview questions
+
+<Interview question="What is the difference between unittest and pytest?">
+
+`unittest` is the standard-library framework, xUnit-style: you subclass `TestCase`
+and use `self.assert*` methods. `pytest` is a popular third-party framework that
+runs the same tests but also lets you write plain functions with the bare `assert`
+statement (with rich failure introspection), and adds powerful fixtures and
+`@parametrize`. `pytest` can run `unittest` tests too, so many projects use pytest as
+the runner while keeping either style. The testing *concepts* — fixtures, assertions,
+mocking — are shared.
+
+</Interview>
+
+<Interview question="How do you test that code raises an exception?">
+
+With `unittest`, use `assertRaises` as a context manager: `with
+self.assertRaises(ValueError): do_thing()`. The test passes only if the block raises
+that exception (or a subclass). In `pytest` it's `with pytest.raises(ValueError):`.
+You can also inspect the exception message. Testing failure paths — and that state is
+correct afterward — is as important as testing success.
+
+</Interview>
+
+<Interview question="What is mocking and when should you use it?">
+
+Mocking replaces a real dependency with a controllable stand-in (via
+`unittest.mock.Mock`/`patch`) that records how it was called and returns programmed
+values. Use it to isolate the unit under test from slow, external, or
+nondeterministic things — clocks, network, databases, filesystems — so tests are
+fast and deterministic. Mock at boundaries, not the code you're testing; over-mocking
+produces tests that pass without proving the real behaviour.
+
+</Interview>
+
+<Interview question="What are doctests and what are their trade-offs?">
+
+Doctests are examples in docstrings (lines starting with `>>>` followed by expected
+output) that a test runner executes and checks. They keep documentation honest —
+examples can't drift from behaviour without failing — and serve as lightweight tests.
+Their trade-off is that they're awkward for complex setups, non-deterministic output,
+or many cases; for those, a proper `unittest`/`pytest` test is clearer. Use doctests
+for small, illustrative examples and real tests for thorough coverage.
+
+</Interview>
+
+## Challenge
+
+Take a function from an earlier Python lesson (`first`, `total_price`, `render_page`)
+and give it a complete test suite: happy path, every error/edge (empty input, wrong
+type, boundary), a `subTest`-parametrized block, and — if it has an external
+dependency — a mock. Then measure with `coverage run -m unittest && coverage report`
+and push the uncovered branches to green. The number matters less than the habit:
+before you call code done, ask "what input breaks this?" and write that test.
+
+## References & further reading
+
+- Python docs — [`unittest`](https://docs.python.org/3/library/unittest.html) and [`unittest.mock`](https://docs.python.org/3/library/unittest.mock.html)
+- [pytest documentation](https://docs.pytest.org/) — fixtures, `parametrize`, assertions
+- Python docs — [`doctest`](https://docs.python.org/3/library/doctest.html)
+- [`coverage.py`](https://coverage.readthedocs.io/) — measuring test coverage
+
+<Progress />

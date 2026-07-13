@@ -1,0 +1,419 @@
+---
+title: "Python: Protocols e Duck Typing"
+description: Se grasna como um pato, é um pato. O duck typing do Python tornado verificável com typing.Protocol — tipagem estrutural sem herança, mais @runtime_checkable e como os Protocols se comparam com ABCs. Exemplos completos e testados.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["python"]} />
+
+O Python sempre foi duck-typed: *"se anda como um pato e grasna como um pato, é um
+pato."* O seu código importa-se com o que um objeto **consegue fazer**, não de que
+classe descende — passe qualquer coisa com um método `.read()` a código que espera
+um ficheiro, e funciona. Durante anos este poder foi invisível aos verificadores de
+tipos. Depois a PEP 544 acrescentou o **`typing.Protocol`**, que descreve um
+conjunto de métodos e deixa qualquer objeto que os tenha satisfazê-lo
+**estruturalmente** — duck typing, agora verificável. Esta lição liga a ideia de
+runtime à ferramenta estática.
+
+<Aside type="note" title="Pré-requisitos">
+  Precisa de [Type Hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/) e do
+  [modelo de dados](/systems-programming-academy/pt/part-1-foundations/python/data-model/). Os Protocols são um
+  tipo de type hint estrutural.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/py-protocols/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` verde — 8 testes incl. doctests — `ruff` limpo). Cada bloco é
+**completo**.
+
+## Duck typing: comportamento sobre herança
+
+Uma função que chama `.quack()` funciona em *qualquer coisa* com um método
+`.quack()` — sem classe base partilhada.
+
+```python title="main.py — completo, executável"
+class Duck:
+    def quack(self):
+        return "Quack!"
+
+
+class Dog:
+    def quack(self):  # um Dog que por acaso grasna
+        return "Woof-quack"
+
+
+def make_it_quack(thing):
+    return thing.quack()  # só importa que .quack() exista
+
+
+print(make_it_quack(Duck()))  # Quack!
+print(make_it_quack(Dog()))   # Woof-quack
+```
+
+Saída:
+
+```text
+Quack!
+Woof-quack
+```
+
+Isto é flexível mas, sem tipos, um verificador não o pode avisar quando passa algo
+que *não consegue* grasnar. O `Protocol` corrige isso.
+
+## `typing.Protocol`: tipagem estrutural
+
+Declare um `Protocol` a listar os métodos exigidos. Qualquer objeto com esses
+métodos satisfá-lo — **não herda do protocol**. Um verificador verifica então que
+quem chama passa objetos conformes.
+
+```python title="protocols_demo.py"
+from typing import Protocol
+
+
+class SupportsQuack(Protocol):
+    def quack(self) -> str: ...
+
+
+def make_it_quack(thing: SupportsQuack) -> str:
+    return thing.quack()
+```
+
+`Duck` e `Dog` nunca mencionam `SupportsQuack`, mas ambos são aceites — satisfação
+estrutural e implícita, exatamente como as interfaces Go.
+
+<Mermaid title="Satisfação estrutural: sem herança, só métodos a condizer" code={`flowchart LR
+  B["Button (tem render)"] -->|satisfaz estruturalmente| P["Protocol Renderable"]
+  H["Heading (tem render)"] -->|satisfaz estruturalmente| P
+  P --> F["render_page(widgets: list[Renderable])"]`} />
+
+Um programa completo com duas classes não relacionadas atrás de um protocol:
+
+```python title="main.py — completo, executável"
+from typing import Protocol
+
+
+class Renderable(Protocol):
+    def render(self) -> str: ...
+
+
+class Button:
+    def __init__(self, label):
+        self.label = label
+
+    def render(self):
+        return f"[ {self.label} ]"
+
+
+class Heading:
+    def __init__(self, text):
+        self.text = text
+
+    def render(self):
+        return f"# {self.text}"
+
+
+def render_page(widgets: list[Renderable]) -> str:
+    return "\n".join(w.render() for w in widgets)
+
+
+print(render_page([Heading("Home"), Button("OK")]))
+```
+
+Saída:
+
+```text
+# Home
+[ OK ]
+```
+
+## `@runtime_checkable`: `isinstance` contra um Protocol
+
+Por defeito um `Protocol` é um conceito só-estático — `isinstance(x, MyProtocol)`
+levanta erro. Decore-o com `@runtime_checkable` e o `isinstance` funciona,
+verificando (apenas) que os métodos **existem**.
+
+```python title="main.py — completo, executável"
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Sized(Protocol):
+    def __len__(self) -> int: ...
+
+
+print(isinstance([1, 2, 3], Sized))  # True  (list tem __len__)
+print(isinstance("hello", Sized))    # True  (str tem __len__)
+print(isinstance(42, Sized))         # False (int não tem __len__)
+```
+
+Saída:
+
+```text
+True
+True
+False
+```
+
+<Aside type="caution" title="runtime_checkable só verifica nomes, não assinaturas">
+  `isinstance(x, MyProtocol)` com `@runtime_checkable` verifica que os métodos
+  exigidos *existem* — não verifica os tipos dos argumentos nem o tipo de retorno.
+  Por isso uma classe com um `render()` que recebe argumentos errados na mesma passa
+  a verificação isinstance. A verificação estática (mypy/pyright) verifica
+  assinaturas; a verificação em runtime é um teste mais grosseiro, de melhor esforço.
+</Aside>
+
+<Quiz
+  question={'Como é que uma classe declara que satisfaz um typing.Protocol?'}
+  options={[
+    { text: "Herdando: class Button(Renderable).", },
+    { text: "Não declara nada — ter os métodos exigidos basta (tipagem estrutural).", correct: true },
+    { text: "Registando com Protocol.register().", },
+    { text: "Acrescentando um decorador @protocol.", },
+  ]}
+  explanation="Os Protocols usam satisfação estrutural (implícita): qualquer classe com os métodos exigidos satisfaz o protocol, sem herança nem registo. Isto permite definir um Protocol para tipos que não são seus, e deixa classes não relacionadas (Button, Heading) satisfazer o mesmo protocol. É o mesmo modelo das interfaces Go — e o oposto das ABCs, que usam subclassing nominal (explícito)."
+/>
+
+## Protocol vs ABC
+
+O Python tem duas formas de exprimir "um tipo com estes métodos":
+
+| | `typing.Protocol` (estrutural) | `abc.ABC` (nominal) |
+| --- | --- | --- |
+| Satisfação | implícita — basta ter os métodos | explícita — tem de fazer subclass |
+| Funciona para tipos que não são seus | ✅ sim | ❌ não (não pode adicionar base) |
+| `isinstance` | só com `@runtime_checkable` | sempre |
+| Impõe implementação na instanciação | ❌ não (só o verificador) | ✅ sim (`TypeError` se métodos abstratos por implementar) |
+| Melhor para | descrever capacidades entre tipos não relacionados | uma hierarquia de classes que controla |
+
+Recorra a `Protocol` para descrever "qualquer coisa que consegue X" (sobretudo tipos
+de terceiros); recorra a uma `ABC` quando é dono da hierarquia e quer *forçar* as
+subclasses a implementar métodos.
+
+## Erros comuns & depuração
+
+### 1. `isinstance` num Protocol sem `@runtime_checkable`
+
+```python
+from typing import Protocol
+
+class Reader(Protocol):
+    def read(self) -> str: ...
+
+isinstance(open("f"), Reader)  # ✗ TypeError
+```
+
+```text
+TypeError: Instance and class checks can only be used with @runtime_checkable protocols
+```
+
+**Correção:** acrescente `@runtime_checkable` acima do protocol — ou, melhor,
+confie na verificação estática e evite o `isinstance` em runtime.
+
+### 2. Esperar que o `runtime_checkable` valide assinaturas
+
+Como notado, só verifica a *presença* dos métodos. Uma classe com um método de forma
+errada passa o `isinstance` mas falha a verificação estática. Não trate a verificação
+de runtime como validação completa.
+
+### 3. Recorrer a uma ABC quando um Protocol encaixa melhor
+
+Se se der a querer tipar "qualquer coisa com um método `.close()`" mas não consegue
+fazer classes de terceiros herdar da sua ABC, é o sinal para usar um `Protocol` —
+funciona em tipos que não controla.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Definir e usar um Protocol.">
+
+Escreva um protocol `HasArea` (`area() -> float`) e uma função que soma áreas de
+quaisquer objetos que o tenham. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+from typing import Protocol
+
+
+class HasArea(Protocol):
+    def area(self) -> float: ...
+
+
+class Square:
+    def __init__(self, side):
+        self.side = side
+
+    def area(self):
+        return self.side * self.side
+
+
+class Circle:
+    def __init__(self, r):
+        self.r = r
+
+    def area(self):
+        return 3.14159 * self.r * self.r
+
+
+def total_area(shapes: list[HasArea]) -> float:
+    return sum(s.area() for s in shapes)
+
+
+print(total_area([Square(2), Circle(1)]))  # 7.14159
+```
+
+`Square` e `Circle` satisfazem `HasArea` sem herdar dele.
+
+</Interview>
+
+<Interview question="Exercício 2 — Um protocol runtime_checkable.">
+
+Faça um protocol `Closeable` usável com `isinstance`. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+class Connection:
+    def close(self):
+        pass
+
+
+print(isinstance(Connection(), Closeable))  # True
+print(isinstance(42, Closeable))            # False
+```
+
+</Interview>
+
+<Interview question="Exercício 3 — Duck typing sem qualquer Protocol.">
+
+Escreva uma função `describe` que funciona em qualquer coisa com um atributo `name`.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+def describe(thing):
+    return f"This is {thing.name}"
+
+
+class Cat:
+    name = "Felix"
+
+
+class Product:
+    def __init__(self, name):
+        self.name = name
+
+
+print(describe(Cat()))              # This is Felix
+print(describe(Product("Widget")))  # This is Widget
+```
+
+Não é preciso tipo partilhado em runtime — duck typing. Acrescentar um
+`Named(Protocol)` com um atributo `name: str` deixaria um verificador validar quem
+chama.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| `Protocol` para tipar "qualquer coisa que consegue X" | Forçar uma hierarquia de herança para uma capacidade |
+| Protocols pequenos (um ou dois métodos) | Um protocol gigante que nada satisfaz por completo |
+| `Protocol` para tipos de terceiros / não relacionados | Uma ABC que classes externas não podem subclassar |
+| Verificação estática como garantia principal | Confiar no `isinstance` para validação completa |
+| `@runtime_checkable` só quando precisa mesmo de `isinstance` | Decorar cada protocol por hábito |
+| `ABC` quando é dono da hierarquia e tem de forçar métodos | `Protocol` quando precisa de implementação imposta |
+
+## Mini-projeto
+
+**Construa um sistema de plugins com um Protocol.** Defina um protocol `Plugin` com
+`name() -> str` e `run(data: str) -> str`. Implemente três classes de plugin não
+relacionadas (uppercase, reverse, repeat) que o satisfazem sem herança. Escreva um
+`run_pipeline(plugins: list[Plugin], data: str) -> str` que enfia os dados por cada
+uma. Acrescente uma variante `@runtime_checkable` e um teste com `isinstance`.
+
+Requisitos: satisfação estrutural (sem base partilhada), `python3 -m unittest` verde
+com doctests, e `ruff` limpo.
+
+## Perguntas de entrevista
+
+<Interview question="O que é duck typing?">
+
+Duck typing é a abordagem do Python de julgar um objeto pelo seu comportamento em vez
+do seu tipo: se tem os métodos e atributos que uma operação precisa, pode ser usado,
+independentemente da sua classe ou ascendência. "Se anda como um pato e grasna como
+um pato, é um pato." Torna o código flexível e desacoplado, mas sem type hints um
+verificador não o pode avisar antes do runtime quando um objeto não tem o método
+necessário.
+
+</Interview>
+
+<Interview question="O que é typing.Protocol e como se relaciona com duck typing?">
+
+`typing.Protocol` (PEP 544) é uma forma de descrever um tipo estrutural — um conjunto
+de métodos/atributos — para os verificadores estáticos poderem validar duck typing.
+Qualquer classe que tenha os membros exigidos satisfaz o protocol *implicitamente*,
+sem herança. Traz o duck typing para o sistema de tipos: obtém a flexibilidade de
+"qualquer coisa que consegue X" mais a segurança de um verificador a assinalar
+objetos que não conseguem. Espelha as interfaces Go satisfeitas implicitamente.
+
+</Interview>
+
+<Interview question="Qual a diferença entre um Protocol e uma ABC?">
+
+Um `Protocol` usa tipagem **estrutural**: a satisfação é implícita — qualquer classe
+com os métodos certos qualifica, mesmo as que não são suas. Uma `abc.ABC` usa
+tipagem **nominal**: uma classe tem de fazer subclass explicitamente, e a ABC pode
+forçar as subclasses a implementar métodos abstratos (levantando `TypeError` na
+instanciação senão). Use um Protocol para descrever capacidades entre tipos não
+relacionados/de terceiros; use uma ABC quando controla a hierarquia e quer
+implementação imposta.
+
+</Interview>
+
+<Interview question="O que faz o @runtime_checkable, e quais os seus limites?">
+
+Deixa-o usar um Protocol com `isinstance()`/`issubclass()`. Sem ele, esses levantam
+`TypeError`. O limite importante é que a verificação em runtime só verifica que os
+métodos exigidos **existem por nome** — ignora as suas assinaturas e tipos de
+retorno. Por isso um objeto pode passar `isinstance(x, MyProtocol)` mas ainda ser mal
+usado; só a verificação estática valida a forma completa. Use-o com parcimónia,
+quando é mesmo precisa uma verificação em runtime.
+
+</Interview>
+
+## Desafio
+
+Encontre um sítio no seu código onde usou herança ou cadeias de `isinstance` só para
+dizer "isto consegue ser renderizado / guardado / comparado", e substitua a classe
+base por um `Protocol`. Note que classes que *não são suas* — um modelo de terceiros,
+um tipo da stdlib — agora também o podem satisfazer, o que a herança nunca permitiria.
+Depois corra o mypy e veja-o validar quem chama estruturalmente. Essa mudança de "o
+que é?" para "o que consegue fazer?" é a essência do design Pythonic e duck-typed.
+
+## Referências & leitura adicional
+
+- Docs do Python — [`typing.Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol)
+- PEP 544 — [Protocols: structural subtyping](https://peps.python.org/pep-0544/)
+- Docs do Python — [`abc` — abstract base classes](https://docs.python.org/3/library/abc.html)
+- *Fluent Python* (Ramalho), cap. 13 — "Interfaces, Protocols, and ABCs"
+
+<Progress />

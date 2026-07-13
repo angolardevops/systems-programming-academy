@@ -1,0 +1,56 @@
+---
+// Benchmark table with inline proportional bars. `lowerIsBetter` flips the
+// color logic. Values are plain numbers so the table stays sortable/printable.
+interface Row {
+  label: string;
+  value: number;
+  unit?: string;
+  note?: string;
+}
+interface Props {
+  title?: string;
+  metric: string;
+  rows: Row[];
+  lowerIsBetter?: boolean;
+}
+const { title, metric, rows, lowerIsBetter = false } = Astro.props;
+const max = Math.max(...rows.map((r) => r.value));
+const best = lowerIsBetter
+  ? Math.min(...rows.map((r) => r.value))
+  : Math.max(...rows.map((r) => r.value));
+---
+
+<figure class="spa-bench not-content">
+  {title && <figcaption><strong>{title}</strong></figcaption>}
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Implementation</th>
+        <th scope="col">{metric}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows.map((r) => (
+        <tr>
+          <th scope="row">{r.label}</th>
+          <td>
+            <div class="barwrap">
+              <span
+                class="bar"
+                style={`width:${Math.round((r.value / max) * 100)}%;${r.value === best ? 'background:#2fbf71;' : ''}`}
+              ></span>
+              <span>
+                <strong>{r.value.toLocaleString('en-US')}</strong>
+                {r.unit ? ` ${r.unit}` : ''}
+                {r.note ? <em style="color:var(--sl-color-gray-3)"> — {r.note}</em> : ''}
+              </span>
+            </div>
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+  <figcaption style="font-size:var(--sl-text-xs);color:var(--sl-color-gray-3);margin-top:0.5rem;">
+    Green bar = best result ({lowerIsBetter ? 'lower is better' : 'higher is better'}).
+  </figcaption>
+</figure>

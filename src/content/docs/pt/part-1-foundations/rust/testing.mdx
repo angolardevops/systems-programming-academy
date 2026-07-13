@@ -1,0 +1,410 @@
+---
+title: "Rust: Testes e Documentação"
+description: O Rust traz um test runner e um sistema de doc-tests de origem. Aprenda testes unitários, de integração, doc-tests que mantêm os exemplos honestos, e should_panic — com um crate companheiro totalmente testado.
+difficulty: beginner
+estimatedMinutes: 26
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={26} languages={["rust"]} />
+
+A maioria dos ecossistemas acrescenta testes com um framework externo. O Rust
+integra-os na linguagem e no `cargo`: escreve `#[test]`, corre `cargo test`,
+pronto. Melhor ainda, os exemplos na sua documentação são compilados e corridos
+como testes, por isso a documentação nunca apodrece em silêncio. Esta lição cobre
+os três tipos de teste — unitário, de integração e doc — mais o teste de falhas,
+com uma pequena biblioteca de conta bancária que corre a sério.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve estar à vontade com funções, `struct`/`enum` e
+  [tratamento de erros](/systems-programming-academy/pt/part-1-foundations/rust/error-handling/) (`Result`).
+</Aside>
+
+Tudo aqui vem do crate testado
+[`examples/rust-testing/`](https://github.com/angolardevops/systems-programming-academy).
+Correr `cargo test` reporta **8 unitários + 1 de integração + 2 doc-tests**, todos
+a passar.
+
+## Os três tipos de teste
+
+<Mermaid title="Onde vive cada tipo de teste" code={`flowchart TD
+  C["cargo test"] --> U["Unitários: dentro de src/, veem itens privados"]
+  C --> I["Integração: em tests/, só a API pública"]
+  C --> D["Doc-tests: código nos comentários ///, compilado e corrido"]`} />
+
+| Tipo | Vive em | Vê | Responde |
+| --- | --- | --- | --- |
+| **Unitário** | `#[cfg(test)] mod tests` em `src/` | privado + público | "esta função funciona?" |
+| **Integração** | `tests/*.rs` (crate separado) | só a API pública | "as peças funcionam juntas?" |
+| **Doc-test** | blocos ` ``` ` nos docs `///` | API pública | "o exemplo documentado é verdade?" |
+
+## Testes unitários
+
+Os testes unitários vivem ao lado do código, num módulo protegido por
+`#[cfg(test)]` para serem compilados só no `cargo test` (nunca vão no binário de
+release). `use super::*;` traz o módulo inteiro — incluindo itens privados — para
+o escopo.
+
+```rust title="src/lib.rs"
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_sums_two_numbers() {
+        assert_eq!(add(2, 2), 4);
+        assert_eq!(add(-5, 5), 0);
+    }
+}
+```
+
+As macros centrais:
+
+- `assert!(cond)` — falha se `cond` for falso.
+- `assert_eq!(a, b)` / `assert_ne!(a, b)` — falha se os dois forem (des)iguais,
+  imprimindo ambos os valores na falha.
+
+Corra-os:
+
+```bash
+cargo test
+```
+
+```text
+running 8 tests
+test tests::add_sums_two_numbers ... ok
+test tests::deposit_increases_balance ... ok
+...
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+## Testar falhas: `should_panic` e `Result`
+
+Algumas funções *devem* entrar em pânico com input mau. `#[should_panic]` afirma
+exatamente isso, e `expected = "..."` fixa a mensagem para não passar por acaso
+com o pânico *errado*:
+
+```rust title="src/lib.rs"
+pub fn divide(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("division by zero");
+    }
+    a / b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn divide_by_zero_panics() {
+        divide(1, 0);
+    }
+}
+```
+
+Um teste também pode **devolver `Result`** e usar `?` internamente — passa se
+devolver `Ok(())`, o que permite encadear passos falíveis sem uma pilha de
+`.unwrap()`:
+
+```rust title="src/lib.rs"
+#[test]
+fn deposit_then_withdraw_roundtrips() -> Result<(), BankError> {
+    let mut acc = Account::new(0);
+    acc.deposit(100)?;
+    acc.withdraw(40)?;
+    assert_eq!(acc.balance(), 60);
+    Ok(())
+}
+```
+
+<Quiz
+  question={'Porquê acrescentar expected = "..." a um teste #[should_panic]?'}
+  options={[
+    { text: "Faz o teste correr mais depressa." },
+    { text: "Para o teste só passar se a mensagem de pânico contiver esse texto — evitando passar com o pânico errado.", correct: true },
+    { text: "É obrigatório; #[should_panic] não compila sem isso." },
+    { text: "Suprime a saída do pânico." },
+  ]}
+  explanation={'Sem expected, um teste #[should_panic] passa com qualquer pânico — mesmo um de um bug não relacionado. Acrescentar expected = "..." exige que a mensagem contenha esse substring, provando que o código entrou em pânico pela razão pretendida.'}
+/>
+
+## Testes de integração
+
+Ponha um ficheiro em `tests/` e o Cargo compila-o como um **crate separado** que
+depende do seu — por isso só vê a API pública, tal como um utilizador real. É aqui
+que testa que os componentes cooperam.
+
+```rust title="tests/integration.rs"
+use testing::{Account, BankError};
+
+#[test]
+fn a_full_customer_session() {
+    let mut acc = Account::new(0);
+    assert_eq!(acc.deposit(200), Ok(200));
+    assert_eq!(acc.deposit(50), Ok(250));
+    assert_eq!(acc.withdraw(75), Ok(175));
+    assert_eq!(acc.balance(), 175);
+
+    // Sobrelevantamento é rejeitado e deixa o saldo intacto.
+    assert_eq!(
+        acc.withdraw(1_000),
+        Err(BankError::InsufficientFunds { balance: 175, requested: 1_000 })
+    );
+}
+```
+
+O `cargo test` corre isto automaticamente, na sua própria secção da saída.
+
+## Doc-tests: exemplos que não podem mentir
+
+Qualquer bloco ` ```rust ` dentro de um comentário `///` é compilado e corrido
+pelo `cargo test`. Se mudar `add` para subtrair, este teste falha — por isso a
+documentação está garantidamente de acordo com o código.
+
+```rust title="src/lib.rs"
+/// Soma dois saldos.
+///
+/// # Examples
+///
+/// ```
+/// use testing::add;
+/// assert_eq!(add(2, 40), 42);
+/// ```
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+```
+
+```text
+   Doc-tests testing
+running 2 tests
+test src/lib.rs - add (line 16) ... ok
+test src/lib.rs - Account::new (line 45) ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+<Aside type="tip" title="Truques de doc-test">
+  Esconda linhas de setup dos docs renderizados prefixando-as com `#` (continuam a
+  correr): `# use testing::add;`. Marque um exemplo que *não* deve correr com
+  ```` ```no_run ````, e um que deve falhar a compilar com ```` ```compile_fail ````.
+</Aside>
+
+## Flags úteis do `cargo test`
+
+```bash
+cargo test deposit          # só testes cujo nome contém "deposit"
+cargo test -- --nocapture   # mostra o println! de testes que passam
+cargo test -- --test-threads=1  # correr em série (ordem determinística)
+cargo test --doc            # só doc-tests
+```
+
+Marque um teste lento ou flaky com `#[ignore]` para o saltar por defeito; corra os
+ignorados com `cargo test -- --ignored`.
+
+## Erros comuns & depuração
+
+### 1. Esquecer o `#[test]`
+
+Uma função de teste sem o atributo `#[test]` é apenas uma função normal que nunca
+corre. Se "o seu teste passa" mas a contagem não subiu, verifique o atributo.
+
+### 2. `assert_eq!` num tipo sem `PartialEq`/`Debug`
+
+```text
+error[E0369]: binary operation `==` cannot be applied to type `Account`
+error[E0277]: `Account` doesn't implement `Debug`
+```
+
+**Correção:** derive-os no tipo sobre o qual afirma: `#[derive(Debug, PartialEq)]`.
+O `assert_eq!` precisa de `PartialEq` para comparar e `Debug` para imprimir na
+falha.
+
+### 3. Depender da ordem dos testes
+
+Os testes correm **em paralelo, em ordem não especificada**, por defeito. Um teste
+que depende de outro ter corrido primeiro é um bug. Faça cada teste montar o seu
+próprio estado (como todos acima, com um `Account` novo).
+
+## Exercícios
+
+<Interview question="Exercício 1 — Escrever um teste should_panic.">
+
+Dado `fn first(v: &[i32]) -> i32 { v[0] }`, escreva um teste que prove que entra
+em pânico com um slice vazio, fixando a mensagem.
+
+**Solução:**
+
+```rust
+fn first(v: &[i32]) -> i32 {
+    v[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn first_panics_on_empty() {
+        first(&[]);
+    }
+}
+```
+
+A mensagem real é "index out of bounds: the len is 0 but the index is 0";
+`expected` só precisa de ser um substring.
+
+</Interview>
+
+<Interview question="Exercício 2 — Escrever um doc-test.">
+
+Acrescente um exemplo de documentação a `fn double(n: i64) -> i64 { n * 2 }` que o
+`cargo test` corra.
+
+**Solução:**
+
+```rust
+/// Duplica um número.
+///
+/// # Examples
+///
+/// ```
+/// # use mycrate::double;
+/// assert_eq!(double(21), 42);
+/// ```
+pub fn double(n: i64) -> i64 {
+    n * 2
+}
+```
+
+O `#` esconde a linha `use` dos docs renderizados mas continua a compilá-la.
+(Troque `mycrate` pelo nome do seu crate.)
+
+</Interview>
+
+<Interview question="Exercício 3 — Testar uma função que devolve Result de duas formas.">
+
+Para `fn parse_port(s: &str) -> Result<u16, std::num::ParseIntError> { s.parse() }`,
+escreva um teste para o caso Ok e um para o caso Err.
+
+**Solução:**
+
+```rust
+fn parse_port(s: &str) -> Result<u16, std::num::ParseIntError> {
+    s.parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_port() {
+        assert_eq!(parse_port("8080"), Ok(8080));
+    }
+
+    #[test]
+    fn rejects_non_numeric() {
+        assert!(parse_port("nope").is_err());
+    }
+}
+```
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Um comportamento por teste, nome descritivo | Um teste gigante a afirmar vinte coisas |
+| Estado novo por teste (sem globais mutáveis partilhados) | Testes que dependem da ordem de execução |
+| Doc-tests em cada função pública | Exemplos no texto que nunca foram compilados |
+| `#[should_panic(expected=...)]` com mensagem | `#[should_panic]` seco que esconde qual pânico |
+| Testes de integração para o contrato público | Só testes unitários; as junções ficam por testar |
+| Afirmar o resultado *observável* | Afirmar detalhes privados de implementação |
+
+## Mini-projeto
+
+**Desenvolva um `Stack<T>` guiado por testes.** Escreva um `Stack<T>` genérico com
+`push`, `pop` (devolve `Option<T>`), `peek`, `len` e `is_empty`. Antes/enquanto o
+escreve, acrescente:
+
+- Testes unitários para push/pop/peek numa pilha vazia e não-vazia.
+- Um doc-test no `push` com um pequeno exemplo.
+- Um teste de integração em `tests/` a exercitar uma sequência realista.
+
+Requisitos: todos os testes passam com `cargo test`, `cargo clippy` limpo, e pelo
+menos um teste que devolve `Result` ou usa `#[should_panic]`.
+
+## Perguntas de entrevista
+
+<Interview question="Qual a diferença entre testes unitários e de integração em Rust?">
+
+Os testes unitários vivem dentro do crate (num `#[cfg(test)] mod tests`) e podem
+aceder a itens privados; testam peças pequenas isoladamente. Os de integração
+vivem na pasta `tests/`, são cada um compilado como crate separado, e só podem
+usar a API pública — por isso verificam a biblioteca como um consumidor externo a
+vê. Ambos correm sob `cargo test`.
+
+</Interview>
+
+<Interview question="O que são doc-tests e porque são valiosos?">
+
+Doc-tests são exemplos de código dentro de comentários `///` que o `cargo test`
+compila e corre. São valiosos porque tornam a documentação *executável*: um
+exemplo que se desvia do código falha o build, por isso os utilizadores podem
+confiar que os snippets funcionam mesmo. Servem de documentação e de testes de
+regressão ao mesmo tempo.
+
+</Interview>
+
+<Interview question="Como se testa que uma função entra em pânico?">
+
+Anote o teste com `#[should_panic]`, opcionalmente `#[should_panic(expected =
+"substring")]` para exigir que a mensagem contenha um substring específico. O
+teste passa só se o corpo entrar em pânico (e, com `expected`, com a mensagem
+certa). Para erros recuperáveis, prefira devolver `Result` e afirmar sobre `Err`
+em vez de entrar em pânico.
+
+</Interview>
+
+<Interview question="Porque correm os testes Rust em paralelo, e quando o desativaria?">
+
+O Cargo corre testes em várias threads por defeito, por velocidade. É seguro desde
+que os testes não partilhem estado mutável. Desative com `cargo test --
+--test-threads=1` quando os testes tocam num recurso partilhado não sincronizado —
+um ficheiro, uma variável de ambiente, uma porta de rede fixa — ou quando precisa
+de ordem determinística para depurar uma interação.
+
+</Interview>
+
+## Desafio
+
+Pegue numa função que escreveu numa lição anterior (um parser, `first_adult`,
+`sum_of_even_squares`) e leve-a a **100% de cobertura de comportamento**: um teste
+por ramo, por variante de erro, e por fronteira (input vazio, um só elemento, o
+limite de overflow). Depois introduza um bug de propósito e confirme que um teste
+o apanha. O objetivo não é um número de cobertura — é o hábito de perguntar "que
+input partiria isto?" para cada linha que escreve.
+
+## Referências & leitura adicional
+
+- *The Rust Programming Language* (o Livro), cap. 11 — [“Writing Automated Tests”](https://doc.rust-lang.org/book/ch11-00-testing.html)
+- *Rust by Example* — [testing](https://doc.rust-lang.org/rust-by-example/testing.html)
+- Livro do `rustdoc` — [documentation tests](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html)
+- Livro do Cargo — [`cargo test`](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
+
+<Progress />

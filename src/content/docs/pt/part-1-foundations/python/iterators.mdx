@@ -1,0 +1,384 @@
+---
+title: "Python: Iteradores e Geradores"
+description: O protocolo de iterador alimenta cada ciclo for, e os geradores constroem iteradores preguiçosos com yield. Sequências infinitas, pipelines de geradores, e streaming de dados enormes com memória mínima — com exemplos completos e testados.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["python"]} />
+
+Cada ciclo `for` em Python — sobre uma lista, um ficheiro, um dict, um cursor de
+base de dados — corre sobre um pequeno contrato: o **protocolo de iterador**. E a
+forma mais fácil de construir um iterador é um **gerador**: uma função comum que usa
+`yield` em vez de `return`. Os geradores são **preguiçosos** — calculam um valor de
+cada vez, só quando pedidos — o que lhe permite exprimir sequências infinitas,
+construir pipelines leves em memória, e passar gigabytes por poucos kilobytes de RAM.
+Esta lição liga o protocolo à palavra-chave `yield` e mostra porque a preguiça é um
+superpoder.
+
+<Aside type="note" title="Pré-requisitos">
+  Precisa do [modelo de dados](/systems-programming-academy/pt/part-1-foundations/python/data-model/) (o
+  `__getitem__` deu iteração de graça; aqui fazemo-la explicitamente) e à vontade com
+  `for`/`list`.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/py-iterators/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` verde — 14 testes incl. doctests — `ruff` limpo). Cada bloco é
+**completo**.
+
+## O protocolo de iterador
+
+Dois métodos fazem um **iterador**: `__iter__` (devolve o próprio iterador) e
+`__next__` (devolve o próximo valor, ou levanta `StopIteration` quando termina). Um
+ciclo `for` chama exatamente estes.
+
+```python title="main.py — completo, executável"
+class Countdown:
+    def __init__(self, start):
+        self.current = start
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.current <= 0:
+            raise StopIteration
+        self.current -= 1
+        return self.current + 1
+
+
+for n in Countdown(3):
+    print(n)                 # 3, depois 2, depois 1
+print(list(Countdown(3)))    # [3, 2, 1]
+```
+
+Saída:
+
+```text
+3
+2
+1
+[3, 2, 1]
+```
+
+<Mermaid title="O que um ciclo for realmente faz" code={`flowchart LR
+  A["for x in obj"] --> B["it = iter(obj)  -> __iter__()"]
+  B --> C["next(it)  -> __next__()"]
+  C -->|valor| D["corre o corpo do ciclo"]
+  D --> C
+  C -->|StopIteration| E["ciclo termina"]`} />
+
+## Geradores: iteradores com `yield`
+
+Toda aquela classe reduz-se a umas linhas. Uma função que contém `yield` é uma
+**função geradora**: chamá-la devolve um gerador (um iterador), e cada `yield`
+produz um valor, pausando até ao próximo `next()`.
+
+```python title="main.py — completo, executável"
+def countdown(start):
+    n = start
+    while n > 0:
+        yield n
+        n -= 1
+
+
+print(list(countdown(3)))  # [3, 2, 1]
+```
+
+Saída:
+
+```text
+[3, 2, 1]
+```
+
+Sem `__iter__`, sem `__next__`, sem `StopIteration` — o `yield` trata do protocolo
+todo. É por isso que os geradores são a forma idiomática de produzir sequências.
+
+## Preguiça: sequências infinitas, em segurança
+
+Como um gerador produz valores a pedido, pode ser **infinito** — o consumidor decide
+quando parar. Aqui está um stream infinito de Fibonacci, limitado por quem chama:
+
+```python title="main.py — completo, executável"
+def fib():
+    a, b = 0, 1
+    while True:      # infinito — mas preguiçoso, por isso tudo bem
+        yield a
+        a, b = b, a + b
+
+
+def take(it, n):
+    out = []
+    it = iter(it)
+    for _ in range(n):
+        out.append(next(it))
+    return out
+
+
+print(take(fib(), 8))  # [0, 1, 1, 2, 3, 5, 8, 13]
+```
+
+Saída:
+
+```text
+[0, 1, 1, 2, 3, 5, 8, 13]
+```
+
+<Aside type="tip" title="itertools é o kit de geradores">
+  O módulo `itertools` da biblioteca padrão foi feito para iteradores preguiçosos:
+  `islice(fib(), 8)` pega nos primeiros 8, `count()` e `cycle()` fazem streams
+  infinitos, `chain()` junta iteráveis, `groupby()` agrupa sequências. Recorra a ele
+  antes de escrever ciclos manuais sobre iteradores.
+</Aside>
+
+## Expressões geradoras e pipelines
+
+Uma **expressão geradora** parece uma list comprehension com parênteses — mas é
+preguiçosa, produzindo itens um de cada vez sem lista intermédia. Encadeie-as num
+pipeline leve em memória:
+
+```python title="main.py — completo, executável"
+nums = [1, 2, 3, 4, 5, 6]
+
+# Expressão geradora: nenhuma lista é construída até a consumirmos.
+even_squares = (n * n for n in nums if n % 2 == 0)
+print(list(even_squares))  # [4, 16, 36]
+
+# Como é preguiçosa, o sum() passa por ela sem materializar uma lista:
+print(sum(n * n for n in nums if n % 2 == 0))  # 56
+```
+
+Saída:
+
+```text
+[4, 16, 36]
+56
+```
+
+Os geradores também podem carregar **estado** entre yields — algo que uma
+comprehension não consegue. Um total acumulado:
+
+```python title="main.py — completo, executável"
+def running_total(nums):
+    total = 0
+    for n in nums:
+        total += n
+        yield total
+
+
+print(list(running_total([1, 2, 3, 4])))  # [1, 3, 6, 10]
+```
+
+Saída:
+
+```text
+[1, 3, 6, 10]
+```
+
+<Quiz
+  question={'Qual a diferença-chave entre [x for x in xs] e (x for x in xs)?'}
+  options={[
+    { text: "Nenhuma — são intercambiáveis.", },
+    { text: "O [] constrói a lista toda em memória agora; o () é um gerador preguiçoso que produz itens um de cada vez.", correct: true },
+    { text: "A versão () é sempre mais rápida em todos os usos.", },
+    { text: "A versão () só pode ser iterada sobre inteiros.", },
+  ]}
+  explanation="Os parênteses retos fazem uma list comprehension — a lista inteira é construída e guardada imediatamente. Os parênteses fazem uma expressão geradora — um iterador preguiçoso que calcula cada valor a pedido e guarda só um de cada vez. Use o gerador para sequências grandes ou infinitas, ou quando vai consumir os itens uma vez (p. ex. alimentar sum() ou um ciclo for)."
+/>
+
+## Erros comuns & depuração
+
+### 1. Um gerador esgota-se após uma passagem
+
+```python
+g = (x for x in range(3))
+print(list(g))  # [0, 1, 2]
+print(list(g))  # []   <- já consumido!
+```
+
+Os iteradores são de uso único: uma vez drenados, ficam vazios. **Correção:**
+reconstrua o gerador, ou use uma lista se precisa de iterar várias vezes.
+
+### 2. Iterar um gerador infinito sem limite
+
+```python
+def naturals():
+    n = 0
+    while True:
+        yield n
+        n += 1
+
+# list(naturals())  # ✗ pendura para sempre, come toda a memória
+```
+
+**Correção:** limite sempre um gerador infinito com `itertools.islice`, `take`, um
+`break`, ou uma condição — nunca lhe faça `list()` inteiro.
+
+### 3. Confundir `return` e `yield`
+
+Uma função com `yield` é um gerador; chamá-la não corre *nada* do corpo até iterar.
+Se esperava que corresse de imediato (como uma função `return` normal), é essa a
+surpresa. Um `return` seco dentro de um gerador apenas para a iteração (levanta
+`StopIteration`).
+
+## Exercícios
+
+<Interview question="Exercício 1 — Escrever um gerador.">
+
+Escreva `evens(limit)` que produz números pares de 0 até (sem incluir) `limit`.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+def evens(limit):
+    n = 0
+    while n < limit:
+        yield n
+        n += 2
+
+
+print(list(evens(10)))  # [0, 2, 4, 6, 8]
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Um pipeline preguiçoso.">
+
+Dada uma lista de palavras, use uma expressão geradora para produzir os comprimentos
+das palavras com mais de 3 caracteres, depois some-os. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+words = ["hi", "hello", "yo", "world", "a"]
+lengths = (len(w) for w in words if len(w) > 3)
+print(sum(lengths))  # 10  (hello=5 + world=5)
+```
+
+O gerador faz stream; nenhuma lista intermédia de comprimentos é construída.
+
+</Interview>
+
+<Interview question="Exercício 3 — Um gerador com estado.">
+
+Escreva `pairwise(xs)` que produz pares consecutivos: `[1,2,3,4]` →
+`(1,2),(2,3),(3,4)`. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+def pairwise(xs):
+    prev = None
+    first = True
+    for x in xs:
+        if not first:
+            yield (prev, x)
+        prev = x
+        first = False
+
+
+print(list(pairwise([1, 2, 3, 4])))  # [(1, 2), (2, 3), (3, 4)]
+```
+
+(O Python 3.10+ tem `itertools.pairwise` embutido — mas escrevê-lo mostra como um
+gerador carrega estado entre yields.)
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Gerador (`yield`) em vez de uma classe iteradora à mão | Boilerplate `__iter__`/`__next__` quando `yield` encaixa |
+| Expressão geradora `(...)` para streaming de uma passagem | Construir uma lista inteira que consome uma vez |
+| Limitar geradores infinitos com `islice`/`take` | `list()` num gerador sem limite (pendura) |
+| Reconstruir um gerador para iterar duas vezes | Iterar um gerador esgotado e obter `[]` |
+| `itertools` para composição | Reinventar `chain`/`islice`/`groupby` à mão |
+| Fazer stream de ficheiros grandes linha a linha (`for line in f`) | Ler um ficheiro enorme inteiro para memória |
+
+## Mini-projeto
+
+**Construa um processador de logs preguiçoso.** Escreva geradores que: leem linhas
+de um iterável de strings, `filter` para linhas que contêm "ERROR", `map` cada uma
+para um tuplo `(timestamp, message)` parseado, e finalmente `take` as primeiras N.
+Encadeie-os para tudo ser uma passagem preguiçosa — sem listas intermédias — e prove
+com um teste que uma fonte "infinita" (um gerador estilo `count()`) é tratada sem
+pendurar.
+
+Requisitos: usa `yield` e/ou expressões geradoras, `itertools` onde ajuda, `python3
+-m unittest` verde com doctests, e `ruff` limpo.
+
+## Perguntas de entrevista
+
+<Interview question="O que é o protocolo de iterador em Python?">
+
+É o par de métodos que torna um objeto iterável por um ciclo `for`: `__iter__`, que
+devolve um iterador, e `__next__`, que devolve o próximo item ou levanta
+`StopIteration` quando não há mais. `for x in obj` desdobra-se em obter `iter(obj)` e
+chamar repetidamente `next()` até `StopIteration`. Qualquer objeto que implemente
+este protocolo — listas, ficheiros, geradores, classes próprias — funciona de forma
+uniforme com `for`, `sum`, `list`, unpacking, e mais.
+
+</Interview>
+
+<Interview question="O que é um gerador e como difere de uma função normal?">
+
+Um gerador é uma função que contém `yield`. Chamá-la não corre o corpo; devolve um
+objeto gerador (um iterador). Cada vez que lhe chama `next()`, a função corre até ao
+próximo `yield`, produz esse valor, e **pausa** — mantendo o seu estado local —
+retomando daí no `next()` seguinte. Uma função normal corre até ao fim e retorna uma
+vez. Os geradores deixam-no produzir uma sequência preguiçosamente, um valor de cada
+vez, com o estado da função preservado entre valores.
+
+</Interview>
+
+<Interview question="Porque são os geradores eficientes em memória?">
+
+Porque são preguiçosos: um gerador guarda apenas o estado necessário para produzir o
+*próximo* valor, não a sequência toda. Processar um ficheiro de 10 GB com `for line
+in f` (os ficheiros são iteradores) ou um pipeline de geradores toca numa linha de
+cada vez, por isso a memória mantém-se minúscula independentemente do tamanho do
+input. Uma list comprehension, em contraste, materializa cada elemento de uma vez. Os
+geradores também permitem sequências infinitas, que uma lista nunca poderia.
+
+</Interview>
+
+<Interview question="O que acontece quando itera um gerador duas vezes?">
+
+A segunda iteração não produz nada — os geradores (como todos os iteradores) são de
+uso único. Uma vez que o `__next__` levantou `StopIteration`, o gerador está esgotado
+e fica esgotado. Se precisa de iterar mais do que uma vez, ou recrie o gerador
+chamando de novo a função geradora, ou materialize os valores numa lista (trocando
+memória por reutilização).
+
+</Interview>
+
+## Desafio
+
+Pegue num pedaço de código que constrói uma lista grande, transforma-a, filtra-a, e
+depois usa só os primeiros resultados — e reescreva-o como um pipeline de geradores
+preguiçoso para o trabalho parar assim que tiver o suficiente. Meça a diferença num
+input grande: a versão ansiosa faz todo o trabalho à cabeça, a preguiçosa faz o
+mínimo. Depois torne uma etapa do pipeline infinita (um gerador de IDs, uma sequência
+de retry-com-backoff) e confirme que o consumidor ainda termina. Essa mentalidade de
+"calcular só o que é consumido" é o que torna os geradores indispensáveis para
+streams e pipelines.
+
+## Referências & leitura adicional
+
+- Docs do Python — [generators](https://docs.python.org/3/tutorial/classes.html#generators) e o [protocolo de iterador](https://docs.python.org/3/library/stdtypes.html#iterator-types)
+- Docs do Python — [`itertools`](https://docs.python.org/3/library/itertools.html)
+- PEP 255 — [simple generators](https://peps.python.org/pep-0255/)
+- *Fluent Python* (Ramalho), cap. 17 — "Iterators, Generators, and Classic Coroutines"
+
+<Progress />

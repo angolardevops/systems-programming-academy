@@ -1,0 +1,380 @@
+---
+title: "Python: Iterators & Generators"
+description: The iterator protocol powers every for loop, and generators build lazy iterators with yield. Infinite sequences, generator pipelines, and streaming huge data with tiny memory — with complete tested examples.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["python"]} />
+
+Every `for` loop in Python — over a list, a file, a dict, a database cursor — runs
+on one small contract: the **iterator protocol**. And the easiest way to build an
+iterator is a **generator**: an ordinary function that uses `yield` instead of
+`return`. Generators are **lazy** — they compute one value at a time, only when
+asked — which lets you express infinite sequences, build memory-light pipelines,
+and stream gigabytes through a few kilobytes of RAM. This lesson connects the
+protocol to the `yield` keyword and shows why laziness is a superpower.
+
+<Aside type="note" title="Prerequisites">
+  You need the [data model](/systems-programming-academy/part-1-foundations/python/data-model/) (`__getitem__`
+  gave iteration for free; here we do it explicitly) and comfort with `for`/`list`.
+</Aside>
+
+All code is from the tested module
+[`examples/py-iterators/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` green — 14 tests incl. doctests — `ruff` clean). Every
+snippet is **complete**.
+
+## The iterator protocol
+
+Two methods make an **iterator**: `__iter__` (returns the iterator itself) and
+`__next__` (returns the next value, or raises `StopIteration` when done). A `for`
+loop calls exactly these.
+
+```python title="main.py — complete, runnable"
+class Countdown:
+    def __init__(self, start):
+        self.current = start
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.current <= 0:
+            raise StopIteration
+        self.current -= 1
+        return self.current + 1
+
+
+for n in Countdown(3):
+    print(n)                 # 3, then 2, then 1
+print(list(Countdown(3)))    # [3, 2, 1]
+```
+
+Output:
+
+```text
+3
+2
+1
+[3, 2, 1]
+```
+
+<Mermaid title="What a for loop actually does" code={`flowchart LR
+  A["for x in obj"] --> B["it = iter(obj)  -> __iter__()"]
+  B --> C["next(it)  -> __next__()"]
+  C -->|value| D["run loop body"]
+  D --> C
+  C -->|StopIteration| E["loop ends"]`} />
+
+## Generators: iterators with `yield`
+
+That whole class collapses into a few lines. A function containing `yield` is a
+**generator function**: calling it returns a generator (an iterator), and each
+`yield` produces a value, pausing until the next `next()`.
+
+```python title="main.py — complete, runnable"
+def countdown(start):
+    n = start
+    while n > 0:
+        yield n
+        n -= 1
+
+
+print(list(countdown(3)))  # [3, 2, 1]
+```
+
+Output:
+
+```text
+[3, 2, 1]
+```
+
+No `__iter__`, no `__next__`, no `StopIteration` — `yield` handles the entire
+protocol. This is why generators are the idiomatic way to produce sequences.
+
+## Laziness: infinite sequences, safely
+
+Because a generator produces values on demand, it can be **infinite** — the
+consumer decides when to stop. Here is an endless Fibonacci stream, bounded by the
+caller:
+
+```python title="main.py — complete, runnable"
+def fib():
+    a, b = 0, 1
+    while True:      # infinite — but lazy, so it's fine
+        yield a
+        a, b = b, a + b
+
+
+def take(it, n):
+    out = []
+    it = iter(it)
+    for _ in range(n):
+        out.append(next(it))
+    return out
+
+
+print(take(fib(), 8))  # [0, 1, 1, 2, 3, 5, 8, 13]
+```
+
+Output:
+
+```text
+[0, 1, 1, 2, 3, 5, 8, 13]
+```
+
+<Aside type="tip" title="itertools is the generator toolkit">
+  The standard library's `itertools` module is built for lazy iterators:
+  `islice(fib(), 8)` takes the first 8, `count()` and `cycle()` make infinite
+  streams, `chain()` joins iterables, `groupby()` groups runs. Reach for it before
+  writing manual loops over iterators.
+</Aside>
+
+## Generator expressions and pipelines
+
+A **generator expression** looks like a list comprehension with parentheses — but
+it's lazy, producing items one at a time with no intermediate list. Chain them into
+a memory-light pipeline:
+
+```python title="main.py — complete, runnable"
+nums = [1, 2, 3, 4, 5, 6]
+
+# Generator expression: no list is built until we consume it.
+even_squares = (n * n for n in nums if n % 2 == 0)
+print(list(even_squares))  # [4, 16, 36]
+
+# Because it's lazy, sum() streams through it without materialising a list:
+print(sum(n * n for n in nums if n % 2 == 0))  # 56
+```
+
+Output:
+
+```text
+[4, 16, 36]
+56
+```
+
+Generators can also carry **state** between yields — something a comprehension
+can't do. A running total:
+
+```python title="main.py — complete, runnable"
+def running_total(nums):
+    total = 0
+    for n in nums:
+        total += n
+        yield total
+
+
+print(list(running_total([1, 2, 3, 4])))  # [1, 3, 6, 10]
+```
+
+Output:
+
+```text
+[1, 3, 6, 10]
+```
+
+<Quiz
+  question={'What is the key difference between [x for x in xs] and (x for x in xs)?'}
+  options={[
+    { text: "Nothing — they are interchangeable.", },
+    { text: "The [] builds the whole list in memory now; the () is a lazy generator that yields items one at a time.", correct: true },
+    { text: "The () version is always faster for every use.", },
+    { text: "The () version can only be iterated over integers.", },
+  ]}
+  explanation="Square brackets make a list comprehension — the entire list is constructed and stored immediately. Parentheses make a generator expression — a lazy iterator that computes each value on demand and holds only one at a time. Use the generator for large or infinite sequences, or when you'll consume the items once (e.g. feeding sum() or a for loop)."
+/>
+
+## Common mistakes & debugging
+
+### 1. A generator is exhausted after one pass
+
+```python
+g = (x for x in range(3))
+print(list(g))  # [0, 1, 2]
+print(list(g))  # []   <- already consumed!
+```
+
+Iterators are one-shot: once drained, they're empty. **Fix:** rebuild the generator,
+or use a list if you need to iterate multiple times.
+
+### 2. Iterating an infinite generator without a bound
+
+```python
+def naturals():
+    n = 0
+    while True:
+        yield n
+        n += 1
+
+# list(naturals())  # ✗ hangs forever, eats all memory
+```
+
+**Fix:** always bound an infinite generator with `itertools.islice`, `take`, a
+`break`, or a condition — never `list()` it whole.
+
+### 3. Confusing `return` and `yield`
+
+A function with `yield` is a generator; calling it runs *none* of the body until you
+iterate. If you expected it to run immediately (like a normal `return` function),
+that's the surprise. A bare `return` inside a generator just stops iteration (raises
+`StopIteration`).
+
+## Exercises
+
+<Interview question="Exercise 1 — Write a generator.">
+
+Write `evens(limit)` that yields even numbers from 0 up to (not including) `limit`.
+Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+def evens(limit):
+    n = 0
+    while n < limit:
+        yield n
+        n += 2
+
+
+print(list(evens(10)))  # [0, 2, 4, 6, 8]
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — A lazy pipeline.">
+
+Given a list of words, use a generator expression to yield the lengths of the words
+longer than 3 characters, then sum them. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+words = ["hi", "hello", "yo", "world", "a"]
+lengths = (len(w) for w in words if len(w) > 3)
+print(sum(lengths))  # 10  (hello=5 + world=5)
+```
+
+The generator streams; no intermediate list of lengths is built.
+
+</Interview>
+
+<Interview question="Exercise 3 — A stateful generator.">
+
+Write `pairwise(xs)` that yields consecutive pairs: `[1,2,3,4]` → `(1,2),(2,3),(3,4)`.
+Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+def pairwise(xs):
+    prev = None
+    first = True
+    for x in xs:
+        if not first:
+            yield (prev, x)
+        prev = x
+        first = False
+
+
+print(list(pairwise([1, 2, 3, 4])))  # [(1, 2), (2, 3), (3, 4)]
+```
+
+(Python 3.10+ has `itertools.pairwise` built in — but writing it shows how a
+generator carries state across yields.)
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Generator (`yield`) over a hand-written iterator class | Boilerplate `__iter__`/`__next__` when `yield` fits |
+| Generator expression `(...)` for one-pass streaming | Building a full list you consume once |
+| Bound infinite generators with `islice`/`take` | `list()` on an unbounded generator (hangs) |
+| Rebuild a generator to iterate twice | Iterating an exhausted generator and getting `[]` |
+| `itertools` for composition | Reinventing `chain`/`islice`/`groupby` by hand |
+| Stream large files line by line (`for line in f`) | Reading a huge file fully into memory |
+
+## Mini-project
+
+**Build a lazy log processor.** Write generators that: read lines from an iterable of
+strings, `filter` to lines containing "ERROR", `map` each to a parsed `(timestamp,
+message)` tuple, and finally `take` the first N. Chain them so the whole thing is one
+lazy pass — no intermediate lists — and prove with a test that an "infinite" source
+(a `count()`-style generator) is handled without hanging.
+
+Requirements: uses `yield` and/or generator expressions, `itertools` where it helps,
+`python3 -m unittest` green with doctests, and `ruff` clean.
+
+## Interview questions
+
+<Interview question="What is the iterator protocol in Python?">
+
+It's the pair of methods that make an object iterable by a `for` loop: `__iter__`,
+which returns an iterator, and `__next__`, which returns the next item or raises
+`StopIteration` when there are no more. `for x in obj` desugars to getting
+`iter(obj)` and repeatedly calling `next()` on it until `StopIteration`. Any object
+implementing this protocol — lists, files, generators, custom classes — works
+uniformly with `for`, `sum`, `list`, unpacking, and more.
+
+</Interview>
+
+<Interview question="What is a generator and how does it differ from a normal function?">
+
+A generator is a function that contains `yield`. Calling it doesn't run the body; it
+returns a generator object (an iterator). Each time you call `next()` on it, the
+function runs until the next `yield`, produces that value, and **pauses** — keeping
+its local state — resuming from there on the following `next()`. A normal function
+runs to completion and returns once. Generators let you produce a sequence lazily,
+one value at a time, with the function's state preserved between values.
+
+</Interview>
+
+<Interview question="Why are generators memory-efficient?">
+
+Because they are lazy: a generator holds only the state needed to produce the *next*
+value, not the whole sequence. Processing a 10 GB file with `for line in f` (files
+are iterators) or a generator pipeline touches one line at a time, so memory stays
+tiny regardless of input size. A list comprehension, by contrast, materialises every
+element at once. Generators also enable infinite sequences, which a list never could.
+
+</Interview>
+
+<Interview question="What happens when you iterate a generator twice?">
+
+The second iteration yields nothing — generators (like all iterators) are
+single-use. Once `__next__` has raised `StopIteration`, the generator is exhausted
+and stays exhausted. If you need to iterate more than once, either recreate the
+generator by calling the generator function again, or materialise the values into a
+list (trading memory for reusability).
+
+</Interview>
+
+## Challenge
+
+Take a piece of code that builds a big list, transforms it, filters it, and then
+uses only the first few results — and rewrite it as a lazy generator pipeline so the
+work stops as soon as you have enough. Measure the difference on a large input: the
+eager version does all the work up front, the lazy one does the minimum. Then make
+one stage of the pipeline infinite (an ID generator, a retry-with-backoff sequence)
+and confirm the consumer still terminates. That "compute only what's consumed"
+mindset is what makes generators indispensable for streams and pipelines.
+
+## References & further reading
+
+- Python docs — [generators](https://docs.python.org/3/tutorial/classes.html#generators) and the [iterator protocol](https://docs.python.org/3/library/stdtypes.html#iterator-types)
+- Python docs — [`itertools`](https://docs.python.org/3/library/itertools.html)
+- PEP 255 — [simple generators](https://peps.python.org/pep-0255/)
+- *Fluent Python* (Ramalho), ch. 17 — "Iterators, Generators, and Classic Coroutines"
+
+<Progress />

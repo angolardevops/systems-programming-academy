@@ -1,0 +1,390 @@
+---
+title: "Python: Type Hints"
+description: Python is dynamic, but type hints let tools catch bugs before you run. Annotations, Optional/Union with the | syntax, generics, and dataclasses — with a tested module and the mutable-default trap explained.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["python"]} />
+
+Python is dynamically typed — variables have no declared type and the interpreter
+checks nothing about them until runtime. **Type hints** (introduced in PEP 484)
+add optional annotations that a static checker like `mypy` or `pyright`, and your
+editor, read to catch whole classes of bugs *before* you run the code. Crucially,
+hints are **not enforced at runtime**: they are a contract for tools and readers,
+not a straitjacket. Used well, they make large Python codebases navigable and
+refactorable. This lesson covers the essentials with modern 3.10+ syntax.
+
+<Aside type="note" title="Prerequisites">
+  You should know Python functions, `class`, and the
+  [data model](/systems-programming-academy/part-1-foundations/python/data-model/) basics. `dataclass` builds
+  on `__init__`/`__repr__`.
+</Aside>
+
+All code is from the tested module
+[`examples/py-typing/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` green — 17 tests incl. doctests — `ruff` clean). Every
+snippet is **complete**.
+
+## Annotating functions
+
+A hint goes after each parameter (`name: str`) and after `->` for the return type.
+The interpreter ignores them; a checker uses them.
+
+```python title="main.py — complete, runnable"
+def greet(name: str, times: int = 1) -> str:
+    return " ".join([f"Hello, {name}!"] * times)
+
+
+print(greet("Ada"))            # Hello, Ada!
+print(greet("Go", times=2))    # Hello, Go! Hello, Go!
+```
+
+Output:
+
+```text
+Hello, Ada!
+Hello, Go! Hello, Go!
+```
+
+<Mermaid title="Hints feed the checker, not the runtime" code={`flowchart LR
+  S["annotated source"] --> C["mypy / pyright / editor"]
+  C --> E["errors caught before running"]
+  S --> R["CPython runtime: ignores hints"]`} />
+
+## Collections, `Optional`, and `Union`
+
+Since Python 3.9 you annotate built-in generics directly: `list[int]`,
+`dict[str, float]`, `tuple[str, float]`. Since 3.10, "this or `None`" is written
+`int | None` (an *Optional*), and "either type" is `A | B` (a *Union*).
+
+```python title="main.py — complete, runnable"
+def first(items: list[int]) -> int | None:
+    # The return type says: callers must handle the empty case.
+    if not items:
+        return None
+    return items[0]
+
+
+def total_price(prices: dict[str, float]) -> float:
+    return sum(prices.values(), 0.0)  # 0.0 start keeps the result a float
+
+
+print(first([10, 20]))                    # 10
+print(first([]))                          # None
+print(total_price({"a": 1.5, "b": 2.5}))  # 4.0
+```
+
+Output:
+
+```text
+10
+None
+4.0
+```
+
+<Aside type="tip" title="Optional documents the None case">
+  `int | None` (equivalently `Optional[int]`) is a promise that the value might be
+  absent. A checker will then flag `first(xs) + 1` unless you first narrow it with
+  `if (x := first(xs)) is not None:`. That nudge — handle the `None` — prevents a
+  huge share of real Python bugs.
+</Aside>
+
+## Dataclasses: annotations that build the class
+
+`@dataclass` reads your annotated fields and generates `__init__`, `__repr__`, and
+`__eq__` for you. Add `frozen=True` and it also makes instances immutable and
+hashable.
+
+```python title="main.py — complete, runnable"
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Point:
+    x: float
+    y: float
+
+
+p = Point(1, 2)
+print(p)                 # Point(x=1, y=2)   (generated __repr__)
+print(p == Point(1, 2))  # True              (generated __eq__)
+print({p})               # {Point(x=1, y=2)} (frozen => hashable)
+```
+
+Output:
+
+```text
+Point(x=1, y=2)
+True
+{Point(x=1, y=2)}
+```
+
+## The mutable-default trap
+
+A default argument (or dataclass field) that is a mutable object like `[]` is
+created **once** and shared across calls — a classic Python bug. `dataclass` even
+refuses a bare mutable default; use `field(default_factory=list)`.
+
+```python title="main.py — complete, runnable"
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Cart:
+    # WRONG: `items: list = []` would share one list across all carts.
+    items: list[tuple[str, float]] = field(default_factory=list)
+
+    def add(self, name: str, price: float) -> None:
+        self.items.append((name, price))
+
+    def total(self) -> float:
+        return sum((price for _, price in self.items), 0.0)  # 0.0 start => float
+
+
+a, b = Cart(), Cart()
+a.add("apple", 1.5)
+print(a.total())  # 1.5
+print(b.total())  # 0.0   (b has its own list — not shared)
+```
+
+Output:
+
+```text
+1.5
+0.0
+```
+
+<Quiz
+  question={'Are Python type hints enforced when the program runs?'}
+  options={[
+    { text: "Yes — passing the wrong type raises a TypeError at runtime.", },
+    { text: "No — the interpreter ignores them; they are for static checkers, editors, and readers.", correct: true },
+    { text: "Only inside dataclasses.", },
+    { text: "Only if you import typing.", },
+  ]}
+  explanation="CPython does not check type hints at runtime — you can pass a str where an int is annotated and it will run (and maybe misbehave). Hints exist for tools: mypy/pyright verify them statically, editors use them for completion and warnings, and readers use them as documentation. A few libraries (like pydantic) opt in to runtime validation, but the language itself does not."
+/>
+
+## Generics with type variables
+
+A type variable lets a function work for any type while **preserving** it — the
+element type flows from argument to return. Python 3.12 has a clean `[T]` syntax.
+
+```python title="main.py — complete, runnable"
+def last[T](items: list[T]) -> T | None:
+    return items[-1] if items else None
+
+
+print(last([1, 2, 3]))    # 3    (T = int)
+print(last(["a", "b"]))    # b    (T = str)
+print(last([]))           # None
+```
+
+Output:
+
+```text
+3
+b
+None
+```
+
+A checker knows `last([1, 2, 3])` is an `int | None`, not just "some object" — so
+downstream type errors are caught.
+
+## Common mistakes & debugging
+
+### 1. The mutable default argument
+
+```python
+def append_to(item, target=[]):  # ✗ target is created once, shared forever
+    target.append(item)
+    return target
+```
+
+Calling `append_to(1)` then `append_to(2)` returns `[1, 2]`, not `[2]`. **Fix:**
+default to `None` and create inside: `def append_to(item, target=None): target =
+[] if target is None else target`.
+
+### 2. Annotating but never running a checker
+
+Hints alone catch nothing — you must run `mypy` or `pyright` (or enable your
+editor's type checking). Add `mypy .` to CI so annotations are actually verified,
+otherwise they silently drift from the code.
+
+### 3. Forgetting to handle an `Optional`
+
+```python
+name = first(users)      # type: int | None
+print(name + 1)          # a checker flags this: name could be None
+```
+
+**Fix:** narrow first — `if name is not None:` — so the checker (and your logic)
+handle the empty case.
+
+## Exercises
+
+<Interview question="Exercise 1 — Annotate a function.">
+
+Add complete type hints to `def average(nums): return sum(nums) / len(nums)`,
+including a sensible return type. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+def average(nums: list[float]) -> float:
+    return sum(nums) / len(nums)
+
+
+print(average([1.0, 2.0, 3.0]))  # 2.0
+```
+
+If the empty case matters, the return could be `float | None` with a guard; here we
+assume a non-empty list per the annotation's intent.
+
+</Interview>
+
+<Interview question="Exercise 2 — A dataclass with a default list.">
+
+Write a `Team` dataclass with a `name: str` and `members: list[str]` defaulting to
+empty, and a method to add a member. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Team:
+    name: str
+    members: list[str] = field(default_factory=list)
+
+    def add(self, person: str) -> None:
+        self.members.append(person)
+
+
+t = Team("Platform")
+t.add("Ada")
+t.add("Grace")
+print(t)  # Team(name='Platform', members=['Ada', 'Grace'])
+```
+
+`field(default_factory=list)` gives every `Team` its own list.
+
+</Interview>
+
+<Interview question="Exercise 3 — An Optional-returning lookup.">
+
+Write `find(users: dict[int, str], uid: int) -> str | None` that returns the name
+or None. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+def find(users: dict[int, str], uid: int) -> str | None:
+    return users.get(uid)
+
+
+db = {1: "Ada", 2: "Grace"}
+print(find(db, 1))    # Ada
+print(find(db, 99))   # None
+```
+
+`dict.get` already returns `None` for a missing key, matching the `str | None`
+return type exactly.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Annotate public function signatures | Fully untyped modules that tools can't check |
+| Run `mypy`/`pyright` in CI | Writing hints but never verifying them |
+| `int \| None` and narrow before use | Ignoring an `Optional` and hitting `None` at runtime |
+| `field(default_factory=list)` for mutable defaults | `items: list = []` (shared across instances) |
+| `@dataclass` for data holders | Hand-written `__init__`/`__repr__`/`__eq__` |
+| Type variables to preserve element types | `Any` everywhere, discarding all checking |
+
+## Mini-project
+
+**Type a small inventory module.** Model `Product` (a frozen dataclass with `sku:
+str`, `price: float`) and an `Inventory` (a dataclass wrapping `dict[str,
+Product]`) with `add(product)`, `get(sku) -> Product | None`, and `total_value() ->
+float`. Add a generic helper `pluck[T](items: list[T], n: int) -> list[T]`. Then
+run `mypy` (add it to the CI job) and fix every error it reports.
+
+Requirements: full annotations, `python3 -m unittest` green with doctests, `ruff`
+clean, and `mypy` (if available) with no errors.
+
+## Interview questions
+
+<Interview question="Are Python type hints checked at runtime?">
+
+No — CPython ignores them during execution; you can violate a hint and the program
+still runs. Hints are consumed by static analysers (`mypy`, `pyright`), editors
+(for completion and inline warnings), and human readers. They are stored in
+`__annotations__` and some libraries (pydantic, FastAPI, dataclasses) read them to
+add runtime behaviour, but the language itself performs no enforcement. That's why
+running a checker in CI matters.
+
+</Interview>
+
+<Interview question="What is Optional and how do you write it in modern Python?">
+
+`Optional[X]` means "an `X` or `None`". Since Python 3.10 the idiomatic spelling is
+`X | None`. It documents that a value may be absent and prompts static checkers to
+require you to narrow it (e.g. `if v is not None:`) before using it as an `X`. It's
+the type-level counterpart to Rust's `Option` or Go's comma-ok/`nil` — the checker
+makes you handle the missing case.
+
+</Interview>
+
+<Interview question="Why is a mutable default argument dangerous?">
+
+A default argument is evaluated **once**, when the function is defined, and the
+resulting object is reused on every call that doesn't override it. So a
+`def f(x, acc=[])` shares one list across all calls — mutations accumulate and leak
+between callers, a subtle, order-dependent bug. The fix is to default to `None` and
+create a fresh object inside the function (`acc = [] if acc is None else acc`); for
+dataclasses, use `field(default_factory=list)`.
+
+</Interview>
+
+<Interview question="What does @dataclass generate, and when would you use frozen=True?">
+
+`@dataclass` reads the class's annotated fields and generates `__init__`,
+`__repr__`, and `__eq__` (and optionally ordering methods). It removes the
+boilerplate of plain data-holding classes. `frozen=True` additionally makes
+instances immutable (assignment raises `FrozenInstanceError`) and hashable (it
+generates `__hash__`), which is what you want for value objects used as dict keys or
+set members, or anywhere shared immutability prevents bugs.
+
+</Interview>
+
+## Challenge
+
+Take an untyped module you have and add hints to its public functions, then run
+`mypy --strict` and fix everything it flags. You'll usually discover at least one
+real bug — a function that can return `None` on a path the caller never handled, or
+a variable that's secretly two different types. Then wire `mypy` into CI so the
+annotations stay honest. The value of type hints is entirely realised at the moment
+a checker runs; unverified hints are just comments.
+
+## References & further reading
+
+- Python docs — [`typing`](https://docs.python.org/3/library/typing.html) and the [typing HOWTO](https://docs.python.org/3/howto/annotations.html)
+- mypy — [documentation](https://mypy.readthedocs.io/) and [cheat sheet](https://mypy.readthedocs.io/en/stable/cheat_sheet_py3.html)
+- Python docs — [`dataclasses`](https://docs.python.org/3/library/dataclasses.html)
+- PEP 604 — [`X | Y` union syntax](https://peps.python.org/pep-0604/) · PEP 695 — [type parameter syntax](https://peps.python.org/pep-0695/)
+
+<Progress />

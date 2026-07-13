@@ -1,0 +1,423 @@
+---
+title: "Rust: Ownership & the Borrow Checker"
+description: The one idea that makes Rust different — how ownership, moves, borrowing and lifetimes give you memory safety with no garbage collector, explained and measured.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["rust"]} />
+
+Ownership is the single idea that makes Rust *Rust*. Master it and the rest of
+the language falls into place; fight it and everything feels hard. This lesson
+builds the mental model from scratch, proves each rule with code you can run,
+shows you the exact errors you will hit, and measures why the idiomatic path is
+also the fast one.
+
+<Aside type="note" title="Prerequisites">
+  You can read and run a basic Rust program (`fn main`, `let`, `println!`) and
+  have `cargo` installed. Nothing about ownership is assumed.
+</Aside>
+
+All companion code for this lesson lives in
+[`examples/rust-ownership/`](https://github.com/angolardevops/systems-programming-academy)
+and is verified with `cargo test` (7 passing tests) and `cargo clippy`.
+
+## Theory: the problem ownership solves
+
+Every program that uses memory must answer one question: **when is it safe to
+free this?** History gives us three answers, each with a cost:
+
+| Strategy | Who frees memory | Cost |
+| --- | --- | --- |
+| Manual (`malloc`/`free`, C) | The programmer | Use-after-free, double-free, leaks — by hand |
+| Garbage collection (Python, Go, Java) | A runtime, later | Pauses, overhead, non-determinism |
+| **Ownership (Rust)** | The compiler, at compile time | A learning curve — paid once |
+
+Rust's answer is **ownership**: a set of rules the compiler checks so that memory
+is freed *exactly once*, *at a known point*, with *no runtime collector*. The
+three rules are:
+
+1. Each value has exactly one **owner** (a variable).
+2. When the owner goes out of scope, the value is **dropped** (freed).
+3. Ownership can **move** to a new owner, or be temporarily **borrowed** — but the
+   rules above always hold.
+
+### Visualising a move
+
+When you assign a heap value (like a `String`) to another variable or pass it to
+a function *by value*, ownership **moves**. The old binding becomes invalid — the
+compiler will not let you use it, so there is never a double-free.
+
+<Mermaid title="Ownership moving from one binding to another" code={`graph LR
+  subgraph Before
+    A["s1 (owner)"] -->|points to| H1["heap: 'hi'"]
+  end
+  subgraph After["After: let s2 = s1;"]
+    B["s1 - invalidated"] -.->|moved out| H2["heap: 'hi'"]
+    C["s2 (new owner)"] -->|points to| H2
+  end`} />
+
+## Examples (all tested)
+
+The following functions are the real, tested code from
+`examples/rust-ownership/src/lib.rs`.
+
+### Moving: value goes *in*, cannot be used after
+
+```rust title="src/lib.rs"
+/// Takes the String by value — ownership moves into the function.
+pub fn consume_string(s: String) -> usize {
+    s.len()
+}
+```
+
+```rust
+let s = String::from("borrow checker");
+let n = consume_string(s); // `s` is moved here
+assert_eq!(n, 14);
+// println!("{s}"); // ← would NOT compile: `s` was moved
+```
+
+### Borrowing: lend it, keep it
+
+Take `&str` (a shared borrow) instead, and the caller keeps ownership:
+
+```rust title="src/lib.rs"
+pub fn borrow_len(s: &str) -> usize {
+    s.len()
+}
+```
+
+```rust
+let s = String::from("still mine");
+assert_eq!(borrow_len(&s), 10);
+assert_eq!(s, "still mine"); // ✅ still usable — we only borrowed
+```
+
+### Mutable borrowing: exclusive access
+
+A `&mut` borrow lets you change the value, but only one may exist at a time:
+
+```rust title="src/lib.rs"
+pub fn push_world(s: &mut String) {
+    s.push_str(" world");
+}
+```
+
+```rust
+let mut s = String::from("hello");
+push_world(&mut s);
+assert_eq!(s, "hello world");
+```
+
+### Slices: a borrow with a length
+
+A string slice `&str` borrows *part* of a `String`. The borrow checker ties the
+slice's lifetime to the data, so the data cannot be dropped while the slice lives:
+
+```rust title="src/lib.rs"
+pub fn first_word(text: &str) -> &str {
+    match text.as_bytes().iter().position(|&b| b == b' ') {
+        Some(i) => &text[..i],
+        None => text,
+    }
+}
+```
+
+<Aside type="tip" title="The borrowing rules, in one breath">
+  At any given time you may have **either** one mutable reference **or** any
+  number of immutable references — never both. References must always be valid.
+  That one rule prevents data races *at compile time*.
+</Aside>
+
+### Check your understanding
+
+<Quiz
+  question="What happens to `v` after `let w = v;` where `v: Vec<i32>`?"
+  options={[
+    { text: "`v` and `w` both own separate copies of the data." },
+    { text: "Ownership moves to `w`; using `v` afterwards is a compile error.", correct: true },
+    { text: "`v` and `w` share the data via reference counting." },
+    { text: "Nothing — `Vec` is copied implicitly like an integer." },
+  ]}
+  explanation="`Vec<i32>` owns heap memory and is not `Copy`, so `let w = v;` moves ownership. The compiler invalidates `v` to guarantee the buffer is freed exactly once. To keep both, you would `v.clone()` (an explicit, visible cost) or borrow with `&v`."
+/>
+
+## Common mistakes & debugging
+
+The borrow checker's error messages are unusually good. Learning to *read* them
+is half the battle. Here are the three you will hit most.
+
+### 1. Use after move
+
+```rust
+let s = String::from("hi");
+let n = consume_string(s);
+println!("{s}"); // ✗
+```
+
+```text title="cargo build"
+error[E0382]: borrow of moved value: `s`
+ --> src/main.rs:4:15
+  |
+2 |     let s = String::from("hi");
+  |         - move occurs because `s` has type `String`, which does not implement the `Copy` trait
+3 |     let n = consume_string(s);
+  |                            - value moved here
+4 |     println!("{s}");
+  |               ^^^ value borrowed here after move
+```
+
+**Read it top-down:** *what* moved (`s`), *why* (`String` isn't `Copy`), *where* it
+moved (line 3), *where* you tried to reuse it (line 4). **Fix:** borrow instead
+(`borrow_len(&s)`) or `clone()` if you genuinely need two owners.
+
+### 2. Mutable + immutable borrow at once
+
+```rust
+let mut s = String::from("hello");
+let r = &s;          // immutable borrow starts
+push_world(&mut s);  // ✗ mutable borrow while `r` is alive
+println!("{r}");
+```
+
+```text
+error[E0502]: cannot borrow `s` as mutable because it is also borrowed as immutable
+```
+
+**Fix:** finish using `r` before the mutable borrow, or restructure so the two
+borrows don't overlap. Since Rust 2018's *non-lexical lifetimes*, a borrow ends
+at its **last use**, not the end of the block — so often just moving the
+`println!("{r}")` up is enough.
+
+### 3. Returning a reference to a local (dangling)
+
+```rust
+fn dangle() -> &String {   // ✗ nothing to borrow from
+    let s = String::from("oops");
+    &s // `s` is dropped at the end of the function
+}
+```
+
+```text
+error[E0106]: missing lifetime specifier
+  = help: this function's return type contains a borrowed value, but there is no value for it to be borrowed from
+```
+
+**Fix:** return the owned `String` (move it out), not a reference to a local.
+
+<Aside type="caution" title="The compiler is not being difficult">
+  Every one of these errors corresponds to a real bug in C: use-after-free, a
+  data race, a dangling pointer. Rust simply moves the discovery from a 3am
+  production page to `cargo build`.
+</Aside>
+
+## Exercises
+
+Try each before revealing the solution.
+
+<Interview question="Exercise 1 — Make it compile without cloning.">
+
+Given:
+
+```rust
+fn total(v: Vec<u64>) -> u64 { v.iter().sum() }
+
+fn main() {
+    let data = vec![1, 2, 3];
+    let t = total(data);
+    println!("total = {t}, len = {}", data.len()); // ✗ data was moved
+}
+```
+
+Change **only** the signature of `total` and the call site so this compiles,
+without cloning `data`.
+
+**Solution:** borrow instead of taking ownership.
+
+```rust
+fn total(v: &[u64]) -> u64 { v.iter().sum() } // take a slice
+
+fn main() {
+    let data = vec![1, 2, 3];
+    let t = total(&data);       // lend it
+    println!("total = {t}, len = {}", data.len()); // ✅ still owned
+}
+```
+
+Taking `&[u64]` instead of `Vec<u64>` is strictly more general *and* avoids the
+move — the idiomatic choice for read-only access.
+
+</Interview>
+
+<Interview question="Exercise 2 — Two mutable borrows.">
+
+Why does this fail, and how do you fix it with `split_at_mut`?
+
+```rust
+let mut v = vec![1, 2, 3, 4];
+let a = &mut v[0];
+let b = &mut v[1]; // ✗ second mutable borrow of `v`
+*a += 1; *b += 1;
+```
+
+**Solution:** the compiler can't prove `v[0]` and `v[1]` don't alias, so two
+`&mut v[..]` borrows are rejected. `split_at_mut` returns two non-overlapping
+mutable slices, which *is* provably disjoint:
+
+```rust
+let mut v = vec![1, 2, 3, 4];
+let (left, right) = v.split_at_mut(1); // [1] and [2,3,4]
+left[0] += 1;
+right[0] += 1;
+assert_eq!(v, vec![2, 3, 3, 4]);
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Count without consuming (uses the lesson's Node type).">
+
+Implement a function that returns the number of nodes in a tree **without taking
+ownership** of it, so the caller can keep using the tree.
+
+**Solution:** borrow `&self` and recurse over shared borrows — exactly what
+`Node::count` in the companion crate does:
+
+```rust
+pub fn count(&self) -> usize {
+    1 + self.children.iter().map(Node::count).sum::<usize>()
+}
+```
+
+Because it only borrows, the tree is fully usable after counting — verified by
+the test `count_traverses_by_shared_borrow`.
+
+</Interview>
+
+## Performance: why borrowing is also faster
+
+Ownership isn't just about safety — passing data by borrow avoids copies the
+naive approach pays for. The binary `examples/rust-ownership/src/bin/bench.rs`
+sums a 100,000-element `Vec<u64>` 2,000 times using three strategies. These are
+real numbers from `cargo run --release --bin bench` on the reference machine:
+
+<Benchmark
+  metric="Time per iteration (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Borrow `&[u64]`", value: 7691, unit: "ns", note: "zero copies" },
+    { label: "Clone `Vec` each call", value: 34790, unit: "ns", note: "alloc + memcpy" },
+    { label: "Needless `collect()` copy", value: 33583, unit: "ns", note: "alloc + memcpy" },
+  ]}
+/>
+
+Borrowing is **~4.5× faster** here, and the gap grows with data size: the clone
+strategy allocates 800 KB and memcpys it on *every* call, while the borrow reads
+the existing buffer in place. The idiomatic, safe path is the fast path.
+
+<Aside type="tip" title="Rule of thumb">
+  Default to `&T` / `&[T]` / `&str` in function signatures. Take ownership
+  (`T`, `String`, `Vec<T>`) only when the function genuinely needs to *store* or
+  *consume* the value. Reach for `.clone()` last, and when you do, make it visible.
+</Aside>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Accept `&str` / `&[T]` for read-only params | Accept `String` / `Vec<T>` then only read it |
+| Return owned values from constructors | Return references to locals (won't compile) |
+| Clone explicitly and rarely, with intent | Sprinkle `.clone()` to silence the borrow checker |
+| Let borrows end at last use (NLL) | Hold borrows longer than needed, blocking mutation |
+| Use `split_at_mut` / iterators for disjoint access | Fight the checker with `unsafe` to alias `&mut` |
+
+<Aside type="danger" title="The `.clone()` trap">
+  Cloning to make an error disappear works, but it hides a cost and often a
+  design smell. If you find yourself cloning in a hot loop, the fix is almost
+  always to borrow or to restructure ownership — not to clone harder.
+</Aside>
+
+## Mini-project
+
+**Build a `WordStats` analyzer.** Write a struct that, given a `&str`, reports the
+word count, the longest word, and the average word length — all by **borrowing**
+the input (no `String` allocation for the words themselves; return slices).
+
+Acceptance criteria:
+
+- The function takes `&str` and returns borrowed `&str` slices where possible.
+- It has at least three `#[test]` cases, including an empty string.
+- `cargo clippy` is clean.
+
+This exercises `first_word`-style slicing, lifetimes in return position, and the
+discipline of not allocating when a borrow will do. (A reference solution and
+test suite are provided in the repository under `examples/rust-ownership`.)
+
+## Interview questions
+
+<Interview question="What is the difference between `Copy` and `Clone`?">
+
+`Copy` is an implicit, cheap, bitwise duplication for types that live entirely on
+the stack (integers, `bool`, `char`, and tuples/arrays of them). Assignment
+copies instead of moving. `Clone` is an **explicit**, potentially expensive,
+possibly deep duplication you must call with `.clone()`. A type can be `Clone`
+without being `Copy` (e.g. `String`, `Vec<T>`) precisely because copying it means
+allocating.
+
+</Interview>
+
+<Interview question="Why can you have many `&T` but only one `&mut T`?">
+
+Because that rule is what makes data races impossible at compile time. A data
+race needs two accesses to the same memory, at least one a write, with no
+synchronisation. Rust forbids the pattern structurally: if a `&mut` exists, no
+other reference (mutable or not) may exist simultaneously, so a write can never
+race a read.
+
+</Interview>
+
+<Interview question="What are Non-Lexical Lifetimes (NLL) and why do they matter?">
+
+Before NLL (pre-2018), a borrow lasted until the end of its enclosing scope, so
+code that was obviously fine would be rejected. NLL makes a borrow end at its
+**last use**. This lets you, for example, read through an immutable borrow and
+then mutate in the same block, as long as the uses don't overlap — matching how
+programmers actually reason.
+
+</Interview>
+
+<Interview question="Does ownership have any runtime cost?">
+
+No. Ownership, moves, borrows and lifetimes are entirely compile-time constructs.
+A move is usually a `memcpy` of a pointer/length/capacity (or nothing, after
+optimisation); there is no reference counting, no garbage collector, no runtime
+bookkeeping. This is why Rust can match C performance while being memory-safe.
+
+</Interview>
+
+## Challenge
+
+Take a small C program you know that manipulates a linked list or a string
+buffer, and reimplement it in safe Rust. Keep a log of every place the borrow
+checker stopped you, and classify each: *real bug the checker caught*, *valid
+pattern I expressed awkwardly*, or *genuine limitation needing `Rc`/`RefCell`*.
+Most entries will be the first two — that reclassification is the moment
+ownership "clicks".
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 4 — [“Understanding Ownership”](https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html)
+- *Rust by Example* — [Scope, ownership and borrowing](https://doc.rust-lang.org/rust-by-example/scope.html)
+- Niko Matsakis, [*Non-Lexical Lifetimes* RFC 2094](https://rust-lang.github.io/rfcs/2094-nll.html)
+- *The Rustonomicon* — [ownership and lifetimes (advanced/unsafe)](https://doc.rust-lang.org/nomicon/)
+
+<Progress />

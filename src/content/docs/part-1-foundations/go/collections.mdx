@@ -1,0 +1,491 @@
+---
+title: "Go: Slices, Maps & Strings"
+description: The three workhorse types in Go — slices as views over a backing array, maps as hash tables, and strings as immutable UTF-8. Their idioms and sharp edges, with complete tested examples.
+difficulty: beginner
+estimatedMinutes: 30
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={30} languages={["go"]} />
+
+Almost every Go program leans on three built-in types: **slices** (growable,
+ordered lists), **maps** (key → value lookup), and **strings** (immutable UTF-8
+text). They are simple on the surface, but each has one sharp edge that surprises
+newcomers — a slice sharing its backing array, a nil map panicking on write, a
+string indexed into the middle of a character. This lesson gives you the idioms
+and the traps, with programs you can run.
+
+<Aside type="note" title="Prerequisites">
+  You should be comfortable with Go basics: `func`, `for`, `range`, and how to run
+  `go test`. Slices build on the idea of an underlying array.
+</Aside>
+
+All code is from the tested module
+[`examples/go-collections/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` green, `go vet` clean). Every snippet is **complete** — a runnable
+`package main`, or a whole declaration from the module.
+
+## Slices: a view over an array
+
+A slice is a small header — **pointer, length, capacity** — pointing into a
+backing array. `len` is how many elements it has; `cap` is how many it can hold
+before it must grow.
+
+<Mermaid title="A slice is a pointer + length + capacity into a backing array" code={`flowchart LR
+  S["slice header: ptr, len=3, cap=5"] --> A["backing array: [10][20][30][ ][ ]"]`} />
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	nums := make([]int, 0, 4) // len 0, cap 4
+	nums = append(nums, 10, 20, 30)
+	fmt.Println(nums, "len", len(nums), "cap", cap(nums)) // [10 20 30] len 3 cap 4
+
+	// Slicing shares the backing array — no copy.
+	first := nums[:2]
+	fmt.Println(first) // [10 20]
+
+	// range yields index, value; _ discards the index.
+	sum := 0
+	for _, n := range nums {
+		sum += n
+	}
+	fmt.Println("sum", sum) // sum 60
+}
+```
+
+Output:
+
+```text
+[10 20 30] len 3 cap 4
+[10 20]
+sum 60
+```
+
+<Aside type="caution" title="The slice-aliasing trap">
+  Because slices share a backing array, writing through one slice can change
+  another, and `append` may or may not reallocate depending on capacity. When you
+  need an independent copy, use `copy(dst, src)` or `append([]T(nil), src...)`.
+</Aside>
+
+Here is the trap made concrete — a complete program:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	original := []int{1, 2, 3, 4, 5}
+	// A sub-slice shares the same backing array as `original`.
+	view := original[1:3] // [2 3]
+	view[0] = 99          // writes into original too!
+	fmt.Println(original) // [1 99 3 4 5]
+
+	// To avoid sharing, copy into a fresh slice.
+	safe := make([]int, len(original))
+	copy(safe, original)
+	safe[0] = -1
+	fmt.Println(original[0], safe[0]) // 1 -1
+}
+```
+
+Output:
+
+```text
+[1 99 3 4 5]
+1 -1
+```
+
+## Maps: lookup with the comma-ok idiom
+
+Create a map with `make`, read with the **comma-ok** form to distinguish "absent"
+from "zero", and remove with `delete`.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	ages := make(map[string]int)
+	ages["ada"] = 36
+	ages["grace"] = 45
+
+	// Comma-ok: ok is false when the key is absent.
+	age, ok := ages["ada"]
+	fmt.Println(age, ok) // 36 true
+	_, ok = ages["nobody"]
+	fmt.Println(ok) // false
+
+	// Reading a missing key returns the zero value (0 here) — handy for counters.
+	counts := map[string]int{}
+	counts["x"]++
+	counts["x"]++
+	fmt.Println(counts["x"]) // 2
+
+	delete(ages, "ada")
+	fmt.Println(len(ages)) // 1
+}
+```
+
+Output:
+
+```text
+36 true
+false
+2
+1
+```
+
+<Aside type="caution" title="Map iteration order is random; writing to a nil map panics">
+  Ranging a map visits keys in an **unspecified, randomized** order. For stable
+  output, collect the keys into a slice and `sort` them. Also: a `nil` map (declared
+  but not `make`-d) is fine to read but **panics on write** — always `make` a map
+  before assigning to it.
+</Aside>
+
+Sorting keys for deterministic output:
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"sort"
+)
+
+func main() {
+	counts := map[string]int{"cat": 2, "the": 3, "dog": 1}
+
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		fmt.Printf("%s: %d\n", k, counts[k])
+	}
+}
+```
+
+Output:
+
+```text
+cat: 2
+dog: 1
+the: 3
+```
+
+## Strings: immutable UTF-8
+
+A Go string is an immutable sequence of **bytes**, conventionally UTF-8. Indexing
+`s[i]` gives a **byte**; `len(s)` is the **byte** count. Ranging over a string
+yields **runes** (Unicode code points) with their byte offsets.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func main() {
+	s := "héllo" // é takes 2 bytes in UTF-8
+	fmt.Println("bytes:", len(s)) // bytes: 6
+
+	// Ranging yields runes, so this counts characters, not bytes.
+	runes := 0
+	for range s {
+		runes++
+	}
+	fmt.Println("runes:", runes) // runes: 5
+
+	// Index gives a byte; convert the whole string to []rune to index by character.
+	rs := []rune(s)
+	fmt.Printf("first char: %c\n", rs[0]) // first char: h
+}
+```
+
+Output:
+
+```text
+bytes: 6
+runes: 5
+first char: h
+```
+
+Building strings efficiently with `strings.Builder` (repeated `+` is quadratic):
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func main() {
+	var b strings.Builder
+	for i, w := range []string{"hello", "go", "world"} {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(strings.ToUpper(w))
+	}
+	fmt.Println(b.String()) // HELLO GO WORLD
+}
+```
+
+Output:
+
+```text
+HELLO GO WORLD
+```
+
+<Quiz
+  question={'What does len("héllo") return in Go, where é is a 2-byte UTF-8 character?'}
+  options={[
+    { text: "5 — it counts characters.", },
+    { text: "6 — len counts bytes, and é takes 2 of them.", correct: true },
+    { text: "It panics on non-ASCII input.", },
+    { text: "4 — it ignores accented characters.", },
+  ]}
+  explanation={'A Go string is a sequence of bytes, and len returns the byte count. Since é encodes as 2 bytes in UTF-8, "héllo" is 6 bytes even though it is 5 characters. To count characters (runes), range over the string or use utf8.RuneCountInString.'}
+/>
+
+## Common mistakes & debugging
+
+### 1. Writing to a nil map
+
+```go
+func main() {
+	var m map[string]int // nil map (not make-d)
+	m["x"] = 1           // ✗ panic
+}
+```
+
+```text
+panic: assignment to entry in nil map
+```
+
+**Fix:** initialise with `m := make(map[string]int)` or a literal `map[string]int{}`
+before writing.
+
+### 2. Expecting stable map iteration order
+
+```go
+for k, v := range m { fmt.Println(k, v) } // order changes between runs
+```
+
+**Fix:** if you need order, collect keys into a slice and `sort` them (shown
+above). Go randomizes map order on purpose so nobody accidentally depends on it.
+
+### 3. `append` surprises from shared capacity
+
+```go
+a := []int{1, 2, 3}
+b := a[:2]
+b = append(b, 99) // overwrites a[2] because b still has spare capacity!
+// a is now [1 2 99]
+```
+
+**Fix:** when a slice must not affect its parent, copy it, or use a full-slice
+expression `a[:2:2]` to cap its capacity so `append` is forced to reallocate.
+
+## Exercises
+
+<Interview question="Exercise 1 — Count evens with range.">
+
+Write `countEvens(nums []int) int` and print the count. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+func countEvens(nums []int) int {
+	count := 0
+	for _, n := range nums {
+		if n%2 == 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func main() {
+	fmt.Println(countEvens([]int{1, 2, 3, 4, 5, 6})) // 3
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Group words by first letter.">
+
+Build a `map[rune][]string` from a slice of words. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"fmt"
+	"sort"
+)
+
+func main() {
+	words := []string{"apple", "ant", "bear", "cat"}
+	groups := make(map[rune][]string)
+	for _, w := range words {
+		first := []rune(w)[0]
+		groups[first] = append(groups[first], w)
+	}
+
+	// Deterministic output: sort the keys.
+	keys := make([]rune, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	for _, k := range keys {
+		fmt.Printf("%c: %v\n", k, groups[k])
+	}
+}
+```
+
+Output:
+
+```text
+a: [apple ant]
+b: [bear]
+c: [cat]
+```
+
+`append` to a missing map key works because the zero value of `[]string` is `nil`,
+and appending to `nil` returns a new slice.
+
+</Interview>
+
+<Interview question="Exercise 3 — Reverse a slice into a new one.">
+
+Write `reversed(s []int) []int` that returns a new reversed slice without mutating
+the input. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import "fmt"
+
+func reversed(s []int) []int {
+	out := make([]int, len(s))
+	for i, v := range s {
+		out[len(s)-1-i] = v
+	}
+	return out
+}
+
+func main() {
+	in := []int{1, 2, 3}
+	fmt.Println(reversed(in)) // [3 2 1]
+	fmt.Println(in)           // [1 2 3] (unchanged)
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| `make(map[K]V)` before writing | Writing to a nil map (panics) |
+| `copy` / `append(nil, s...)` for an independent slice | Assuming a sub-slice is independent |
+| Collect + `sort` keys for stable map output | Relying on map iteration order |
+| `strings.Builder` for building strings in a loop | `s += ...` in a hot loop (quadratic) |
+| Range over a string for runes; `[]rune` to index chars | `s[i]` expecting a character (it's a byte) |
+| Pre-size with `make([]T, 0, n)` when you know the size | Growing a slice one element at a time blindly |
+
+## Mini-project
+
+**Build a small text-analytics tool.** Given a paragraph, produce: the top 5
+words by frequency (deterministic), the number of unique words, the average word
+length (in runes, not bytes), and the words grouped by length. Use slices, maps,
+`sort`, and `strings`/`unicode` — no third-party packages.
+
+Requirements: deterministic output, handles non-ASCII correctly (count runes),
+table-driven tests including an empty input, and `go vet` clean.
+
+## Interview questions
+
+<Interview question="What is the difference between a slice's length and capacity?">
+
+Length (`len`) is the number of elements currently in the slice; capacity (`cap`)
+is how many the backing array can hold from the slice's start before it must grow.
+`append` adds within the spare capacity if there is room; otherwise it allocates a
+larger backing array and copies. Understanding this explains both the performance
+of `append` and the aliasing surprises when sub-slices share capacity.
+
+</Interview>
+
+<Interview question="Why is Go's map iteration order randomized?">
+
+To prevent code from accidentally depending on an order the language never
+guaranteed. Early Go had a stable-ish order, and programs came to rely on it,
+breaking when the implementation changed. Randomizing it makes the lack of
+ordering obvious immediately. If you need a specific order, extract the keys to a
+slice and sort them.
+
+</Interview>
+
+<Interview question="How are strings, bytes, and runes related in Go?">
+
+A `string` is an immutable sequence of bytes (UTF-8 by convention). A `byte` is an
+alias for `uint8` — one byte. A `rune` is an alias for `int32` — one Unicode code
+point, which may span multiple bytes. `len(s)` and `s[i]` work in bytes; ranging a
+string yields runes; `[]rune(s)` converts to a slice you can index by character
+(at the cost of an allocation).
+
+</Interview>
+
+<Interview question="When does append allocate a new backing array?">
+
+When the slice's capacity is insufficient to hold the new elements. If `len ==
+cap`, `append` allocates a new, larger array (typically growing by a factor),
+copies the existing elements, and returns a slice pointing at the new array — so
+the original and the result no longer share storage. If there is spare capacity,
+`append` writes in place and both slices see the change. This is why you must use
+the returned slice: `s = append(s, x)`.
+
+</Interview>
+
+## Challenge
+
+Take a slice-manipulation function you have (a filter, an insert-at-index, a
+dedup) and write a test that deliberately checks whether it mutates its input via
+a shared backing array. Many "pure-looking" slice helpers secretly alias. Then fix
+it with `copy` or a capped slice expression `s[:n:n]`, and confirm the test now
+proves independence. That habit — asking "does this share a backing array?" — is
+what separates correct Go slice code from subtly buggy code.
+
+## References & further reading
+
+- Go blog — [slices: usage and internals](https://go.dev/blog/slices-intro)
+- Go blog — [strings, bytes, runes and characters](https://go.dev/blog/strings)
+- *Effective Go* — [maps](https://go.dev/doc/effective_go#maps) and [slices](https://go.dev/doc/effective_go#slices)
+- `strings` and `sort` packages — [pkg.go.dev/strings](https://pkg.go.dev/strings), [pkg.go.dev/sort](https://pkg.go.dev/sort)
+
+<Progress />

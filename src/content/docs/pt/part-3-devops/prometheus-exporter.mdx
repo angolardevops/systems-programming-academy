@@ -1,0 +1,433 @@
+---
+title: "Projeto: Exporter Estilo Prometheus"
+description: Construa um exporter de métricas a servir o formato de texto do Prometheus por HTTP em Rust, Go e Python — verificado byte-idêntico ao vivo — e pese os trade-offs de agente residente - memória 2.0 vs 7.6 vs 21.3 MB.
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+A [lição de logging](/systems-programming-academy/pt/part-2-engineering/logging/) apresentou as métricas como
+o segundo pilar da observabilidade. Este projeto constrói a ferramenta que as
+*fornece*: um **exporter** — um pequeno servidor HTTP cujo endpoint `/metrics`
+publica contadores e gauges no formato de exposição de texto do Prometheus,
+pronto para um servidor Prometheus fazer scrape. É a forma de cada
+node_exporter, postgres_exporter e agente próprio da sua frota — e ao contrário
+do [analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/), é um **processo de
+longa duração**, o que muda quais trade-offs de linguagem importam.
+
+As três implementações foram **arrancadas, scraped com `curl`, e as respostas
+`/metrics` comparadas com diff: byte-idênticas.** A camada HTTP do Rust é feita à
+mão sobre `TcpListener` (uma antevisão deliberada do mini-NGINX da Parte 4); Go e
+Python usam as bibliotecas padrão.
+
+<Aside type="note" title="Pré-requisitos">
+  O [projeto do analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/) (o método da
+  Parte 3) e a [lição de logging](/systems-programming-academy/pt/part-2-engineering/logging/) (logs vs
+  métricas).
+</Aside>
+
+Código:
+[`examples/part3-exporter-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— cada um fmt/lint limpo, 5 testes cada.
+
+## O formato de exposição
+
+O que um servidor Prometheus vê quando faz scrape de `/metrics` — esta saída
+exata foi servida, ao vivo, pelas três implementações:
+
+```text
+$ curl localhost:9100/metrics
+# HELP cpu_load 1-minute load average.
+# TYPE cpu_load gauge
+cpu_load{core="0"} 0.5
+# HELP http_requests_total Total HTTP requests.
+# TYPE http_requests_total counter
+http_requests_total{method="GET",path="/"} 42
+http_requests_total{method="POST",path="/api"} 7
+# HELP queue_depth Jobs waiting in the queue.
+# TYPE queue_depth gauge
+queue_depth 3
+```
+
+Dois tipos de métrica carregam a maior parte: um **counter** só sobe (pedidos
+servidos, erros vistos — as taxas são derivadas pelo servidor), e um **gauge**
+vai nos dois sentidos (profundidade da fila, temperatura). As **labels**
+(`{method="GET",path="/"}`) dividem uma métrica em séries — o modelo dimensional
+que torna as queries do Prometheus poderosas, e a cardinalidade a sua famosa
+armadilha.
+
+<Mermaid title="Um exporter na arquitetura Prometheus" code={`flowchart LR
+  A["a sua app / host"] --> E["exporter: registry + endpoint /metrics"]
+  P["servidor Prometheus"] -->|faz scrape a cada 15s| E
+  P --> G["dashboards Grafana / regras de alerta"]`} />
+
+## O registry: um núcleo puro e determinístico
+
+O padrão da Parte 3 outra vez — toda a lógica num núcleo testável, o I/O numa
+casca fina. O determinismo (métricas ordenadas, séries ordenadas, uma regra de
+formatação de valores) é o que dá sentido ao diff entre linguagens:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// BTreeMaps mantêm nomes e séries ordenados => render determinístico.
+#[derive(Default)]
+pub struct Registry {
+    metrics: BTreeMap<String, Metric>,
+}
+
+impl Registry {
+    pub fn inc_counter(&mut self, name: &str, help: &str,
+                       labels: &[(&str, &str)], delta: f64) {
+        let key = label_string(labels);
+        let m = self.metric(name, help, Kind::Counter);
+        *m.series.entry(key).or_insert(0.0) += delta;
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (name, metric) in &self.metrics {
+            out.push_str(&format!("# HELP {name} {}\n", metric.help));
+            out.push_str(&format!("# TYPE {name} {}\n", metric.kind.as_str()));
+            for (labels, value) in &metric.series {
+                out.push_str(&format!("{name}{labels} {}\n", format_value(*value)));
+            }
+        }
+        out
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="exporter.go"
+// O Render ordena nomes e séries explicitamente (os maps Go iteram ao acaso).
+func (r *Registry) Render() string {
+	names := make([]string, 0, len(r.metrics))
+	for n := range r.metrics {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	for _, name := range names {
+		m := r.metrics[name]
+		fmt.Fprintf(&b, "# HELP %s %s\n", name, m.help)
+		fmt.Fprintf(&b, "# TYPE %s %s\n", name, m.kind)
+		keys := make([]string, 0, len(m.series))
+		for k := range m.series {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "%s%s %s\n", name, k, formatValue(m.series[k]))
+		}
+	}
+	return b.String()
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="exporter.py"
+def render(self) -> str:
+    out: list[str] = []
+    for name in sorted(self._metrics):        # nomes ordenados
+        m = self._metrics[name]
+        out.append(f"# HELP {name} {m.help}")
+        out.append(f"# TYPE {name} {m.kind}")
+        for key in sorted(m.series):          # séries ordenadas
+            out.append(f"{name}{key} {format_value(m.series[key])}")
+    return "\n".join(out) + "\n"
+```
+</TabItem>
+</Tabs>
+
+Uma armadilha subtil entre linguagens mereceu função e teste próprios: a
+**formatação de valores**. `42.0` imprime como `42` em Rust/Go mas `42.0` no
+`str` default do Python — por isso as três implementam a mesma regra explícita
+(inteiro se for redondo, senão float curto), fixada pelo teste
+`format_value(42) == "42"` e `format_value(0.5) == "0.5"`.
+
+## Três stacks HTTP
+
+A diferença mais instrutiva neste projeto é o que "servir HTTP" custa em cada
+linguagem:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/main.rs"
+// Feito à mão: accept, ler a cabeça do pedido, escrever uma resposta. ~30
+// linhas, sem dependências — e um gostinho do mini-NGINX da Parte 4.
+let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
+for stream in listener.incoming() {
+    let mut stream = stream?;
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let ok = head.starts_with("GET /metrics");
+
+    let (status, body) = if ok {
+        ("200 OK", exporter::demo_registry().render())
+    } else {
+        ("404 Not Found", "not found\n".to_string())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+```
+A stdlib do Rust não tem servidor HTTP — constrói sobre TCP (como aqui) ou usa um
+crate (`hyper`, `axum`). Educativo aqui; em produção usaria o crate.
+</TabItem>
+<TabItem label="Go">
+```go title="exporter.go"
+// O servidor http da stdlib: nível de produção, concorrente, três linhas.
+http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprint(w, DemoRegistry().Render())
+})
+http.ListenAndServe("127.0.0.1:"+port, nil)
+```
+É por isto que o Go domina este nicho: o `net/http` é um servidor concorrente de
+produção na biblioteca padrão — uma goroutine por ligação, de graça.
+</TabItem>
+<TabItem label="Python">
+```python title="exporter.py"
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path != "/metrics":
+            self.send_error(404)
+            return
+        body = demo_registry().render().encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+HTTPServer(("127.0.0.1", port), _Handler).serve_forever()
+```
+O `http.server` funciona e é stdlib, mas é single-threaded e explicitamente não
+endurecido — serviços Python reais correm atrás de uvicorn/gunicorn.
+</TabItem>
+</Tabs>
+
+## Verificado ao vivo, depois medido
+
+A prova e os números, de correr mesmo as três:
+
+```text
+$ curl -s localhost:9100/metrics > m-rust.txt   # e 9101 (Go), 9102 (Python)
+$ diff m-rust.txt m-go.txt && diff m-rust.txt m-py.txt
+ALL THREE /metrics BYTE-IDENTICAL
+```
+
+Para um **agente residente**, o número que importa não é um ciclo quente — um
+exporter é scraped a cada 15 s — é a **memória que ocupa em cada máquina da
+frota, para sempre**:
+
+<Benchmark
+  metric="Memória residente em serviço (menos é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust (HTTP feito à mão)", value: 2004, unit: "kB", note: "~2.0 MB" },
+    { label: "Go (net/http)", value: 7644, unit: "kB", note: "~7.6 MB" },
+    { label: "Python (http.server)", value: 21344, unit: "kB", note: "~21.3 MB" },
+  ]}
+/>
+
+**O cálculo de agente difere do cálculo de CLI.** No
+[analisador de logs](/systems-programming-academy/pt/part-3-devops/log-analyzer/), dominavam o throughput e o
+arranque. Num exporter sempre ligado: memória residente × tamanho da frota
+(21 MB × 5.000 nós são ~100 GB de RAM parados), concorrência sob tempestades de
+scrapes (o Go ganha por defeito), e implantação (um binário estático largado num
+contentor mínimo — que é exatamente o que o `node_exporter` real, escrito em Go,
+é).
+
+<Quiz
+  question={'Porque não pode um counter diminuir, e o que deriva o Prometheus dele?'}
+  options={[
+    { text: "Valores decrescentes fazem overflow do formato de armazenamento.", },
+    { text: "Os counters são totais cumulativos; o Prometheus deriva taxas (rate(), increase()) do seu crescimento, e uma descida só faz sentido como restart do processo, que o servidor deteta e corrige.", correct: true },
+    { text: "Os gauges são mais baratos de guardar que os counters.", },
+    { text: "O formato de texto não representa números negativos.", },
+  ]}
+  explanation="Um counter é um total monotonicamente crescente (pedidos servidos desde o arranque). O Prometheus calcula o que realmente se grafica — pedidos por segundo — a partir de scrapes consecutivos com rate(). Como a única descida legítima é um reset-para-zero num restart, o servidor consegue detetar e compensar resets; descidas arbitrárias corromperiam cada taxa derivada. Valores que genuinamente descem (fila, memória) são gauges."
+/>
+
+## Erros comuns & depuração
+
+### 1. Explosões de cardinalidade de labels
+
+Cada combinação única de labels é uma série armazenada. Ponha `user_id` ou
+`request_id` como label e um exporter ocupado cunha milhões de séries, deitando
+abaixo o servidor Prometheus. Labels só para dimensões *limitadas* (método,
+template do path, classe de status) — nunca IDs sem limite.
+
+### 2. Exposição não-determinística
+
+Os hash maps de Go e Python iteram em ordem aleatória; renderize sem ordenar e
+cada scrape baralha as linhas. O Prometheus tolera, mas os seus testes, diffs e
+humanos não. Ordene nomes e séries — a versão Rust ganha isto de graça do
+`BTreeMap`; as outras duas ordenam explicitamente.
+
+### 3. Fazer o trabalho de recolha por scrape
+
+Recolha cara (percorrer `/proc`, consultar uma BD) dentro do handler torna o
+`/metrics` lento e transforma timeouts de scrape em buracos nos gráficos.
+Recolha num ritmo em fundo para o registry; sirva leituras instantâneas. (A
+nossa demo semeia estaticamente — o mini-projeto corrige isso.)
+
+## Exercícios
+
+<Interview question="Exercício 1 — Um histograma-lite: gauge de máximo.">
+
+Acrescente `observe_max(name, help, labels, value)` — um gauge que só sobe (um
+p100 de latência rudimentar). (Escolha a sua linguagem.)
+
+**Solução (Python):**
+
+```python
+def observe_max(
+    self, name: str, help_text: str, labels: dict[str, str] | None, value: float
+) -> None:
+    m = self._metric(name, help_text, "gauge")
+    key = label_string(labels)
+    m.series[key] = max(m.series.get(key, float("-inf")), value)
+```
+
+Os histogramas reais colocam observações em buckets (séries
+`_bucket{le="0.1"}`); este gauge-de-máximo é o trampolim de 10 linhas.
+
+</Interview>
+
+<Interview question="Exercício 2 — Porquê pull e não push no /metrics?">
+
+O Prometheus faz scrape dos exporters em vez de os exporters empurrarem. Dê duas
+vantagens operacionais do pull.
+
+**Resposta:** (1) **Saúde de graça** — um scrape falhado marca o alvo `up == 0`;
+com push, o silêncio é ambíguo (processo morto, ou nada a dizer?). (2) **O
+servidor controla a carga** — intervalo e timeouts de scrape configuram-se
+centralmente, uma frota mal-comportada não faz stampede ao sistema de
+monitorização, e pode apontar um Prometheus de portátil aos exporters de
+produção em modo só-leitura para depurar.
+
+</Interview>
+
+<Interview question="Exercício 3 — Encontre o bug de cardinalidade.">
+
+Um colega acrescenta `r.IncCounter("http_requests_total", "...", map[string]string{"user_id": uid}, 1)`.
+O que acontece ao longo de uma semana em produção?
+
+**Resposta:** Cria-se uma série por utilizador distinto — cardinalidade sem
+limite. A memória do exporter cresce indefinidamente, as respostas `/metrics`
+incham, e o TSDB do servidor Prometheus ingere milhões de séries quase-mortas
+até queries e compactação degradarem. Correção: remover o `user_id`; contar por
+dimensões limitadas e acompanhar detalhe por-utilizador nos logs (que são feitos
+para eventos de alta cardinalidade).
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Dimensões de labels limitadas | `user_id`/`request_id` como labels |
+| Counters para totais, gauges para níveis | Um "counter" que às vezes decrementa |
+| Recolher a um ritmo, servir da memória | Consultar a base de dados dentro do handler de scrape |
+| Exposição determinística e ordenada | Saída na ordem do hash map |
+| Sufixo `_total` em counters, unidades base (segundos, bytes) | Nomes ad-hoc e unidades misturadas |
+| Agentes de binário estático para frotas | Um interpretador de 21 MB por nó × 5.000 nós |
+
+## Mini-projeto
+
+**Torne-o um exporter de host a sério** numa linguagem: recolha valores reais num
+ciclo em fundo — load average (`/proc/loadavg`), memória (`/proc/meminfo`),
+contagem de processos — para o registry, atualizado a cada N segundos *fora* do
+caminho do pedido. Mantenha o núcleo do registry puro e testado; acrescente um
+teste e2e que arranca o servidor, faz scrape duas vezes, e afirma a
+monotonicidade do counter. Bónus: aponte um Prometheus real (um `docker run`)
+para ele e grafique a carga do seu portátil.
+
+## Perguntas de entrevista
+
+<Interview question="O que é um exporter na arquitetura Prometheus?">
+
+Um processo que expõe métricas no formato de texto do Prometheus por HTTP (por
+convenção em `/metrics`) para o servidor Prometheus fazer scrape num intervalo.
+Os exporters ou instrumentam a própria app (uma client library dentro do
+serviço) ou traduzem as estatísticas de um sistema de terceiros (node_exporter
+para o SO, postgres_exporter para a base de dados). O servidor guarda as
+amostras na sua base de dados de séries temporais, onde dashboards e regras de
+alerta as consultam.
+
+</Interview>
+
+<Interview question="Counter vs gauge — como escolher?">
+
+Counter para tudo o que acumula: pedidos, erros, bytes enviados — só cresce, e o
+Prometheus deriva taxas por segundo dele de forma robusta a restarts. Gauge para
+tudo o que é um *nível*: profundidade de fila, temperatura, memória em uso —
+move-se nos dois sentidos e lê-se diretamente. O teste rápido: se o gráfico útil
+é "por segundo", é um counter; se o gráfico útil é "valor atual", é um gauge.
+(Histogramas/summaries cobrem distribuições de latência.)
+
+</Interview>
+
+<Interview question="Porque é a cardinalidade de labels a principal preocupação de escala no Prometheus?">
+
+Cada combinação única de nome de métrica e valores de labels é uma série
+distinta com o seu próprio armazenamento, indexação e memória, tanto no exporter
+como no servidor. Labels limitadas (método × classe de status) multiplicam as
+séries por uma constante pequena; labels sem limite (IDs de utilizador, hashes
+de contentor) fazem crescer as séries indefinidamente, inchando a memória do
+exporter, os payloads de scrape e o TSDB do servidor até queries e compactação
+falharem. A disciplina: labels são para dimensões por que agruparia num
+dashboard, nunca para identificar eventos individuais.
+
+</Interview>
+
+<Interview question="O que muda na escolha de linguagem entre uma ferramenta CLI e um agente residente?">
+
+Num CLI dominam os custos por invocação: tempo de arranque, throughput do
+caminho quente, implantação de ficheiro único. Num agente dominam os custos de
+residência: pegada de memória multiplicada pelo tamanho da frota e pelo uptime,
+comportamento do GC ao longo de semanas, concorrência sob picos, e quão pequeno
+pode ser o artefacto/contentor. É por isso que linguagens de scripting boas para
+CLIs ocasionais ficam caras como daemons de frota — e porque o ecossistema de
+agentes de observabilidade é dominado pelo Go (servidor na stdlib, binários
+estáticos) com o Rust a crescer onde a pegada mais importa.
+
+</Interview>
+
+## Desafio
+
+Instrumente algo que realmente corre: escolha um serviço ou script, acrescente
+três métricas que o ajudariam genuinamente às 3 da manhã (um counter de pedidos
+por classe de status, um gauge de profundidade de fila, um gauge de timestamp do
+último sucesso), exponha-as com o registry deste projeto, e faça scrape com um
+Prometheus real durante um dia. Depois tente responder a uma pergunta real só
+com os gráficos. O fosso entre "temos métricas" e "as métricas respondem a
+perguntas" é onde a observabilidade se ganha de facto.
+
+## Referências & leitura adicional
+
+- Prometheus — [formatos de exposição](https://prometheus.io/docs/instrumenting/exposition_formats/) e [escrever exporters](https://prometheus.io/docs/instrumenting/writing_exporters/)
+- Prometheus — [nomeação de métricas e labels](https://prometheus.io/docs/practices/naming/)
+- [node_exporter](https://github.com/prometheus/node_exporter) — o verdadeiro, em Go
+- Client libraries: [prometheus/client_golang](https://github.com/prometheus/client_golang) · [prometheus-client (Python)](https://github.com/prometheus/client_python) · [prometheus (Rust)](https://docs.rs/prometheus)
+
+<Progress />

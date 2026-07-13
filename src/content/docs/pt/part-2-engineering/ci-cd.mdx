@@ -1,0 +1,412 @@
+---
+title: "CI/CD"
+description: Integração e entrega contínuas, dissecadas através de um pipeline real — o próprio ci.yml desta Academia, que faz fmt/lint/test de 38 módulos em matrizes de Rust, Go e Python e constrói o site a cada push.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Cada portão de qualidade que este curso ensinou — `cargo clippy`, `go vet
+-race`, `ruff`, os testes em cada módulo — não vale nada se só corre quando
+alguém se lembra. A **Integração Contínua** torna os portões automáticos: cada
+push corre a suíte completa, e um X vermelho bloqueia o merge. A **Entrega
+Contínua** estende o pipeline para produzir um artefacto implantável de cada
+build verde. Esta lição tem um caso de estudo invulgar: **o pipeline da própria
+Academia** — um `ci.yml` real e funcional que verifica *os 38 módulos de
+exemplo* que viu nas Partes 1 e 2, em três matrizes de linguagem, mais o build
+do site que publica estas mesmas páginas.
+
+<Aside type="note" title="Pré-requisitos">
+  As toolchains de qualidade por linguagem da Parte 1 (fmt/lint/test em
+  [Rust](/systems-programming-academy/pt/part-1-foundations/rust/testing/), [Go](/systems-programming-academy/pt/part-1-foundations/go/testing/),
+  [Python](/systems-programming-academy/pt/part-1-foundations/python/testing/)) — o CI são essas ferramentas,
+  tornadas incontornáveis.
+</Aside>
+
+## O pipeline, de ponta a ponta
+
+<Mermaid title="O pipeline real da Academia: quatro jobs paralelos guardam cada push" code={`flowchart LR
+  P["push / pull request"] --> S["site: npm ci + astro build"]
+  P --> R["rust-examples: matriz de 15 crates — fmt, clippy -D warnings, test"]
+  P --> G["go-examples: matriz de 12 módulos — gofmt, vet, test"]
+  P --> Y["python-examples: matriz de 11 módulos — ruff format+check, unittest"]
+  S --> M{"tudo verde?"}
+  R --> M
+  G --> M
+  Y --> M
+  M -->|sim| D["merge permitido -> CD: publicar o site construído"]
+  M -->|não| X["X vermelho: merge bloqueado, corrigir primeiro"]`} />
+
+O ficheiro inteiro tem ~120 linhas de YAML. Aqui está o seu esqueleto com um job
+por linguagem — cada linha do qual já correu à mão em lições anteriores:
+
+```yaml title=".github/workflows/ci.yml (o ficheiro real, abreviado)"
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  site:
+    name: Build site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: academy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci          # instalação exata, presa ao lockfile
+      - run: npm run build   # o site tem de construir a cada push
+
+  rust-examples:
+    name: Rust examples (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate:
+          - rust-ownership
+          - part2-hexagonal-rust
+          # ...15 crates no total: cada módulo Rust do curso
+    defaults:
+      run:
+        working-directory: academy/examples/${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check           # portão 1: formatação
+      - run: cargo clippy -- -D warnings # portão 2: lints são erros
+      - run: cargo test                  # portão 3: comportamento
+
+  go-examples:
+    name: Go examples (gofmt, vet, test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [go-interfaces, part2-hexagonal-go] # ...12 no total
+    defaults:
+      run:
+        working-directory: academy/examples/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+
+  python-examples:
+    name: Python examples (ruff, unittest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [py-datamodel, part2-hexagonal-py] # ...11 no total
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pipx install ruff
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: python -m unittest discover -s . -p 'test_*.py'
+```
+
+## A anatomia, peça a peça
+
+**Gatilhos (`on:`).** `push` para main e cada `pull_request` — os dois momentos
+em que a integração pode partir. Nada entra sem uma execução verde contra o
+resultado do merge.
+
+**Os jobs correm em paralelo.** Os quatro jobs são independentes, por isso uma
+falha em Rust é reportada em minutos mesmo enquanto o build do site continua.
+Dentro de um job, os passos são sequenciais e **falham cedo**: se o `cargo fmt
+--check` falha, o clippy e os testes nem gastam tempo a correr.
+
+**A matriz.** O `strategy.matrix` expande uma definição de job em N — um runner
+por módulo. É a mesma ideia "table-driven" das
+[lições de testes](/systems-programming-academy/pt/part-2-engineering/testing-pyramid/): acrescentar o
+módulo nº 39 ao CI é uma linha numa lista, não um job copiado.
+
+**Portões pela ordem certa.** O mais barato primeiro: verificação de formato
+(instantânea) → linter (segundos) → testes (o trabalho a sério). Um commit
+trivialmente malformado falha nos primeiros segundos do seu primeiro job.
+
+**Passos presos e reproduzíveis.** `npm ci` (não `install`) respeita o lockfile
+exatamente; as toolchains estão presas (`go-version: '1.23'`, `python-version:
+'3.12'`); as actions têm versão (`@v4`). Um CI que instala "o que for mais
+recente" produz falhas de sexta-feira inexplicáveis.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```yaml
+# O portão Rust: warnings são erros, a formatação é lei.
+- run: cargo fmt --check
+- run: cargo clippy -- -D warnings
+- run: cargo test
+```
+O `-D warnings` é a flag crucial: um lint que localmente apenas avisaria **falha
+o build**, por isso os warnings nunca se acumulam.
+</TabItem>
+<TabItem label="Go">
+```yaml
+# O portão Go: o gofmt não tem opções, o vet apanha código suspeito.
+- run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+- run: go vet ./...
+- run: go test ./...
+```
+O `gofmt -l` lista ficheiros não formatados; o test da shell transforma uma
+lista não-vazia num exit code de falha. Para código concorrente, acrescente
+`go test -race` (como a [lição de goroutines](/systems-programming-academy/pt/part-1-foundations/go/concurrency/)
+demonstrou).
+</TabItem>
+<TabItem label="Python">
+```yaml
+# O portão Python: o ruff formata e linta, o unittest verifica.
+- run: ruff format --check .
+- run: ruff check .
+- run: python -m unittest discover -s . -p 'test_*.py'
+```
+Acrescente `mypy .` aqui no momento em que um projeto adota
+[type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/) — anotações que o CI
+nunca verifica são apenas comentários.
+</TabItem>
+</Tabs>
+
+## De CI para CD
+
+O CI responde "esta mudança é segura para merge?" O **CD** responde "está
+implantada?" Para este site o passo de entrega é curto — o artefacto do `astro
+build` é uma diretoria estática, publicada a cada build verde de main:
+
+```yaml title="um job de deploy (Cloudflare Pages / qualquer host estático)"
+  deploy:
+    needs: [site, rust-examples, go-examples, python-examples] # só após TODOS os portões
+    if: github.ref == 'refs/heads/main'                        # só a partir de main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: academy
+      - uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}   # do cofre de segredos do repo
+          directory: academy/dist
+```
+
+Dois detalhes levam a [lição de configuração](/systems-programming-academy/pt/part-2-engineering/configuration/)
+em frente: o token de deploy vem do **cofre de segredos** da plataforma (nunca
+do YAML), e o `needs:` torna a implantação *condicionada a todos os portões* — a
+entrega é a recompensa da integração, não uma aposta paralela.
+
+<Quiz
+  question={'Porque corre o pipeline o cargo fmt --check antes do clippy e dos testes, e não depois?'}
+  options={[
+    { text: "A formatação é a verificação mais importante.", },
+    { text: "Os portões estão ordenados do mais barato para o mais caro, para um commit partido falhar em segundos sem desperdiçar minutos de lint/testes.", correct: true },
+    { text: "O cargo test não pode correr antes do cargo fmt.", },
+    { text: "O GitHub Actions exige ordem alfabética dos passos.", },
+  ]}
+  explanation="Os passos de um job correm sequencialmente e param na primeira falha. Pôr as verificações instantâneas (formato) antes das rápidas (lint) antes das lentas (testes) faz com que as falhas triviais mais comuns sejam reportadas em segundos e nenhum cômputo se queime a correr uma suíte completa num commit que nunca ia passar. O mesmo princípio da pirâmide de testes: feedback barato primeiro."
+/>
+
+## O que o CI ensinou a este próprio curso
+
+Este pipeline não foi decoração — construir a Academia exercitou-o exatamente
+como os projetos reais fazem:
+
+- **A matriz cresceu uma linha de cada vez.** Cada lição acrescentou o seu
+  módulo a uma lista. É essa a propriedade de manutenção que quer: estender o CI
+  deve ser trivial, ou as pessoas não o fazem.
+- **Os portões apanharam bugs reais antes do "merge".** O borrow checker
+  rejeitou um teste na [lição de caching](/systems-programming-academy/pt/part-2-engineering/caching/); o
+  `ruff` reformatou ficheiros em quase todos os módulos Python; uma falha de
+  doctest apanhou um bug int-vs-float na
+  [lição de type hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/). Os portões
+  corridos localmente são o ensaio geral do CI — o CI é o que os torna
+  vinculativos.
+- **O determinismo importou em todo o lado.** Relógios injetados, sinks
+  injetados, saídas ordenadas — cada técnica das lições anteriores existe para
+  este pipeline poder estar **verde ou vermelho por razões reais**, nunca flaky.
+
+## Erros comuns & depuração
+
+### 1. Testes flaky a corroer a confiança
+
+Um teste que falha 5% das vezes treina a equipa a clicar "re-run" — e depois uma
+falha real também é re-corrida. **Correção:** ponha os flakes em quarentena de
+imediato e corrija o não-determinismo na raiz (relógios reais, sleeps, estado
+partilhado — tudo o que as lições da Parte 2 injetaram para fora).
+
+### 2. Funciona localmente, falha no CI (ou pior, o inverso)
+
+Deriva de versões: Go 1.25 local vs 1.23 no CI, dependências não presas, um
+ficheiro não commitado. **Correção:** prenda as toolchains no CI *e* localmente
+(rust-toolchain.toml, .python-version, go.mod), use instalações exatas ao
+lockfile (`npm ci`), e trate "só passa na minha máquina" como um bug do setup,
+não um incómodo.
+
+### 3. Um pipeline lento que ninguém espera
+
+Quando o CI demora 40 minutos, as pessoas acumulam commits, fazem merge com
+amarelo, e o ciclo de feedback morre. **Correção:** paralelize com matrizes
+(como aqui), faça cache das dependências (`actions/cache` para `~/.cargo`, a
+cache de build do Go, pip), e empurre suítes lentas para uma execução noturna —
+o portão de PR deve ficar abaixo de ~10 minutos.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Acrescentar cache de dependências ao job Rust.">
+
+A matriz Rust recompila as dependências do zero a cada execução. Acrescente
+cache.
+
+**Solução:**
+
+```yaml
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            academy/examples/${{ matrix.crate }}/target
+          key: cargo-${{ matrix.crate }}-${{ hashFiles('**/Cargo.toml') }}
+```
+
+A `key` inclui o hash do manifesto: mude as dependências e a cache falha
+(correto); toque só no código e ela acerta (rápido).
+
+</Interview>
+
+<Interview question="Exercício 2 — Guardar código Go concorrente com o race detector.">
+
+Que única linha mudaria no job Go para módulos com goroutines, e o que compra?
+
+**Solução:** mude `go test ./...` para `go test -race ./...`. O race detector
+instrumenta os acessos a memória e falha o build em qualquer data race —
+transformando as garantias de
+[concorrência sem medo](/systems-programming-academy/pt/part-1-foundations/go/concurrency/) num portão de
+merge. (Custo: testes mais lentos; vale a pena onde existam goroutines.)
+
+</Interview>
+
+<Interview question="Exercício 3 — Explicar o `needs:` no job de deploy.">
+
+Numa frase: o que garante `needs: [site, rust-examples, go-examples,
+python-examples]`, e o que arriscaria removê-lo?
+
+**Resposta:** Faz o job de deploy esperar por — e exigir o sucesso de — todos os
+jobs de portão, para um artefacto só poder sair de um build totalmente verde;
+removê-lo deixaria um deploy correr à frente e publicar um site cujo código de
+exemplo está a falhar os próprios testes.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Cada portão que corre localmente, corre no CI | "Lembrem-se de correr os testes antes do push" |
+| Warnings são erros (`-D warnings`) | Warnings a acumular durante anos |
+| Verificações mais baratas primeiro, falhar cedo | Uma suíte de 30 minutos antes do check de formato |
+| Matrizes + cache mantêm-no abaixo de ~10 min | Jobs em série que ninguém espera |
+| Toolchains presas, instalações por lockfile | "latest" em tudo, mistérios à sexta-feira |
+| Deploy com `needs:` de todos os portões, segredos no cofre | Tokens no YAML, deploys a correr contra os testes |
+
+## Mini-projeto
+
+**Dê o tratamento da Academia a um projeto seu.** Escreva um workflow de CI com:
+os portões fmt/lint/test da sua linguagem (roube os passos exatos acima), uma
+matriz se tiver vários pacotes, cache de dependências, e — se produzir um
+artefacto — um job de deploy condicionado por `needs:` com o token no cofre de
+segredos. Depois faça um PR deliberadamente partido (má formatação, um teste a
+falhar) e confirme que o pipeline o bloqueia na etapa certa com um erro legível.
+
+## Perguntas de entrevista
+
+<Interview question="O que é a Integração Contínua e que problema resolve?">
+
+CI é a prática de fazer merge de mudanças pequenas frequentemente para uma linha
+principal partilhada, com um pipeline automatizado que constrói e testa cada
+mudança. Resolve o risco de integração: sem ela, os branches divergem semanas e
+o merge torna-se um evento com conflitos e quebras-surpresa. Com ela, cada push
+recebe o tratamento completo dos portões de qualidade em minutos, e os defeitos
+são apanhados o mais perto possível da mudança que os introduziu — quando são
+mais baratos de corrigir.
+
+</Interview>
+
+<Interview question="Qual a diferença entre Entrega Contínua e Deployment Contínuo?">
+
+Entrega (**Delivery**) Contínua significa que cada build verde produz um
+artefacto implantável e verificado — a implantação em produção continua a ser
+uma decisão humana (um botão). Deployment Contínuo remove o botão: cada mudança
+que passa o pipeline vai para produção automaticamente. A entrega é o
+pré-requisito; o deployment é o passo adicional que exige cobertura de testes
+excelente, observabilidade e rollback rápido, porque nenhum humano revê cada
+release.
+
+</Interview>
+
+<Interview question="Como mantém um pipeline de CI rápido à medida que o projeto cresce?">
+
+Paralelize: separe verificações independentes em jobs concorrentes e use
+matrizes para estruturas repetidas. Cache: downloads de dependências e
+artefactos de build com chaves baseadas em hashes de lockfile/manifesto. Ordene:
+portões mais baratos primeiro para as falhas curto-circuitarem. Estratifique:
+mantenha o portão de PR magro (~10 min) e mova suítes exaustivas — e2e completo,
+benchmarks, testes de mutação — para execuções agendadas. E meça o próprio
+pipeline: a duração do CI é uma métrica de latência com uma curva de custo real.
+
+</Interview>
+
+<Interview question="Como devem os segredos ser tratados em pipelines de CI/CD?">
+
+Nunca no repositório nem no ficheiro do workflow — use o cofre de segredos da
+plataforma de CI, injetados como variáveis de ambiente limitadas aos jobs que
+precisam deles. Restrinja credenciais de deploy a branches protegidos, prefira
+tokens de curta duração (p. ex. federação OIDC para o provedor de cloud em vez
+de chaves estáticas), nunca faça echo de segredos para os logs (o CI mascara
+segredos conhecidos, mas só os conhecidos), e rode-os a qualquer suspeita. A
+disciplina de redação da [lição de configuração](/systems-programming-academy/pt/part-2-engineering/configuration/)
+aplica-se a dobrar num sistema que por design faz log de tudo.
+
+</Interview>
+
+## Desafio
+
+Cronometre o ciclo de feedback do seu projeto de ponta a ponta: do `git push`
+até um veredito vermelho/verde. Se passa de dez minutos, faça profiling do
+pipeline como faria a código — que job, que passo, o que é cacheável, o que
+paraleliza? Se está abaixo de um minuto, faça a pergunta oposta: que portão está
+em *falta* (race detector? mypy? um teste de arquitetura?) que um projeto de
+produção devia ter. O pipeline é um produto; o próprio `ci.yml` deste curso
+passou exatamente por esse ciclo, uma lição de cada vez.
+
+## Referências & leitura adicional
+
+- Martin Fowler — [Continuous Integration](https://martinfowler.com/articles/continuousIntegration.html)
+- GitHub Actions — [sintaxe de workflows](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions) e [matrizes](https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs)
+- *Accelerate* (Forsgren, Humble, Kim) — a investigação por trás do desempenho de entrega
+- O pipeline da própria Academia — `academy/.github/workflows/ci.yml` neste repositório
+
+<Progress />

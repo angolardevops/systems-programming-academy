@@ -1,0 +1,426 @@
+---
+title: "The Testing Pyramid"
+description: Many fast unit tests, fewer integration tests, one end-to-end test — the same signup feature tested at all three levels in Rust, Go, and Python, showing what each level catches and costs.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Part 1 taught you *how* to write tests in each language. This lesson is about
+**which tests to write** — the strategy. The testing pyramid says: build **many
+fast unit tests** at the bottom, **fewer integration tests** in the middle, and **a
+few end-to-end tests** at the top. To make the shape concrete rather than
+theoretical, we implement one signup feature in all three languages and test it at
+all three levels — the same code, so you can see exactly what each level catches,
+what it costs, and why the pyramid has the shape it does.
+
+<Aside type="note" title="Prerequisites">
+  The per-language testing lessons
+  ([Rust](/systems-programming-academy/part-1-foundations/rust/testing/), [Go](/systems-programming-academy/part-1-foundations/go/testing/),
+  [Python](/systems-programming-academy/part-1-foundations/python/testing/)) and
+  [Repository & DI](/systems-programming-academy/part-2-engineering/repository-pattern/) — the ports/adapters
+  split is what *makes* the pyramid possible.
+</Aside>
+
+All code is from three tested modules —
+[`examples/part2-pyramid-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— each with the pyramid visible in its test file: ~6 unit, 2 integration, 1 e2e.
+
+## The shape, and why
+
+<Mermaid title="The pyramid: count and speed at each level" code={`flowchart TD
+  E["E2E: 1 test — whole app through the public entry (slowest, broadest)"] --> I["Integration: 2 tests — service + real adapters collaborating"]
+  I --> U["Unit: 6+ tests — pure validator, every rule and edge (instant)"]`} />
+
+- **Unit tests** exercise one piece in isolation — ideally a *pure function*.
+  They're instant and pinpoint failures exactly, so you can afford one per rule,
+  per edge, per boundary. They form the wide base.
+- **Integration tests** wire real pieces together and verify **collaboration** —
+  things no unit test can see, like "signing up stores the user *and* sends the
+  welcome". Slower, blunter, fewer.
+- **End-to-end tests** drive the whole assembled system through its public entry
+  and assert only user-visible outcomes. They catch wiring mistakes and give
+  final confidence — but they're the slowest, flakiest, and vaguest about *where*
+  a failure is. You want few.
+
+The anti-pattern is the **ice-cream cone**: a huge manual/E2E suite on top of few
+unit tests — slow CI, flaky reds, and every failure a debugging expedition.
+
+## The feature under test
+
+A signup flow with three layers, each mapping to a pyramid level:
+
+1. `validate_email` — a **pure function** (unit-testable in microseconds),
+2. `SignupService` — logic coordinating two ports, `UserRepo` + `Notifier`
+   (integration-testable with in-memory adapters),
+3. `App` — the **composition root** returning user-visible messages
+   (e2e-testable through its public method).
+
+## Level 1 — Unit: every rule of the pure validator
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (unit_tests)"
+#[test]
+fn rejects_missing_at() {
+    assert_eq!(validate_email("ada.example.com"), Err(EmailError::MissingAt));
+}
+
+#[test]
+fn rejects_bad_domain() {
+    assert_eq!(validate_email("ada@nodot"), Err(EmailError::BadDomain));
+    assert_eq!(validate_email("@example.com"), Err(EmailError::BadDomain));
+}
+// ...six unit tests total: one per rule, one per edge.
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+// Table-driven: one row per rule/edge — the pyramid base in one function.
+func TestValidateEmail(t *testing.T) {
+	cases := []struct {
+		name  string
+		email string
+		want  error
+	}{
+		{"valid", "ada@example.com", nil},
+		{"empty", "", ErrEmpty},
+		{"missing at", "ada.example.com", ErrBadFormat},
+		{"multiple at", "a@b@c.com", ErrBadFormat},
+		{"no dot in domain", "ada@nodot", ErrBadFormat},
+		{"whitespace", "a da@example.com", ErrWhitespace},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValidateEmail(tc.email)
+			if !errors.Is(got, tc.want) && got != tc.want {
+				t.Errorf("ValidateEmail(%q) = %v, want %v", tc.email, got, tc.want)
+			}
+		})
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+class UnitValidatorTests(unittest.TestCase):
+    """UNIT level: many tiny tests on the pure validator — instant, no setup."""
+
+    def test_accepts_a_normal_address(self):
+        validate_email("ada@example.com")  # no exception
+
+    def test_rejects_bad_inputs(self):
+        bad = ["", "ada.example.com", "a@b@c.com", "ada@nodot",
+               "@example.com", "a da@x.com"]
+        for email in bad:
+            with self.subTest(email=email):
+                with self.assertRaises(InvalidEmailError):
+                    validate_email(email)
+```
+</TabItem>
+</Tabs>
+
+Unit tests are cheap **because the function is pure** — designing logic as pure
+functions is what buys you a wide pyramid base.
+
+## Level 2 — Integration: the parts collaborate
+
+The thing unit tests cannot see: after a successful signup, the user is stored
+**and** the welcome is sent; after a duplicate, **no second welcome** goes out.
+Real (in-memory) adapters, real service, real interaction:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (integration_tests)"
+#[test]
+fn duplicate_signup_is_rejected_and_not_notified_twice() {
+    let mut svc = SignupService::new(InMemoryRepo::default(), RecordingNotifier::default());
+    svc.signup("ada@example.com").unwrap();
+    assert_eq!(svc.signup("ada@example.com"), Err(SignupError::AlreadyExists));
+    assert_eq!(svc.notifier().sent.len(), 1); // no second welcome
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+func TestDuplicateSignupRejectedAndNotNotifiedTwice(t *testing.T) {
+	notifier := &RecordingNotifier{}
+	svc := NewService(NewInMemoryRepo(), notifier)
+
+	svc.Signup("ada@example.com")
+	if err := svc.Signup("ada@example.com"); !errors.Is(err, ErrDuplicate) {
+		t.Errorf("expected ErrDuplicate, got %v", err)
+	}
+	if len(notifier.Sent) != 1 { // no second welcome
+		t.Errorf("Sent = %v, want exactly one", notifier.Sent)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_duplicate_rejected_and_not_notified_twice(self):
+    self.service.signup("ada@example.com")
+    with self.assertRaises(DuplicateEmailError):
+        self.service.signup("ada@example.com")
+    self.assertEqual(len(self.notifier.sent), 1)  # no second welcome
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="In-memory adapters vs mocks">
+  These tests use real, working in-memory implementations of the ports (from the
+  [Repository lesson](/systems-programming-academy/part-2-engineering/repository-pattern/)) rather than mocks.
+  Fakes behave like the real thing, so tests survive refactors; mocks assert on
+  *how* something was called and tend to break when internals change. Prefer fakes
+  at this level; save mocks for awkward third-party boundaries.
+</Aside>
+
+## Level 3 — End-to-end: the user's view
+
+One test, driving the composition root exactly as a user-facing caller would, and
+asserting only what the user sees — no internals:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (e2e_tests)"
+#[test]
+fn full_signup_flow_through_the_app() {
+    let mut app = App::new();
+    assert_eq!(app.signup("ada@example.com"), "Welcome, ada@example.com! Check your inbox.");
+    assert_eq!(app.signup("ada@example.com"), "ada@example.com is already registered.");
+    assert_eq!(app.signup("nope"), "'nope' is not a valid email address.");
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="signup_test.go"
+func TestFullSignupFlowThroughTheApp(t *testing.T) {
+	app := NewApp()
+	if got := app.Signup("ada@example.com"); got != "Welcome, ada@example.com! Check your inbox." {
+		t.Errorf("first signup: %q", got)
+	}
+	if got := app.Signup("ada@example.com"); got != "ada@example.com is already registered." {
+		t.Errorf("duplicate signup: %q", got)
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_signup.py"
+def test_full_signup_flow_through_the_app(self):
+    app = App()
+    self.assertEqual(app.signup("ada@example.com"),
+                     "Welcome, ada@example.com! Check your inbox.")
+    self.assertEqual(app.signup("ada@example.com"),
+                     "ada@example.com is already registered.")
+```
+</TabItem>
+</Tabs>
+
+In a real system this level drives an HTTP endpoint or CLI against a running
+instance (with a real database in a container). The principle is identical: public
+entry in, observable outcome out, internals invisible.
+
+<Quiz
+  question={'The duplicate-signup bug ("second signup sends a second welcome email") slips through all the unit tests. Why?'}
+  options={[
+    { text: "Unit tests are too slow to catch it.", },
+    { text: "It is a collaboration bug between the repo check and the notifier — visible only when the real parts run together, which is what integration tests exercise.", correct: true },
+    { text: "Only manual QA can find duplicate bugs.", },
+    { text: "The validator should have caught it.", },
+  ]}
+  explanation="Each part works alone: the validator validates, the repo stores, the notifier sends. The bug lives in the coordination — does the service check existence before notifying? Unit tests of isolated parts can all pass while the interaction is wrong. That is precisely the gap the integration level exists to cover, and why the pyramid has a middle."
+/>
+
+## What each level costs and catches
+
+| | Unit | Integration | E2E |
+| --- | --- | --- | --- |
+| Speed | microseconds | milliseconds | seconds–minutes (real systems) |
+| Failure pinpoints | the exact function | the interaction | "somewhere in the app" |
+| Catches | logic/edge bugs | collaboration/wiring bugs | composition & config bugs |
+| Fragility | very stable | moderate | flakiest (timing, env) |
+| How many | many (one per rule) | some (one per collaboration) | few (key user journeys) |
+
+The same DI thread runs through every Part 2 lesson for a reason: **injected
+ports are what let each level exist**. Without them, everything is an e2e test.
+
+## Common mistakes & debugging
+
+### 1. The ice-cream cone
+
+A giant Selenium/E2E suite and almost no unit tests: CI takes an hour, one flaky
+red blocks everyone, and every failure needs an archaeologist. **Fix:** push each
+check down to the lowest level that can catch it — validation rules to unit,
+collaborations to integration, and keep only key journeys at e2e.
+
+### 2. Testing implementation, not behaviour
+
+Asserting that a private method was called, or on internal state, welds tests to
+the current implementation — refactors break tests that *should* have passed.
+**Fix:** assert observable outcomes at each level's boundary (return values,
+stored state via the port, the user-visible message).
+
+### 3. Integration tests that secretly test nothing
+
+If your "integration" test mocks *every* collaborator, it's a unit test of glue
+code — it proves the mocks call each other. **Fix:** use real (in-memory)
+implementations for the pieces whose interaction you're verifying.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a unit test for a new rule.">
+
+Add the rule "local part may not start with a dot" and its unit test. (Pick your
+language.)
+
+**Solution (Python):**
+
+```python
+# rule, in validate_email:
+if parts[0].startswith("."):
+    raise InvalidEmailError("local part may not start with a dot")
+
+# unit test:
+def test_rejects_leading_dot(self):
+    with self.assertRaises(InvalidEmailError):
+        validate_email(".ada@example.com")
+```
+
+A new rule is one line of logic and one instant unit test — that's why rules live
+at the pyramid's base.
+
+</Interview>
+
+<Interview question="Exercise 2 — Write the missing integration case.">
+
+Test that an *invalid* email is neither stored nor notified. (Pick your language.)
+
+**Solution (Go):**
+
+```go
+func TestInvalidEmailIsNotStoredOrNotified(t *testing.T) {
+	repo := NewInMemoryRepo()
+	notifier := &RecordingNotifier{}
+	svc := NewService(repo, notifier)
+
+	if err := svc.Signup("nope"); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if repo.Exists("nope") || len(notifier.Sent) != 0 {
+		t.Error("invalid signup must not store or notify")
+	}
+}
+```
+
+Another collaboration property: the guard clause must fire *before* both side
+effects.
+
+</Interview>
+
+<Interview question="Exercise 3 — Classify these tests.">
+
+For each, name the right pyramid level: (a) "sorting an empty list returns an
+empty list", (b) "POST /orders returns 201 and the order appears in GET /orders",
+(c) "the discount service asks the loyalty repo for the tier before pricing".
+
+**Answer:** (a) unit — pure logic edge case; (b) end-to-end — public HTTP surface,
+observable outcome; (c) integration — a collaboration between service and port.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Push checks to the lowest level that catches them | Everything tested through the UI |
+| Pure functions to widen the unit base | Logic buried in I/O code, untestable alone |
+| Fakes (in-memory adapters) for integration | Mocking every collaborator into meaninglessness |
+| Few e2e tests on key journeys | An e2e test per feature ticket |
+| Assert behaviour at each level's boundary | Asserting private internals |
+| Fast suite → run on every save | Hour-long CI nobody waits for |
+
+## Mini-project
+
+**Give the pyramid treatment to a "password reset" feature** in one language:
+`validate_token` (pure — expiry, format), a `ResetService` coordinating a
+`TokenRepo` and a `PasswordStore` port, and an `App` entry returning user-visible
+messages. Write ~5 unit tests, 2 integration tests (including "an expired token
+changes nothing"), and 1 e2e test. Check the shape: if you ended up with more e2e
+than unit tests, refactor logic out into pure functions until the pyramid is
+right-side up.
+
+## Interview questions
+
+<Interview question="What is the testing pyramid and what problem does it solve?">
+
+A strategy heuristic: many fast unit tests at the base, fewer integration tests in
+the middle, few end-to-end tests at the top. It solves the economics of testing —
+e2e tests are slow, flaky, and vague about failure location, so relying on them
+for everything makes CI slow and debugging expensive. The pyramid pushes each
+check down to the cheapest level that can catch the bug it targets, giving fast
+feedback with high coverage of logic and targeted coverage of wiring.
+
+</Interview>
+
+<Interview question="What does an integration test catch that unit tests cannot?">
+
+Collaboration bugs: the parts each work in isolation but interact wrongly — the
+service notifies before checking for duplicates, passes arguments in the wrong
+order, forgets to save before publishing an event, or two adapters disagree about
+a data format. Unit tests of the isolated pieces all pass in these scenarios;
+only running the real pieces together exposes the faulty interaction.
+
+</Interview>
+
+<Interview question="Fakes vs mocks — when do you use which?">
+
+A fake is a lightweight but *working* implementation (an in-memory repository); a
+mock is a shell that records calls and returns programmed answers, with
+assertions on how it was used. Prefer fakes for integration-level tests: they
+verify behaviour and survive refactors. Use mocks at awkward external boundaries
+(third-party APIs, clocks, SMTP) where a working fake is impractical — and assert
+sparingly on interactions, because interaction assertions couple tests to
+implementation details.
+
+</Interview>
+
+<Interview question="How do you keep end-to-end tests from becoming a flaky bottleneck?">
+
+Keep them few — only critical user journeys; make them deterministic — controlled
+test data, no shared environments, explicit waits on conditions rather than
+sleeps; run them in parallel where possible; and quarantine-then-fix flakes
+instead of retrying them forever. Most importantly, when an e2e test catches a
+bug, add a lower-level test that would have caught it and ask whether the e2e
+case is still pulling its weight.
+
+</Interview>
+
+## Challenge
+
+Take your most recent project and draw its actual test shape: count unit vs
+integration vs e2e tests. If it's a cone (or an hourglass, or all-unit-nothing-
+else), pick the worst gap and fix it structurally — usually by extracting pure
+functions (widening the base) or adding the two or three collaboration tests the
+middle is missing. Then time the suite: the pyramid's real promise is a test run
+fast enough that you run it on every change without thinking. That habit, not the
+diagram, is the point.
+
+## References & further reading
+
+- Martin Fowler — [Test Pyramid](https://martinfowler.com/bliki/TestPyramid.html) and [Practical Test Pyramid](https://martinfowler.com/articles/practical-test-pyramid.html) (Ham Vocke)
+- Google Testing Blog — [Just say no to more end-to-end tests](https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html)
+- Kent C. Dodds — [The Testing Trophy](https://kentcdodds.com/blog/the-testing-trophy-and-testing-classifications) (a modern counterpoint)
+- *Software Engineering at Google*, ch. 11–14 — testing at scale
+
+<Progress />

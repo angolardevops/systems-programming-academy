@@ -1,0 +1,20 @@
+[package]
+name = "traits"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Types & Traits (static vs dynamic dispatch)."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: compiles and tests offline with `cargo test`, and the
+# dispatch micro-benchmark runs with `cargo run --release --bin dispatch`.
+
+[[bin]]
+name = "dispatch"
+path = "src/bin/dispatch.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

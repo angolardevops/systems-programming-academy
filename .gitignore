@@ -1,0 +1,21 @@
+# Node / Astro
+node_modules/
+dist/
+.astro/
+
+# Rust build artifacts
+examples/*/target/
+Cargo.lock
+
+# Go compiled binaries (built during benchmarks)
+examples/part3-loganalyzer-go/loganalyzer
+examples/part3-exporter-go/exporter
+examples/part3-confgen-go/confgen
+examples/part3-healthcheck-go/healthcheck
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store

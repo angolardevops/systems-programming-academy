@@ -1,0 +1,54 @@
+---
+// Client-side Mermaid renderer. Bundles mermaid locally (offline-capable) and
+// re-themes automatically when the reader toggles dark/light mode.
+//
+// Pass the diagram as the `code` prop (a JS string) rather than slot children:
+// MDX applies "SmartyPants" typography to prose, which would rewrite `-->` into
+// an em-dash and `"` into curly quotes and break Mermaid. A string prop is not
+// processed, so the diagram source survives verbatim.
+interface Props {
+  code: string;
+  title?: string;
+}
+const { code, title } = Astro.props;
+---
+
+<figure class="spa-mermaid not-content" data-mermaid>
+  <pre class="spa-mermaid-src" hidden>{code}</pre>
+  <div class="spa-mermaid-out" aria-label={title ?? 'Diagram'} role="img"></div>
+  {title && <figcaption style="font-size:var(--sl-text-xs);color:var(--sl-color-gray-3)">{title}</figcaption>}
+</figure>
+
+<script>
+  import mermaid from 'mermaid';
+
+  function currentTheme(): 'dark' | 'default' {
+    return document.documentElement.dataset.theme === 'light' ? 'default' : 'dark';
+  }
+
+  async function renderAll() {
+    const nodes = document.querySelectorAll<HTMLElement>('[data-mermaid]');
+    if (!nodes.length) return;
+    mermaid.initialize({ startOnLoad: false, theme: currentTheme(), securityLevel: 'strict' });
+    for (const node of Array.from(nodes)) {
+      const src = node.querySelector<HTMLElement>('.spa-mermaid-src')?.textContent || '';
+      const out = node.querySelector<HTMLElement>('.spa-mermaid-out');
+      if (!out || !src.trim()) continue;
+      try {
+        const id = 'm' + Math.random().toString(36).slice(2, 9);
+        const { svg } = await mermaid.render(id, src);
+        out.innerHTML = svg;
+      } catch (err) {
+        out.innerHTML = `<pre>${String(err)}</pre>`;
+      }
+    }
+  }
+
+  renderAll();
+  document.addEventListener('astro:page-load', renderAll);
+  // Re-render on theme toggle so diagram colors follow the site theme.
+  new MutationObserver(renderAll).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
+</script>

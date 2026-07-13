@@ -1,0 +1,481 @@
+---
+title: "Caching"
+description: A TTL cache with an injected clock (no sleeps in tests), hit/miss counters, and the cache-aside pattern proven by a call-counting backend. The same design in Rust, Go, and Python — plus invalidation, stampedes, and when not to cache.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+"There are only two hard things in Computer Science: cache invalidation and naming
+things." A cache buys speed by keeping a copy of expensive-to-fetch data close by —
+and pays for it with the risk of serving **stale** data. This lesson builds the
+same production-shaped cache in three languages: TTL expiry, an **injected clock**
+so expiry tests never sleep, **hit/miss counters** so the cache is measurable, and
+the **cache-aside** pattern with a test that *proves* the backend is only called on
+a miss.
+
+<Aside type="note" title="Prerequisites">
+  Part 2's injection thread continues:
+  [repositories](/systems-programming-academy/part-2-engineering/repository-pattern/), the
+  [environment](/systems-programming-academy/part-2-engineering/configuration/), the
+  [log sink](/systems-programming-academy/part-2-engineering/logging/) — and now **the clock**. Injecting time
+  is what makes expiry testable.
+</Aside>
+
+All code is from three tested modules —
+[`examples/part2-caching-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— each `fmt`/`lint` clean with passing tests, none of which contain a single
+`sleep`.
+
+## Cache-aside: the pattern you'll use most
+
+The application owns the logic: check the cache; on a miss, load from the backend
+and store the result for next time.
+
+<Mermaid title="Cache-aside: only misses reach the backend" code={`flowchart LR
+  A["get_user(42)"] --> C{"cache has user:42, fresh?"}
+  C -->|hit| V["return cached value (fast, no backend)"]
+  C -->|miss| B["backend(42) — slow"]
+  B --> S["cache.put(user:42)"]
+  S --> V2["return value"]`} />
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn get_user<C: Clock>(
+    cache: &mut TtlCache<String, C>,
+    id: u32,
+    backend: &mut impl FnMut(u32) -> String,
+) -> String {
+    let key = format!("user:{id}");
+    if let Some(name) = cache.get(&key) {
+        return name; // served from cache — no backend call
+    }
+    let name = backend(id);
+    cache.put(&key, name.clone());
+    name
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cache.go"
+func GetUser(cache *Cache[string], id int, backend func(int) string) string {
+	key := fmt.Sprintf("user:%d", id)
+	if name, ok := cache.Get(key); ok {
+		return name // served from cache — no backend call
+	}
+	name := backend(id)
+	cache.Put(key, name)
+	return name
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="ttlcache.py"
+def get_user(cache: TtlCache, user_id: int, backend: Callable[[int], str]) -> str:
+    key = f"user:{user_id}"
+    name = cache.get(key)
+    if name is not None:
+        return name  # served from cache — no backend call
+    name = backend(user_id)
+    cache.put(key, name)
+    return name
+```
+</TabItem>
+</Tabs>
+
+## TTL with an injected clock
+
+Every entry carries an expiry stamped from the **injected** clock. Production
+passes the real clock; tests pass a fake they advance by hand — so "wait 60
+seconds" costs nothing:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub trait Clock {
+    fn now(&self) -> u64; // seconds; monotonic is fine
+}
+
+pub struct TtlCache<V, C: Clock> {
+    entries: HashMap<String, (V, u64)>, // value + expiry timestamp
+    ttl_seconds: u64,
+    clock: C,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl<V: Clone, C: Clock> TtlCache<V, C> {
+    pub fn put(&mut self, key: &str, value: V) {
+        let expires = self.clock.now() + self.ttl_seconds;
+        self.entries.insert(key.to_string(), (value, expires));
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<V> {
+        match self.entries.get(key) {
+            Some((value, expires)) if self.clock.now() < *expires => {
+                self.hits += 1;
+                Some(value.clone())
+            }
+            Some(_) => {
+                self.entries.remove(key); // lazy eviction of the stale entry
+                self.misses += 1;
+                None
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cache.go"
+type Cache[V any] struct {
+	entries map[string]entry[V]
+	ttl     time.Duration
+	now     func() time.Time // injected: time.Now in prod, a fake in tests
+	Hits    int
+	Misses  int
+}
+
+func (c *Cache[V]) Put(key string, value V) {
+	c.entries[key] = entry[V]{value: value, expires: c.now().Add(c.ttl)}
+}
+
+func (c *Cache[V]) Get(key string) (V, bool) {
+	var zero V
+	e, ok := c.entries[key]
+	if !ok {
+		c.Misses++
+		return zero, false
+	}
+	if !c.now().Before(e.expires) {
+		delete(c.entries, key) // lazy eviction
+		c.Misses++
+		return zero, false
+	}
+	c.Hits++
+	return e.value, true
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="ttlcache.py"
+class TtlCache:
+    def __init__(self, ttl_seconds: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._entries: dict[str, tuple[Any, float]] = {}
+        self._ttl = ttl_seconds
+        self._clock = clock  # injected: time.monotonic in prod, a fake in tests
+        self.hits = 0
+        self.misses = 0
+
+    def put(self, key: str, value: Any) -> None:
+        self._entries[key] = (value, self._clock() + self._ttl)
+
+    def get(self, key: str) -> Any | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        value, expires = entry
+        if self._clock() >= expires:
+            del self._entries[key]  # lazy eviction
+            self.misses += 1
+            return None
+        self.hits += 1
+        return value
+```
+</TabItem>
+</Tabs>
+
+## Testing expiry — without sleeping
+
+The whole payoff of the injected clock. The test *advances time by hand*:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs (tests)"
+#[test]
+fn entry_expires_after_ttl() {
+    let clock = FakeClock(Cell::new(0));
+    let mut cache = TtlCache::new(60, &clock);
+    cache.put("k", "v".to_string());
+
+    clock.0.set(59); // still fresh
+    assert!(cache.get("k").is_some());
+
+    clock.0.set(60); // TTL reached: stale
+    assert_eq!(cache.get("k"), None);
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cache_test.go"
+func TestEntryExpiresAfterTTL(t *testing.T) {
+	clock := newFakeClock()
+	cache := New[string](time.Minute, clock.now)
+	cache.Put("k", "v")
+
+	clock.advance(59 * time.Second) // still fresh
+	if _, ok := cache.Get("k"); !ok {
+		t.Fatal("expected fresh entry at 59s")
+	}
+
+	clock.advance(1 * time.Second) // TTL reached: stale
+	if _, ok := cache.Get("k"); ok {
+		t.Fatal("expected expiry at 60s")
+	}
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="test_ttlcache.py"
+def test_entry_expires_after_ttl(self):
+    self.cache.put("k", "v")
+
+    self.clock.advance(59)  # still fresh
+    self.assertEqual(self.cache.get("k"), "v")
+
+    self.clock.advance(1)  # TTL reached: stale
+    self.assertIsNone(self.cache.get("k"))
+```
+</TabItem>
+</Tabs>
+
+And the cache-aside contract — **the backend is called exactly once** until expiry
+— is pinned by a counting fake backend (see each module's
+`cache_aside_calls_backend_only_on_miss` test).
+
+<Quiz
+  question={'Why inject the clock into the cache instead of calling time.now() internally?'}
+  options={[
+    { text: "Reading the system clock is too slow.", },
+    { text: "Tests can advance a fake clock instantly, so expiry behaviour is verified deterministically — no sleep(60) in the test suite.", correct: true },
+    { text: "Caches are forbidden from using system time.", },
+    { text: "It makes the TTL configurable.", },
+  ]}
+  explanation="A cache that reads the real clock can only be expiry-tested by actually waiting (slow, flaky) or by monkey-patching globals (fragile). Injecting the clock — the same dependency-injection move as the repository, the env, and the log sink — turns time into a controllable input: the test sets t=59 and t=60 and asserts the exact boundary behaviour, in microseconds."
+/>
+
+## The hard part: invalidation and staleness
+
+A TTL is a *bound on staleness*, not a guarantee of freshness: after an update, the
+cache may serve the old value for up to `ttl` seconds. Your options, in increasing
+effort:
+
+1. **Short TTL** — accept bounded staleness; simplest, often enough.
+2. **Explicit invalidation** — on write, `delete` the affected keys (requires
+   knowing every key a write affects — this is where it gets hard).
+3. **Write-through** — writes update the cache and the backend together.
+4. **Versioned keys** — embed a version/etag in the key; a write bumps the
+   version, making old entries unreachable garbage.
+
+Also know the **stampede** (dog-pile) problem: a hot key expires and a thousand
+concurrent requests all miss and hammer the backend at once. Mitigations: lock or
+single-flight the reload (one request fetches, the rest wait), serve the stale
+value while refreshing in the background, or jitter TTLs so keys don't expire in
+sync.
+
+## How the three languages compare
+
+| Aspect | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Injected clock | `trait Clock` | `func() time.Time` field | `Callable[[], float]` param |
+| Genericity | `TtlCache<V, C: Clock>` | `Cache[V any]` (generics) | dynamic (`Any` value) |
+| Counting fake backend | closure + `Cell` counter | closure over an `int` | closure over a `list` |
+| Concurrency note | wrap in `Mutex`/use `moka` | guard with `sync.Mutex`/`sync.Map` | GIL helps; still lock for multi-step ops |
+| Production step-up | `moka`, `cached` | `ristretto`, `groupcache` | `functools.lru_cache`, Redis clients |
+
+One subtlety the Rust module surfaced: the counting-closure test needed a `Cell`,
+because asserting on a counter *while a closure still mutably borrows it* is
+exactly the aliasing the borrow checker forbids — the
+[interior-mutability lesson](/systems-programming-academy/part-1-foundations/rust/smart-pointers/) paying off.
+
+## Common mistakes & debugging
+
+### 1. Caching without measuring
+
+If you can't see the hit rate, you can't tell whether the cache helps or just adds
+staleness risk. That's why `hits`/`misses` are first-class fields here — in
+production, export them as [metrics](/systems-programming-academy/part-2-engineering/logging/).
+
+### 2. Unbounded growth
+
+Our cache only evicts lazily on `get`, so keys never read again stay forever. Real
+caches bound memory: LRU/LFU eviction with a capacity (`moka`, `ristretto`,
+`functools.lru_cache(maxsize=...)`). An unbounded dict "cache" is a slow memory
+leak.
+
+### 3. Caching the wrong things
+
+Don't cache: data that must be read-your-write consistent (an account balance
+right after a transfer), cheap computations (the cache costs more than the work),
+or per-user secrets in a shared cache (a key-collision bug becomes a data leak —
+always namespace keys, as `user:{id}` does).
+
+## Exercises
+
+<Interview question="Exercise 1 — Add explicit invalidation.">
+
+Add an `invalidate(key)` method so writes can evict affected entries. (Pick your
+language.)
+
+**Solution (Python):**
+
+```python
+def invalidate(self, key: str) -> None:
+    self._entries.pop(key, None)  # absent key is fine — idempotent
+```
+
+Call it from every write path that changes the underlying data — the discipline,
+not the code, is the hard part.
+
+</Interview>
+
+<Interview question="Exercise 2 — Test that put overwrites and refreshes the TTL.">
+
+Prove that re-putting a key resets its expiry. (Pick your language.)
+
+**Solution (Go):**
+
+```go
+func TestPutRefreshesTTL(t *testing.T) {
+	clock := newFakeClock()
+	cache := New[string](time.Minute, clock.now)
+	cache.Put("k", "v1")
+
+	clock.advance(50 * time.Second)
+	cache.Put("k", "v2") // rewrite at t=50 -> new expiry t=110
+
+	clock.advance(30 * time.Second) // t=80: would be stale for v1, fresh for v2
+	v, ok := cache.Get("k")
+	if !ok || v != "v2" {
+		t.Fatalf("Get = %q, %v; want v2, true", v, ok)
+	}
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Compute the hit rate.">
+
+Add a method returning the hit rate as a fraction, handling the zero-lookups case.
+(Pick your language.)
+
+**Solution (Rust):**
+
+```rust
+impl<V: Clone, C: Clock> TtlCache<V, C> {
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            return 0.0; // no lookups yet — avoid dividing by zero
+        }
+        self.hits as f64 / total as f64
+    }
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Namespaced keys (`user:{id}`) | Raw ids colliding across entity types |
+| Hit/miss counters exported as metrics | A cache nobody can measure |
+| Bounded size (LRU) + TTL | An unbounded dict that grows forever |
+| Injected clock; expiry tested at the boundary | `sleep(61)` in the test suite |
+| Single-flight/stale-while-revalidate for hot keys | A thousand misses stampeding the backend |
+| Cache derived, re-fetchable data | Caching data requiring read-your-write consistency |
+
+## Mini-project
+
+**Build a capacity-bounded LRU+TTL cache in one language.** Extend this lesson's
+cache with a `max_entries` capacity: when full, evict the least-recently-*used*
+entry (track recency on `get` and `put`). Keep the injected clock and counters.
+Tests must cover: LRU eviction order, that a `get` refreshes recency, TTL expiry
+still winning over recency, and the counters. (Python: compare your behaviour
+against `functools.lru_cache` as an oracle.)
+
+## Interview questions
+
+<Interview question="What is the cache-aside pattern and what are its alternatives?">
+
+In cache-aside (lazy loading), the *application* checks the cache, and on a miss
+loads from the source and populates the cache. Alternatives: **read-through** (the
+cache itself fetches on miss, transparent to the app), **write-through** (writes go
+to cache and store synchronously — fresher, slower writes), and **write-behind**
+(writes buffer in the cache and flush asynchronously — fastest writes, risk of
+loss). Cache-aside is the most common because it needs no special cache
+infrastructure and degrades gracefully: if the cache dies, everything still works,
+just slower.
+
+</Interview>
+
+<Interview question="Why is cache invalidation famously hard?">
+
+Because it requires knowing, at every write, the complete set of cached entries
+that the write makes stale — across key schemes, derived values, list pages, and
+aggregations that may all embed the changed data. Miss one and you serve stale data
+with no error anywhere; over-invalidate and you lose the cache's benefit. Distributed
+systems add races: an invalidation can arrive before the write is visible, letting a
+reader re-cache the old value. TTLs exist as the honest fallback: a hard bound on
+how long any mistake lasts.
+
+</Interview>
+
+<Interview question="What is a cache stampede and how do you prevent it?">
+
+When a popular entry expires, every concurrent request misses simultaneously and
+all of them hit the backend at once — a thundering herd that can take the backend
+down exactly because the data was popular. Mitigations: **single-flight** (the
+first miss fetches; concurrent misses wait for that result), **stale-while-
+revalidate** (serve the expired value while one background task refreshes),
+**TTL jitter** (randomize expiries so keys don't expire together), and
+**pre-warming** hot keys before they expire.
+
+</Interview>
+
+<Interview question="How do you decide what to cache in the first place?">
+
+Cache data that is expensive to produce, read far more than written, and tolerant
+of bounded staleness — the product of (cost saved × hit rate) must exceed the
+complexity and staleness risk. Measure first: find the actual hot, slow reads from
+profiles or metrics. Don't cache cheap computations, rarely-read data (the hit rate
+won't pay for the memory), or data with strict consistency needs. And re-measure
+after: a cache with a 5% hit rate is pure liability.
+
+</Interview>
+
+## Challenge
+
+Find a real endpoint or function in your code that repeatedly fetches the same
+slow data, and add a cache-aside layer with this lesson's shape: injected clock,
+namespaced keys, counters. Then run a realistic workload and look at the hit rate
+— then *delete the cache* and compare end-to-end latency. Only keep it if the
+numbers justify it. The discipline of proving a cache earns its staleness risk —
+rather than sprinkling caches by instinct — is what separates deliberate
+engineering from cargo-culting.
+
+## References & further reading
+
+- AWS — [Caching challenges and strategies](https://aws.amazon.com/builders-library/caching-challenges-and-strategies/) (Builders' Library)
+- Redis — [Client-side caching / cache-aside](https://redis.io/docs/latest/develop/clients/client-side-caching/)
+- Libraries: [`moka`](https://docs.rs/moka) (Rust) · [`ristretto`](https://github.com/hypermodeinc/ristretto) (Go) · [`functools.lru_cache`](https://docs.python.org/3/library/functools.html#functools.lru_cache) (Python)
+- The stampede problem — [stale-while-revalidate (RFC 5861)](https://datatracker.ietf.org/doc/html/rfc5861)
+
+<Progress />

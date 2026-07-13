@@ -1,0 +1,462 @@
+---
+title: "Rust: Types & Traits"
+description: Traits are how Rust describes shared behaviour — interfaces resolved either at compile time (generics) or run time (dyn). Learn required vs default methods, static vs dynamic dispatch, impl Trait and object safety, with complete tested examples.
+difficulty: intermediate
+estimatedMinutes: 32
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={32} languages={["rust"]} />
+
+A **trait** is Rust's answer to "how do I describe behaviour that many types
+share?" It is the closest thing Rust has to an interface — but with a twist that
+defines the language: the *same* trait can be dispatched **statically** (resolved
+at compile time, zero cost) or **dynamically** (resolved at run time, through a
+vtable). Choosing between them is a core skill, and this lesson makes the choice
+concrete and measured.
+
+<Aside type="note" title="Prerequisites">
+  You should know `struct`, `enum`, methods (`impl`), and be comfortable with
+  [error handling](/systems-programming-academy/part-1-foundations/rust/error-handling/). Generics are
+  introduced here from scratch.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-traits/`](https://github.com/angolardevops/systems-programming-academy)
+(9 passing tests, clean `cargo clippy`). Every snippet is **complete**: it either
+has its own `fn main`, or is a whole item you can drop into a file.
+
+## Theory: a trait is a contract
+
+A trait lists **methods a type must provide** to satisfy it. Implementors fill in
+the *required* methods; the trait can also supply *default* methods built from
+the required ones.
+
+```rust
+// The contract: anything that is a Shape can name itself and report its area.
+pub trait Shape {
+    fn name(&self) -> &str; // required
+    fn area(&self) -> f64;  // required
+
+    // Default: implementors get this for free unless they override it.
+    fn describe(&self) -> String {
+        format!("{} with area {:.2}", self.name(), self.area())
+    }
+}
+```
+
+Two things make traits powerful:
+
+1. **Coherence** — you can implement a trait for a type only if you own one of
+   them, which prevents conflicting implementations across crates.
+2. **Zero-cost by default** — using a trait through generics compiles to the same
+   code you would have written by hand for each concrete type.
+
+## A complete program you can run
+
+Save as `main.rs` and `cargo run` (or use the [Rust Playground](https://play.rust-lang.org)):
+
+```rust title="main.rs — complete, runnable"
+pub trait Shape {
+    fn name(&self) -> &str;
+    fn area(&self) -> f64;
+    fn describe(&self) -> String {
+        format!("{} with area {:.2}", self.name(), self.area())
+    }
+}
+
+struct Circle { radius: f64 }
+struct Rectangle { width: f64, height: f64 }
+
+impl Shape for Circle {
+    fn name(&self) -> &str { "circle" }
+    fn area(&self) -> f64 { std::f64::consts::PI * self.radius * self.radius }
+}
+
+impl Shape for Rectangle {
+    fn name(&self) -> &str { "rectangle" }
+    fn area(&self) -> f64 { self.width * self.height }
+    // Override the default describe():
+    fn describe(&self) -> String {
+        format!("{}x{} rectangle, area {:.2}", self.width, self.height, self.area())
+    }
+}
+
+fn main() {
+    let c = Circle { radius: 1.0 };
+    let r = Rectangle { width: 2.0, height: 5.0 };
+    println!("{}", c.describe()); // uses the default method
+    println!("{}", r.describe()); // uses the overridden method
+}
+```
+
+Output:
+
+```text
+circle with area 3.14
+2x5 rectangle, area 10.00
+```
+
+## Static vs dynamic dispatch
+
+The same `Shape` trait can be used two ways. This is the most important idea in
+the lesson.
+
+<Mermaid title="Two ways to call a trait method" code={`flowchart TD
+  T["Shape trait"] --> S["Static dispatch: fn f<T: Shape>(x: &T)"]
+  T --> D["Dynamic dispatch: fn f(x: &dyn Shape)"]
+  S --> SM["Compiler monomorphizes: one specialized copy per type. Inlined, no vtable."]
+  D --> DM["One copy. Method looked up at run time via vtable pointer."]
+  SM --> SU["Best when the type is fixed and the hot path matters"]
+  DM --> DU["Best for heterogeneous collections: Vec of mixed shapes"]`} />
+
+**Static dispatch** — generic function with a trait bound. The compiler generates
+a specialised copy per concrete type (*monomorphization*):
+
+```rust title="src/lib.rs"
+pub fn area_of<S: Shape>(shape: &S) -> f64 {
+    shape.area()
+}
+```
+
+**Dynamic dispatch** — a *trait object* `dyn Shape` behind a pointer lets one
+function handle a mixed collection:
+
+```rust title="src/lib.rs"
+pub fn total_area(shapes: &[Box<dyn Shape>]) -> f64 {
+    shapes.iter().map(|s| s.area()).sum()
+}
+```
+
+Here is a complete program that uses both, mixing three shape types in one `Vec`
+— only possible with trait objects:
+
+```rust title="main.rs — complete, runnable"
+trait Shape {
+    fn area(&self) -> f64;
+}
+struct Circle { radius: f64 }
+struct Square { side: f64 }
+impl Shape for Circle { fn area(&self) -> f64 { std::f64::consts::PI * self.radius * self.radius } }
+impl Shape for Square { fn area(&self) -> f64 { self.side * self.side } }
+
+fn total_area(shapes: &[Box<dyn Shape>]) -> f64 {
+    shapes.iter().map(|s| s.area()).sum()
+}
+
+fn main() {
+    // A heterogeneous collection: only trait objects make this possible.
+    let shapes: Vec<Box<dyn Shape>> = vec![
+        Box::new(Circle { radius: 1.0 }),
+        Box::new(Square { side: 2.0 }),
+    ];
+    println!("total = {:.4}", total_area(&shapes)); // total = 7.1416
+}
+```
+
+<Quiz
+  question="You need to store Circles, Squares and Triangles together in one Vec and iterate over them. Which do you reach for?"
+  options={[
+    { text: "Generics: Vec<T> where T: Shape.", },
+    { text: "Trait objects: Vec<Box<dyn Shape>>.", correct: true },
+    { text: "An enum with one variant per shape and no trait.", },
+    { text: "It's impossible in Rust.", },
+  ]}
+  explanation="A `Vec<T>` holds one concrete type `T`, so it cannot mix Circle and Square. `Vec<Box<dyn Shape>>` stores trait objects — each element is a pointer plus a vtable — which is exactly how you hold heterogeneous types behind a shared trait. (An enum also works when the set of types is closed and known in advance; trait objects shine when it is open/extensible.)"
+/>
+
+## Performance: what does `dyn` cost?
+
+Dynamic dispatch adds an indirection: each call reads the method address from a
+vtable instead of jumping to a known address, and it blocks inlining. The binary
+`examples/rust-traits/src/bin/dispatch.rs` sums the areas of 1,000 shapes 20,000
+times each way. Real numbers from `cargo run --release --bin dispatch`:
+
+<Benchmark
+  metric="Time per iteration (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Static dispatch (generic)", value: 461, unit: "ns", note: "monomorphized + inlined" },
+    { label: "Dynamic dispatch (dyn)", value: 1998, unit: "ns", note: "vtable per call" },
+  ]}
+/>
+
+Static dispatch is ~4× faster **in this tight loop**. But note two things: the
+absolute cost per call is tiny (nanoseconds), and the dynamic version is doing
+something the static one *cannot* — iterating a genuinely mixed collection.
+
+<Aside type="tip" title="Rule of thumb">
+  Default to generics (`<T: Trait>`) for the hot path and when the type is known.
+  Reach for `dyn Trait` when you need heterogeneous collections, want to reduce
+  code size (one copy instead of many), or need to store callbacks/plugins whose
+  types you don't know in advance. The cost is real but rarely your bottleneck.
+</Aside>
+
+## `impl Trait` and derivable traits
+
+**`impl Trait`** lets a function return "some type that implements this trait"
+without naming it — handy for closures and iterators whose types are unspellable:
+
+```rust title="src/lib.rs"
+pub fn unit_circle() -> impl Shape {
+    Circle { radius: 1.0 }
+}
+```
+
+**`derive`** auto-implements common traits so you don't write boilerplate:
+
+```rust title="main.rs — complete, runnable"
+// Debug: printable with {:?}. Clone/Copy: duplicable. PartialEq: comparable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Point { x: i32, y: i32 }
+
+fn main() {
+    let a = Point { x: 1, y: 2 };
+    let b = a;                 // Copy: a is still usable
+    println!("{a:?} == {b:?} ? {}", a == b); // Point { x: 1, y: 2 } == ... ? true
+}
+```
+
+## Common mistakes & debugging
+
+### 1. Trying to make a non-object-safe trait into `dyn`
+
+Not every trait can become a trait object. If a method returns `Self` or is
+generic, the trait is **not object-safe**:
+
+```rust
+trait Cloneable {
+    fn duplicate(&self) -> Self; // returns Self -> not object-safe
+}
+
+fn store(_: Box<dyn Cloneable>) {} // ✗
+```
+
+```text
+error[E0038]: the trait `Cloneable` cannot be made into an object
+  = note: method `duplicate` references the `Self` type in its return type
+```
+
+**Fix:** keep object-unsafe methods off the trait you want as `dyn`, or use
+generics (`<T: Cloneable>`) instead of a trait object.
+
+### 2. Missing trait bound
+
+```rust
+fn print_area<S>(shape: &S) {
+    println!("{}", shape.area()); // ✗ where does `area` come from?
+}
+```
+
+```text
+error[E0599]: no method named `area` found for reference `&S`
+  = help: consider restricting the type parameter: `S: Shape`
+```
+
+**Fix:** add the bound the compiler suggests — `fn print_area<S: Shape>(shape: &S)`.
+
+### 3. Orphan rule: implementing a foreign trait for a foreign type
+
+```rust
+// You own neither Display nor Vec, so this is forbidden.
+impl std::fmt::Display for Vec<i32> { /* ... */ } // ✗
+```
+
+```text
+error[E0117]: only traits defined in the current crate can be implemented for types defined outside of the crate
+```
+
+**Fix:** wrap the foreign type in your own "newtype" struct
+(`struct MyVec(Vec<i32>);`) and implement the trait for that.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a Perimeter trait with a default method.">
+
+Define a `Perimeter` trait with a required `perimeter()` and a default
+`is_large()` that returns whether the perimeter exceeds 100. Implement it for a
+`Square`. Provide a complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+trait Perimeter {
+    fn perimeter(&self) -> f64;
+    fn is_large(&self) -> bool {
+        self.perimeter() > 100.0
+    }
+}
+
+struct Square { side: f64 }
+impl Perimeter for Square {
+    fn perimeter(&self) -> f64 { 4.0 * self.side }
+}
+
+fn main() {
+    let small = Square { side: 2.0 };
+    let big = Square { side: 30.0 };
+    println!("{} {}", small.perimeter(), small.is_large()); // 8 false
+    println!("{} {}", big.perimeter(), big.is_large());     // 120 true
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Write one function that accepts any Shape (two ways).">
+
+Write `report` twice: once with a generic bound, once with a trait object. Show
+they print the same thing.
+
+**Solution — complete, runnable:**
+
+```rust
+trait Shape { fn area(&self) -> f64; }
+struct Circle { r: f64 }
+impl Shape for Circle { fn area(&self) -> f64 { std::f64::consts::PI * self.r * self.r } }
+
+fn report_generic<S: Shape>(s: &S) -> f64 { s.area() }  // static dispatch
+fn report_dyn(s: &dyn Shape) -> f64 { s.area() }        // dynamic dispatch
+
+fn main() {
+    let c = Circle { r: 2.0 };
+    println!("{:.4}", report_generic(&c)); // 12.5664
+    println!("{:.4}", report_dyn(&c));     // 12.5664
+}
+```
+
+`&dyn Shape` is a *fat pointer*: data pointer + vtable pointer. `<S: Shape>` bakes
+the type in at compile time. Same result, different mechanism.
+
+</Interview>
+
+<Interview question="Exercise 3 — Use the standard From trait for conversions.">
+
+Implement `From<(f64, f64)>` for a `Point` so you can write `Point::from((1.0,
+2.0))` and `let p: Point = (3.0, 4.0).into();`.
+
+**Solution — complete, runnable:**
+
+```rust
+#[derive(Debug)]
+struct Point { x: f64, y: f64 }
+
+impl From<(f64, f64)> for Point {
+    fn from(t: (f64, f64)) -> Self {
+        Point { x: t.0, y: t.1 }
+    }
+}
+
+fn main() {
+    let a = Point::from((1.0, 2.0));
+    let b: Point = (3.0, 4.0).into(); // .into() comes for free once From exists
+    println!("{a:?} {b:?}");          // Point { x: 1.0, y: 2.0 } Point { x: 3.0, y: 4.0 }
+}
+```
+
+Implementing `From` automatically gives you `Into` for free — one of the most
+useful trait relationships in the standard library.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Generics (`<T: Trait>`) for hot paths and known types | `dyn Trait` everywhere "to be flexible", paying vtable cost needlessly |
+| `dyn Trait` for heterogeneous collections / plugins | A giant `enum` + `match` that must change for every new type |
+| Small, focused traits (one responsibility) | One mega-trait that forces implementors to stub methods |
+| Default methods to share logic | Copy-pasting the same method into every impl |
+| Implement std traits (`From`, `Display`, `Iterator`) | Bespoke `to_string_custom()` when `Display` exists |
+| Newtype wrapper to implement foreign traits | Fighting the orphan rule with `unsafe` tricks |
+
+## Mini-project
+
+**Build a plugin-style `Command` system.** Define a `Command` trait with
+`name(&self) -> &str` and `run(&self, args: &[&str]) -> String`. Implement three
+commands (`echo`, `add`, `reverse`). Store them in a `Vec<Box<dyn Command>>` and
+write a `dispatch(commands, name, args)` that finds the command by name and runs
+it, returning a `Result<String, String>` (error if not found).
+
+Requirements:
+
+- Uses trait objects for the heterogeneous command list.
+- At least four `#[test]` cases: each command plus the not-found error.
+- `cargo clippy` clean, and a `fn main` that runs a couple of commands.
+
+This combines trait objects, `Option`/`Result`, and slices — the toolkit from the
+last three lessons.
+
+## Interview questions
+
+<Interview question="What is the difference between static and dynamic dispatch?">
+
+**Static dispatch** resolves the method call at compile time. With generics, the
+compiler *monomorphizes* — it stamps out a specialised copy of the function for
+each concrete type, so calls are direct and inlinable, at the cost of larger
+binaries. **Dynamic dispatch** uses a trait object (`dyn Trait`): the value is a
+fat pointer (data + vtable), and the method address is read from the vtable at
+run time. It is slightly slower and not inlinable, but supports heterogeneous
+collections and smaller code.
+
+</Interview>
+
+<Interview question="What makes a trait 'object-safe', and why does it matter?">
+
+A trait is object-safe (can be used as `dyn Trait`) roughly when none of its
+methods return `Self` and none are generic over type parameters — because a
+vtable needs a single, known function signature per method and cannot encode "the
+concrete type" or "any T". It matters because only object-safe traits can be
+stored behind a `Box<dyn Trait>` / `&dyn Trait`. Non-object-safe traits must be
+used through generics instead.
+
+</Interview>
+
+<Interview question="What is the orphan rule and why does Rust have it?">
+
+The orphan rule says you can implement a trait for a type only if **you define
+the trait, or you define the type** (at least one is local to your crate). It
+exists to guarantee *coherence*: there is never more than one implementation of a
+trait for a type across the whole program, so the compiler always knows which
+`impl` to use. The escape hatch is the *newtype* pattern — wrap the foreign type
+in a local struct.
+
+</Interview>
+
+<Interview question="How do traits compare to interfaces in Java or Go?">
+
+They overlap but differ. Like interfaces, traits declare methods a type must
+provide. Unlike Java interfaces, traits can carry default method bodies, be
+implemented for types you don't own (subject to the orphan rule), and be
+dispatched statically with zero cost. Unlike Go interfaces (which are always
+dynamic and structurally satisfied), Rust traits are explicitly implemented and
+can be either static or dynamic — you choose per use site.
+
+</Interview>
+
+## Challenge
+
+Take a piece of code that uses an `enum` plus a big `match` to handle several
+"kinds" of thing (a shape enum, a message enum, an AST node). Refactor it to a
+trait with one method per operation, and implement that trait for a struct per
+kind. Note what got better (adding a new kind no longer touches every `match`)
+and what got worse (you can no longer exhaustively see all kinds in one place).
+That trade-off — open extensibility vs closed exhaustiveness — is the heart of
+choosing between traits and enums.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 10 — [“Generic Types, Traits, and Lifetimes”](https://doc.rust-lang.org/book/ch10-00-generics.html)
+- *The Rust Programming Language* (the Book), ch. 17 — [trait objects and `dyn`](https://doc.rust-lang.org/book/ch17-02-trait-objects.html)
+- Rust Reference — [object safety](https://doc.rust-lang.org/reference/items/traits.html#object-safety)
+- Rust By Example — [traits](https://doc.rust-lang.org/rust-by-example/trait.html)
+- `std::convert::From` — [documentation](https://doc.rust-lang.org/std/convert/trait.From.html)
+
+<Progress />

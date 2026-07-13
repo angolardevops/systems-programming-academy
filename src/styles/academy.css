@@ -1,0 +1,139 @@
+/* The Ultimate Systems Programming Academy — custom theme layer.
+   Builds on Starlight's design tokens; keeps light + dark parity.
+   Author: Walter Angolar */
+
+:root {
+  --spa-python: #3776ab;
+  --spa-go: #00add8;
+  --spa-rust: #dea584;
+  --spa-radius: 10px;
+}
+
+/* Brand accent tuned for both themes. */
+:root {
+  --sl-color-accent-low: #12283a;
+  --sl-color-accent: #2f7fd1;
+  --sl-color-accent-high: #b9d7f5;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d7e7f8;
+  --sl-color-accent: #1f6feb;
+  --sl-color-accent-high: #0b2f5e;
+}
+
+/* ---- Difficulty indicator ------------------------------------------ */
+.spa-difficulty {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--sl-color-gray-5);
+  letter-spacing: 0.02em;
+}
+.spa-difficulty[data-level='beginner'] { color: #2fbf71; border-color: #2fbf7155; }
+.spa-difficulty[data-level='intermediate'] { color: #3d9bdc; border-color: #3d9bdc55; }
+.spa-difficulty[data-level='advanced'] { color: #e0883e; border-color: #e0883e55; }
+.spa-difficulty[data-level='expert'] { color: #e05561; border-color: #e0556155; }
+
+.spa-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.2rem 0 1.2rem;
+}
+.spa-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: var(--sl-text-xs);
+  color: var(--sl-color-gray-2);
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background: var(--sl-color-gray-6);
+}
+
+/* ---- Language pills ------------------------------------------------- */
+.spa-lang {
+  --pill: var(--sl-color-gray-5);
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: var(--sl-text-xs); font-weight: 600;
+  padding: 0.1rem 0.55rem; border-radius: 999px;
+  border: 1px solid var(--pill);
+}
+.spa-lang[data-lang='python'] { --pill: var(--spa-python); color: var(--spa-python); }
+.spa-lang[data-lang='go'] { --pill: var(--spa-go); color: var(--spa-go); }
+.spa-lang[data-lang='rust'] { --pill: var(--spa-rust); color: #b5764e; }
+:root[data-theme='dark'] .spa-lang[data-lang='rust'] { color: var(--spa-rust); }
+
+/* ---- Quiz ----------------------------------------------------------- */
+.spa-quiz {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: var(--spa-radius);
+  padding: 1.1rem 1.2rem;
+  margin: 1.5rem 0;
+  background: var(--sl-color-gray-7, var(--sl-color-black));
+}
+.spa-quiz-q { font-weight: 600; margin: 0 0 0.8rem; }
+.spa-quiz-opt {
+  display: block; width: 100%; text-align: left;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.4rem 0;
+  background: transparent; color: inherit; cursor: pointer;
+  font: inherit; transition: border-color 0.15s, background 0.15s;
+}
+.spa-quiz-opt:hover { border-color: var(--sl-color-accent); }
+.spa-quiz-opt.is-correct { border-color: #2fbf71; background: #2fbf7118; }
+.spa-quiz-opt.is-wrong { border-color: #e05561; background: #e0556118; }
+.spa-quiz-opt[disabled] { cursor: default; }
+.spa-quiz-explain {
+  margin-top: 0.8rem; padding: 0.7rem 0.9rem;
+  border-left: 3px solid var(--sl-color-accent);
+  background: var(--sl-color-accent-low);
+  border-radius: 0 8px 8px 0; font-size: var(--sl-text-sm);
+}
+.spa-quiz-explain[hidden] { display: none; }
+
+/* ---- Benchmark table ------------------------------------------------ */
+.spa-bench { margin: 1.5rem 0; }
+.spa-bench table { width: 100%; }
+.spa-bench .bar {
+  display: inline-block; height: 0.75rem; border-radius: 4px;
+  background: var(--sl-color-accent); vertical-align: middle;
+  min-width: 2px;
+}
+.spa-bench td .barwrap { display: flex; align-items: center; gap: 0.5rem; }
+
+/* ---- Interview / challenge cards ----------------------------------- */
+.spa-interview {
+  border: 1px solid var(--sl-color-gray-5);
+  border-left: 3px solid var(--sl-color-accent);
+  border-radius: 0 var(--spa-radius) var(--spa-radius) 0;
+  padding: 0.4rem 1.1rem; margin: 1rem 0;
+}
+.spa-interview summary { cursor: pointer; font-weight: 600; }
+.spa-interview[open] summary { margin-bottom: 0.6rem; }
+
+/* ---- Progress tracker ---------------------------------------------- */
+.spa-progress {
+  display: flex; align-items: center; gap: 0.6rem;
+  font-size: var(--sl-text-sm); margin: 0.5rem 0 1.5rem;
+}
+.spa-progress button {
+  border: 1px solid var(--sl-color-accent); color: var(--sl-color-accent);
+  background: transparent; border-radius: 8px; padding: 0.35rem 0.9rem;
+  cursor: pointer; font: inherit; font-weight: 600;
+}
+.spa-progress button.done { background: var(--sl-color-accent); color: var(--sl-color-black); }
+
+/* Author footer block. */
+.spa-footer-credit {
+  margin-top: 2rem; padding-top: 1rem;
+  border-top: 1px solid var(--sl-color-hairline);
+  font-size: var(--sl-text-xs); color: var(--sl-color-gray-3);
+  line-height: 1.7;
+}
+.spa-footer-credit strong { color: var(--sl-color-gray-1); }

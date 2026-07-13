@@ -1,0 +1,13 @@
+---
+// Collapsible interview / challenge question. The answer stays hidden until
+// the reader commits to thinking about it — native <details>, no JS.
+interface Props {
+  question: string;
+}
+const { question } = Astro.props;
+---
+
+<details class="spa-interview not-content">
+  <summary>💬 {question}</summary>
+  <div><slot /></div>
+</details>

@@ -1,0 +1,504 @@
+---
+title: "Go: Structs, Métodos e Interfaces"
+description: O sistema de tipos do Go numa lição — structs, receivers por valor vs ponteiro, interfaces satisfeitas implicitamente, e composição por embedding. A forma Go de modelar comportamento, com exemplos completos e testados.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["go"]} />
+
+O Go não tem classes, não tem herança e não tem palavra-chave `implements` — e no
+entanto modela comportamento lindamente. O truque são três ideias pequenas a
+trabalhar juntas: as **structs** guardam dados, os **métodos** ligam
+comportamento, e as **interfaces** descrevem comportamento que qualquer tipo pode
+satisfazer *implicitamente*, só por ter os métodos certos. No espírito de Rob Pike
+— "claro é melhor que esperto" — é um sistema de tipos que cabe na cabeça. Esta
+lição torna-o concreto.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve conseguir ler Go básico: `func`, `var`, `for`, `package`, e como correr
+  `go test`. Tudo sobre métodos e interfaces é construído do zero.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/go-interfaces/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` verde, `go vet` limpo, formatado com `gofmt`). Cada bloco é
+**completo** — um `package main` executável, ou uma declaração inteira do módulo.
+
+## Structs e métodos
+
+Uma **struct** agrupa campos com nome. Um **método** é uma função com um
+*receiver* — o valor a que está ligado, escrito antes do nome.
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+type Rectangle struct {
+	Width, Height float64
+}
+
+// Método com receiver por valor (r Rectangle): lê campos, não muta.
+func (r Rectangle) Area() float64 {
+	return r.Width * r.Height
+}
+
+func main() {
+	r := Rectangle{Width: 3, Height: 4}
+	fmt.Println("area:", r.Area()) // area: 12
+}
+```
+
+Saída:
+
+```text
+area: 12
+```
+
+## Receivers por valor vs por ponteiro
+
+Se um método precisa de **modificar** o receiver, tem de receber um receiver por
+*ponteiro* (`*Counter`); um receiver por valor mutaria uma cópia e perderia a
+alteração.
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+type Counter struct {
+	n int
+}
+
+// Receiver por ponteiro: muta o original.
+func (c *Counter) Inc() { c.n++ }
+
+// Receiver por valor: só lê.
+func (c Counter) Value() int { return c.n }
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	c.Inc()
+	fmt.Println("count:", c.Value()) // count: 3
+}
+```
+
+Saída:
+
+```text
+count: 3
+```
+
+<Aside type="tip" title="Que receiver devo usar?">
+  Use um **receiver por ponteiro** quando o método muta o receiver, ou quando a
+  struct é grande (para evitar cópias). Use um **receiver por valor** para tipos
+  pequenos e naturalmente imutáveis. Seja consistente dentro de um tipo: se um
+  método precisa de receiver por ponteiro, dê a todos receiver por ponteiro.
+</Aside>
+
+## Interfaces: satisfeitas implicitamente
+
+Uma **interface** lista métodos. Qualquer tipo que tenha esses métodos satisfaz a
+interface — **automaticamente**, sem declaração. Esta tipagem *estrutural* é o
+coração da flexibilidade do Go.
+
+```go title="shapes.go"
+type Shape interface {
+	Area() float64
+	Perimeter() float64
+}
+```
+
+Como `Rectangle` e `Circle` têm ambos `Area()` e `Perimeter()`, são `Shape`s —
+ninguém teve de o dizer.
+
+<Mermaid title="Satisfação implícita: sem 'implements', só métodos a condizer" code={`flowchart LR
+  R["Rectangle {Area, Perimeter}"] -->|satisfaz automaticamente| S["interface Shape"]
+  C["Circle {Area, Perimeter}"] -->|satisfaz automaticamente| S
+  S --> F["func TotalArea(shapes []Shape) float64"]`} />
+
+Um programa completo que mistura dois tipos concretos atrás de uma interface:
+
+```go title="main.go — completo, executável"
+package main
+
+import (
+	"fmt"
+	"math"
+)
+
+type Shape interface {
+	Area() float64
+	Perimeter() float64
+}
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64      { return r.Width * r.Height }
+func (r Rectangle) Perimeter() float64 { return 2 * (r.Width + r.Height) }
+
+type Circle struct{ Radius float64 }
+
+func (c Circle) Area() float64      { return math.Pi * c.Radius * c.Radius }
+func (c Circle) Perimeter() float64 { return 2 * math.Pi * c.Radius }
+
+func TotalArea(shapes []Shape) float64 {
+	var total float64
+	for _, s := range shapes {
+		total += s.Area()
+	}
+	return total
+}
+
+func main() {
+	shapes := []Shape{Rectangle{2, 3}, Circle{Radius: 1}}
+	fmt.Printf("total area: %.4f\n", TotalArea(shapes)) // total area: 9.1416
+}
+```
+
+Saída:
+
+```text
+total area: 9.1416
+```
+
+<Quiz
+  question={'Em Go, como é que um tipo declara que satisfaz uma interface?'}
+  options={[
+    { text: "Com uma cláusula `implements Shape` no tipo." },
+    { text: "Não declara nada — ter os métodos exigidos basta (satisfação implícita).", correct: true },
+    { text: "Embebendo a interface como um campo." },
+    { text: "Registando-o no arranque do programa." },
+  ]}
+  explanation="O Go usa satisfação de interface estrutural e implícita. Se um tipo tem todos os métodos que uma interface lista, satisfá-la automaticamente — não há palavra-chave `implements` nem registo. Isto permite definir uma interface *depois* dos tipos, mesmo para tipos que não são seus."
+/>
+
+## Composição por embedding
+
+O Go substitui a herança por **embedding**: ponha um tipo dentro de uma struct sem
+nome de campo, e o tipo exterior ganha os seus campos e métodos. Embeba uma
+interface e a struct satisfá-la.
+
+```go title="shapes.go"
+// Labeled tem-um Shape (embebido) e ganha os seus métodos, logo Labeled é um Shape.
+type Labeled struct {
+	Name string
+	Shape
+}
+
+func (l Labeled) Describe() string {
+	return fmt.Sprintf("%s: area=%.2f perimeter=%.2f", l.Name, l.Area(), l.Perimeter())
+}
+```
+
+Um programa completo:
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64 { return r.Width * r.Height }
+
+// Labeled embebe Shape; l.Area() encaminha para o valor embebido automaticamente.
+type Labeled struct {
+	Name string
+	Shape
+}
+
+func main() {
+	l := Labeled{Name: "unit square", Shape: Rectangle{1, 1}}
+	fmt.Printf("%s has area %.0f\n", l.Name, l.Area()) // unit square has area 1
+}
+```
+
+Saída:
+
+```text
+unit square has area 1
+```
+
+## Recuperar o tipo concreto: type switch
+
+Às vezes precisa do tipo concreto de volta a partir de uma interface. Um **type
+switch** fá-lo em segurança:
+
+```go title="main.go — completo, executável"
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64 { return r.Width * r.Height }
+
+type Circle struct{ Radius float64 }
+
+func (c Circle) Area() float64 { return 3.14159 * c.Radius * c.Radius }
+
+func kindOf(s Shape) string {
+	switch s.(type) {
+	case Rectangle:
+		return "rectangle"
+	case Circle:
+		return "circle"
+	default:
+		return "unknown"
+	}
+}
+
+func main() {
+	fmt.Println(kindOf(Rectangle{1, 1}))   // rectangle
+	fmt.Println(kindOf(Circle{Radius: 1})) // circle
+}
+```
+
+Saída:
+
+```text
+rectangle
+circle
+```
+
+<Aside type="tip" title="Mantenha as interfaces pequenas">
+  O provérbio do Go é "quanto maior a interface, mais fraca a abstração". As
+  interfaces mais usadas da biblioteca padrão têm **um método** — `io.Reader`,
+  `io.Writer`, `fmt.Stringer`, `error`. Prefira muitas interfaces pequenas a uma
+  grande, e aceite interfaces, devolva tipos concretos.
+</Aside>
+
+## Erros comuns & depuração
+
+### 1. A armadilha da interface `nil`
+
+Uma interface guarda um par (tipo, valor). Uma interface a envolver um *ponteiro*
+`nil` **não** é uma interface `nil` — uma armadilha clássica do Go:
+
+```go
+type MyErr struct{}
+
+func (*MyErr) Error() string { return "boom" }
+
+func do() error {
+	var p *MyErr = nil
+	return p // devolve uma interface não-nil a envolver um *MyErr nil!
+}
+
+// if do() != nil { ... } // isto é VERDADEIRO, surpreendendo muita gente
+```
+
+**Correção:** devolva um `nil` literal (`return nil`) no caso sem erro, não um
+ponteiro nil tipado. Só envolva um valor concreto quando existe mesmo um.
+
+### 2. Chamar um método de receiver por ponteiro num valor não-endereçável
+
+```go
+// Se Inc tem receiver *Counter, isto falha porque um elemento de map não é endereçável:
+// m := map[string]Counter{"a": {}}
+// m["a"].Inc() // ✗ cannot call pointer method on m["a"]
+```
+
+```text
+cannot call pointer method Inc on Counter
+```
+
+**Correção:** guarde `*Counter` no map, ou retire o valor, mute-o e volte a
+colocá-lo. Métodos de receiver por ponteiro precisam de um receiver endereçável.
+
+### 3. Uma interface grande que ninguém consegue implementar
+
+Declarar uma interface de 10 métodos obriga cada implementador a fornecer os 10.
+**Correção:** divida-a. Interfaces pequenas compõem-se; grandes ossificam.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Adicionar um Triangle que satisfaz Shape.">
+
+Dada a interface `Shape` com `Area()`, adicione um `Triangle{Base, Height float64}`
+e imprima a sua área através de uma variável `Shape`. Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Triangle struct{ Base, Height float64 }
+
+func (t Triangle) Area() float64 { return 0.5 * t.Base * t.Height }
+
+func main() {
+	var s Shape = Triangle{Base: 6, Height: 4}
+	fmt.Println("area:", s.Area()) // area: 12
+}
+```
+
+O `Triangle` nunca menciona `Shape`; ter `Area()` é tudo o que é preciso.
+
+</Interview>
+
+<Interview question="Exercício 2 — Um receiver por ponteiro que faz reset.">
+
+Adicione um método `Reset()` ao `Counter` que põe a contagem de volta a zero, e
+mostre que funciona. Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c *Counter) Inc()      { c.n++ }
+func (c *Counter) Reset()    { c.n = 0 }
+func (c Counter) Value() int { return c.n }
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	fmt.Println(c.Value()) // 2
+	c.Reset()
+	fmt.Println(c.Value()) // 0
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 3 — Implementar fmt.Stringer.">
+
+Faça um `Point{X, Y int}` imprimir como `(3, 4)` implementando `String() string`.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```go
+package main
+
+import "fmt"
+
+type Point struct{ X, Y int }
+
+// Implementar String() faz Point satisfazer fmt.Stringer, logo %v/Println usam-no.
+func (p Point) String() string { return fmt.Sprintf("(%d, %d)", p.X, p.Y) }
+
+func main() {
+	p := Point{X: 3, Y: 4}
+	fmt.Println(p) // (3, 4)
+}
+```
+
+`fmt.Stringer` é uma interface de um método (`String() string`); satisfazê-la muda
+como o `fmt` imprime o seu tipo.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Interfaces pequenas (1–3 métodos) | Uma interface gigante que todo o tipo tem de implementar |
+| Aceitar interfaces, devolver tipos concretos | Devolver interfaces "por flexibilidade" em todo o lado |
+| Definir interfaces onde são **usadas**, não onde vivem os tipos | Juntar todas as interfaces num só pacote à partida |
+| Embedding para composição | Recorrer a hierarquias estilo herança |
+| Tipos de receiver consistentes por tipo | Misturar receivers por valor e por ponteiro num tipo |
+| `return nil` para sem-erro | Devolver um ponteiro nil tipado como interface |
+
+## Mini-projeto
+
+**Construa um relatório guiado por Stringer.** Defina uma struct `Account` com um
+saldo e métodos `Deposit`/`Withdraw` (receivers por ponteiro) que devolvem um
+`error` num montante inválido. Dê-lhe um método `String()` para impressão bonita, e
+uma interface `Reporter { Report() string }` que `Account` satisfaz. Escreva uma
+função que recebe `[]Reporter` e imprime cada relatório.
+
+Requisitos: usa receiver por ponteiro para mutação, satisfaz duas interfaces
+implicitamente, testes table-driven a cobrir deposit/withdraw/erros, e `go vet`
+limpo.
+
+## Perguntas de entrevista
+
+<Interview question="Como funcionam as interfaces em Go comparadas com Java?">
+
+As interfaces Java são satisfeitas *explicitamente* — uma classe tem de declarar
+`implements Foo`. As interfaces Go são satisfeitas *implícita e estruturalmente* —
+qualquer tipo com o conjunto de métodos exigido satisfaz a interface
+automaticamente, sem declaração. Isto desacopla a interface dos implementadores:
+pode definir uma interface para um tipo que não é seu, e acrescentar interfaces à
+posteriori. O Go também não tem classes nem herança; usa composição (embedding).
+
+</Interview>
+
+<Interview question="Quando usa um receiver por ponteiro vs por valor?">
+
+Use um receiver por ponteiro quando o método tem de mutar o receiver, quando a
+struct é grande ao ponto de copiar ser desperdício, ou quando o tipo contém um
+mutex ou outro campo não-copiável. Use um receiver por valor para valores pequenos
+e naturalmente imutáveis. A regra importante é a consistência: se algum método de
+um tipo precisa de receiver por ponteiro, use por ponteiro em todos, para o
+conjunto de métodos ser uniforme.
+
+</Interview>
+
+<Interview question="O que é embedding e como difere da herança?">
+
+O embedding coloca um tipo dentro de uma struct sem nome de campo; o tipo exterior
+*promove* os campos e métodos do embebido, por isso pode usá-los diretamente e
+satisfaz qualquer interface que o embebido satisfaça. Ao contrário da herança, não
+há relação de subtipo, não há override de métodos por uma vtable de classe-base, e
+não há hierarquia "is-a" — é composição. Pode embeber vários tipos, e ainda pode
+chamar explicitamente os métodos do valor embebido.
+
+</Interview>
+
+<Interview question="Porque pode uma interface a guardar um ponteiro nil ser não-nil?">
+
+Um valor de interface é um par (tipo, valor) e só é `nil` quando *ambos* são nil.
+Se atribui um ponteiro nil tipado (p. ex. `(*MyErr)(nil)`) a uma interface, a parte
+do tipo fica definida, por isso a interface é não-nil mesmo com o ponteiro lá
+dentro a ser nil. Isto morde quem devolve um nil tipado como `error`. A correção é
+devolver um `nil` sem tipo quando não há genuinamente valor.
+
+</Interview>
+
+## Desafio
+
+Pegue num pequeno programa que usa um `switch` sobre um campo "kind" (um tipo de
+shape, um tipo de evento) e refatore-o para uma interface com um método por
+comportamento, uma struct por kind. Note o que melhora — acrescentar um kind novo
+já não edita cada switch — e o que perde — não vê todos os kinds num só sítio.
+Depois encontre um sítio onde uma interface de **um método** da biblioteca padrão
+(`io.Writer`, `sort.Interface`) deixa o seu código encaixar em maquinaria
+existente de graça. Esse momento "encaixar na stdlib" é quando as interfaces Go
+fazem clique.
+
+## Referências & leitura adicional
+
+- *A Tour of Go* — [methods and interfaces](https://go.dev/tour/methods/1)
+- *Effective Go* — [interfaces and embedding](https://go.dev/doc/effective_go#interfaces)
+- *Go by Example* — [interfaces](https://gobyexample.com/interfaces)
+- Rob Pike — [Go Proverbs](https://go-proverbs.github.io/) ("quanto maior a interface, mais fraca a abstração")
+
+<Progress />

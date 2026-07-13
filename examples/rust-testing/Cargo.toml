@@ -1,0 +1,13 @@
+[package]
+name = "testing"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Testing & Documentation (unit, integration, doc-tests, should_panic)."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: `cargo test` runs unit tests, doc-tests, and the integration
+# test under tests/ — all offline on a stable toolchain.
+
+[lib]
+path = "src/lib.rs"

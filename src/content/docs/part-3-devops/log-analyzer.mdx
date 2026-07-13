@@ -1,0 +1,368 @@
+---
+title: "Project: Log Analyzer CLI"
+description: Build the same access-log analyzer in Rust, Go, and Python — tested, byte-identical output — then benchmark them for real - 98ms vs 131ms vs 736ms on 500k lines - and weigh when each language earns the job.
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Benchmark from '../../../components/Benchmark.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+Welcome to **Part 3 · DevOps Automation** — where lessons become *projects*. Each
+one builds a real operations tool in all three languages and then answers the
+question the spec of every platform team eventually asks: **which language should
+this tool be written in?** Not with vibes — with tests proving the three do the
+same thing, and benchmarks measuring what each costs.
+
+First project: a **log analyzer** — the classic "what's happening in production?"
+CLI. Feed it an access log; it reports totals per status class, the error rate,
+and the hottest paths. All three implementations are tested, and their outputs
+are **byte-identical** — verified with `diff` — so the benchmark compares
+languages, not features.
+
+<Aside type="note" title="Prerequisites">
+  Part 1 of your chosen language, plus the Part 2 habits (pure core + thin CLI,
+  deterministic output). This project uses them all.
+</Aside>
+
+Code:
+[`examples/part3-loganalyzer-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— each fmt/lint clean, 5 tests each.
+
+## The tool
+
+```text
+$ loganalyzer access.log
+total: 500000
+1xx: 0
+2xx: 349777
+3xx: 24871
+4xx: 75503
+5xx: 49849
+malformed: 500
+error_rate: 25.1%
+top paths:
+  /: 83688
+  /static/app.js: 83495
+  /api/orders: 83481
+```
+
+That output is real — produced identically by all three implementations over a
+generated 500,500-line log (~35 MB). The design is the same everywhere:
+
+<Mermaid title="Pure core, thin shell — the same shape in all three" code={`flowchart LR
+  F["file / stdin"] --> M["main: read input (thin CLI shell)"]
+  M --> R["report(text): pure — parse each line, aggregate, render"]
+  R --> P["parse_line -> Entry {path, status} | malformed"]
+  R --> S["Stats: totals, by_class[5], paths counter"]
+  S --> O["deterministic output (top paths: count desc, path asc)"]`} />
+
+Two Part 2 disciplines carry the whole design: the **pure core** (`report` is a
+`&str -> String` function — instantly testable, trivially benchmarkable) and
+**deterministic output** (ties in top-paths break alphabetically, so `diff`
+across implementations means something).
+
+## The parser, three ways
+
+A log line has three segments split by double quotes; the path is field 2 of the
+middle, the status is field 1 of the tail. Malformed lines are *counted, never
+fatal* — a log analyzer that crashes on garbage is useless in the field:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_line(line: &str) -> Option<Entry> {
+    let mut parts = line.splitn(3, '"');
+    let _prefix = parts.next()?;
+    let request = parts.next()?; // GET /api/users HTTP/1.1
+    let suffix = parts.next()?; //  200 512
+
+    let path = request.split_whitespace().nth(1)?.to_string();
+    let status: u16 = suffix.split_whitespace().next()?.parse().ok()?;
+    if !(100..=599).contains(&status) {
+        return None;
+    }
+    Some(Entry { path, status })
+}
+```
+`Option` + `?` make every malformed shape fall out as `None` with no branching
+boilerplate — the [error-handling lesson](/systems-programming-academy/part-1-foundations/rust/error-handling/)
+at work.
+</TabItem>
+<TabItem label="Go">
+```go title="loganalyzer.go"
+func ParseLine(line string) (Entry, bool) {
+	parts := strings.SplitN(line, `"`, 3)
+	if len(parts) != 3 {
+		return Entry{}, false
+	}
+	reqFields := strings.Fields(parts[1])
+	if len(reqFields) < 2 {
+		return Entry{}, false
+	}
+	sufFields := strings.Fields(parts[2])
+	if len(sufFields) < 1 {
+		return Entry{}, false
+	}
+	status, err := strconv.Atoi(sufFields[0])
+	if err != nil || status < 100 || status > 599 {
+		return Entry{}, false
+	}
+	return Entry{Path: reqFields[1], Status: status}, true
+}
+```
+The comma-ok shape (`Entry, bool`) mirrors map lookups — malformed is a value,
+not an exception.
+</TabItem>
+<TabItem label="Python">
+```python title="loganalyzer.py"
+def parse_line(line: str) -> Entry | None:
+    parts = line.split('"', 2)
+    if len(parts) != 3:
+        return None
+    req_fields = parts[1].split()
+    suf_fields = parts[2].split()
+    if len(req_fields) < 2 or not suf_fields:
+        return None
+    try:
+        status = int(suf_fields[0])
+    except ValueError:
+        return None
+    if not 100 <= status <= 599:
+        return None
+    return Entry(path=req_fields[1], status=status)
+```
+`Entry | None` documents the malformed case in the signature — the
+[type-hints lesson](/systems-programming-academy/part-1-foundations/python/type-hints/)'s Optional.
+</TabItem>
+</Tabs>
+
+Aggregation is a counter per status class plus a path counter; the report sorts
+top paths by count descending then path ascending. All three implementations
+share 5 tests: valid parse, three malformed shapes, class aggregation +
+error-rate, deterministic top-paths ties, and the rendered report format.
+
+## The benchmark — real numbers
+
+The three binaries/scripts ran over the same 500,500-line log on the same
+machine, best of three runs, outputs `diff`-verified identical first:
+
+<Benchmark
+  metric="Time to analyze 500k lines (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust (release binary)", value: 98, unit: "ms", note: "555 KB binary" },
+    { label: "Go (compiled binary)", value: 131, unit: "ms", note: "2.4 MB binary" },
+    { label: "Python 3.12 (CPython)", value: 736, unit: "ms", note: "needs interpreter" },
+  ]}
+/>
+
+And the cost of just *starting* (empty input) — what a tool invoked thousands of
+times in a pipeline pays every single time:
+
+| | Rust | Go | Python |
+| --- | --- | --- | --- |
+| Startup (empty input) | 2 ms | 3 ms | 26 ms |
+| Binary size | 555 KB | 2.4 MB | n/a (interpreter + script) |
+| Deployment | copy one file | copy one file | needs Python 3.12 present |
+| Compile wait | ~1 s (incremental) | ~0.2 s | none |
+| Lines of code (approx) | ~100 | ~120 | ~90 |
+
+## So which language should this tool use?
+
+The honest answer the numbers support:
+
+**Why Python?** Fastest to write and change, shortest code, and 736 ms for half a
+million lines is *completely fine* for a tool a human runs occasionally. The
+costs: 13× slower hot path, 26 ms of startup tax per invocation, and deployment
+needs an interpreter of the right version on every target — the classic ops
+headache. Choose it for internal tools, one-offs, and anywhere iteration speed
+dominates.
+
+**Why Go?** 1.3× off Rust's pace at a fraction of the ceremony, compiles in a
+blink, and ships as a single static binary you `scp` anywhere — no runtime, no
+dependencies. This deployment story is why so much of the cloud-native toolbox
+(Docker, Kubernetes, Terraform, Prometheus) is Go. Choose it as the *default* for
+DevOps tooling that others will install and run.
+
+**Why Rust?** Fastest, smallest binary, no GC pauses — and the compiler enforced
+correctness the whole way. The cost is development friction: the borrow checker
+taxes quick edits, and compile times grow with the project. Choose it when the
+tool sits in a hot path (per-request, per-line-of-a-huge-stream), runs at
+enormous scale where 25% CPU is real money, or must embed where a runtime can't.
+
+<Quiz
+  question={'A log-analysis step runs on every CI job, thousands of times a day, on a 50 MB log. The numbers above in hand — which factor most favours a compiled implementation?'}
+  options={[
+    { text: "Compiled languages have better syntax for parsing.", },
+    { text: "The per-invocation cost — hot-path speed plus startup tax — multiplied by thousands of runs: ~0.76 s of Python vs ~0.1 s of Rust/Go, thousands of times a day.", correct: true },
+    { text: "Python cannot read files that large.", },
+    { text: "CI systems cannot run interpreters.", },
+  ]}
+  explanation="One run of any of the three is fine. But cost scales with invocations: (736 ms + 26 ms startup) × thousands of daily runs is CPU-minutes of pipeline latency every day, versus ~100 ms for the compiled tools — plus the single-binary deployment meaning no interpreter to install in every CI image. Frequency of execution is the multiplier that turns a negligible difference into a real one."
+/>
+
+## Common mistakes & debugging
+
+### 1. Crashing on malformed input
+
+Real logs contain truncated lines, binary junk, and multiline stack traces. A
+parser that raises/panics on line 3,412,007 of a 10 GB file is a broken tool.
+All three implementations return the malformed case as a *value* and count it —
+the report even tells you how dirty your log is.
+
+### 2. Non-deterministic output
+
+Iterating a hash map to print "top paths" gives a different order every run
+(deliberately so, in Go and Python's seed-randomised maps) — breaking diffs,
+tests, and downstream scripts. Sort with a total order (count desc, *then* path
+asc) as all three do here.
+
+### 3. Benchmarking different work
+
+If the Rust version skips UTF-8 validation and the Python version doesn't, the
+comparison is fiction. That's why this project verifies **byte-identical
+output** with `diff` before timing anything, and why each timing is best-of-3 on
+the same file and machine.
+
+## Exercises
+
+<Interview question="Exercise 1 — Add a per-method breakdown.">
+
+Extend the report with a count per HTTP method (GET/POST/...). Which functions
+change? (Pick your language.)
+
+**Solution (Python):**
+
+```python
+# parse_line: also capture the method (field 0 of the request segment)
+# Entry gains: method: str
+# Stats gains:
+methods: Counter[str] = field(default_factory=Counter)
+# add_line adds:
+self.methods[entry.method] += 1
+# report adds (sorted for determinism):
+out.append("methods:")
+for m, c in sorted(self.methods.items()):
+    out.append(f"  {m}: {c}")
+```
+
+Parser, entity, stats, report — a vertical slice; the CLI shell is untouched.
+
+</Interview>
+
+<Interview question="Exercise 2 — Make the top-N configurable.">
+
+Support `loganalyzer -n 10 access.log`. What's the idiomatic flag approach in
+each language?
+
+**Answer:** Rust: parse `std::env::args` by hand or use `clap` in real projects;
+Go: the stdlib `flag` package (`n := flag.Int("n", 3, "top paths")`); Python:
+stdlib `argparse` (`parser.add_argument("-n", type=int, default=3)`). All three
+keep the flag in `main` and pass a plain `n` into the pure core — the shell
+grows, the core barely changes.
+
+</Interview>
+
+<Interview question="Exercise 3 — Estimate before you measure.">
+
+The log doubles to 1M lines. Predict each implementation's time, then explain
+why the prediction is safe.
+
+**Answer:** ~196 ms / ~262 ms / ~1.47 s. The algorithm is a single pass with
+O(1) work per line (hash-map updates), so time scales linearly with input; only
+the final top-paths sort is super-linear, and it's over *unique paths* (6 here),
+not lines. Linear algorithms make capacity planning arithmetic.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Malformed input counted as data | Crashing/raising on line N of a huge file |
+| Pure `report(text) -> text` core | Parsing tangled with file/CLI handling |
+| Deterministic, diff-able output | Hash-map iteration order in the report |
+| Verify identical behaviour, then benchmark | Comparing tools that do different work |
+| Pick the language for the *deployment*, not fashion | Rewriting in Rust because a blog said so |
+| Stdlib-only for ops tools when possible | A dependency tree for a 100-line CLI |
+
+## Mini-project
+
+**Extend one implementation into a real ops tool:** add `-n` for top-N, a
+`--since TIMESTAMP` filter (parse the bracketed date), per-method counts, and a
+`--format json` output mode for piping into `jq`. Keep the core pure and the
+tests green, and add a test that runs the CLI end-to-end on a fixture file.
+Bonus: stream line-by-line instead of reading the whole file, and measure the
+memory difference on the 35 MB log.
+
+## Interview questions
+
+<Interview question="How do you choose a language for an ops/CLI tool?">
+
+Weigh four axes against the tool's life: **execution profile** (run once a day
+or a thousand times an hour? interactive or in a hot pipeline?), **deployment**
+(who installs it, where — a static binary beats an interpreter dependency on
+fleet machines), **team** (who maintains it), and **iteration speed** (is the
+spec stable or exploratory?). Scripting wins exploratory and occasional; Go wins
+distributable tooling by default; Rust wins hot paths and constrained targets.
+Measure with a spike before committing — as this project did.
+
+</Interview>
+
+<Interview question="Why must outputs be verified identical before benchmarking implementations?">
+
+Because otherwise you're comparing different programs, not different languages.
+A version that skips validation, buffers differently, or sorts less does less
+work and "wins" meaninglessly. Identical, diff-verified output on the same input
+pins the functional behaviour so the residual difference is attributable to the
+language/runtime — the thing you're actually deciding on.
+
+</Interview>
+
+<Interview question="Why does startup time matter for CLI tools when it's only milliseconds?">
+
+Because CLIs are composed: shell loops, xargs, CI steps, git hooks, and Makefiles
+invoke them hundreds or thousands of times. A 26 ms interpreter startup is
+invisible interactively but becomes 26 seconds across a thousand invocations —
+before any real work. It's also why tools meant for scripting pipelines
+(ripgrep, jq, kubectl) are compiled: the fixed cost per call compounds.
+
+</Interview>
+
+<Interview question="What makes a parser robust for production log files?">
+
+Treat malformed input as an expected case, not an error: return it as a
+value/None, count it, and keep going — never abort a 10 GB analysis on one bad
+line. Bound what you trust (validate status ranges, lengths), avoid quadratic
+behaviour on adversarial lines, stream rather than slurp when files exceed
+memory, and surface the malformed count in the output so data quality is
+visible rather than silently discarded.
+
+</Interview>
+
+## Challenge
+
+Point the analyzer at a *real* log from one of your systems (nginx, Caddy, an
+app log after a small regex tweak to `parse_line`). First surprise: the
+malformed count. Second: the top paths are never what you expect. Then run it
+under `time` on your biggest log and decide — with your own numbers, not this
+lesson's — whether your production version should be Python, Go, or Rust. The
+decision procedure, not the specific answer, is what Part 3 is teaching.
+
+## References & further reading
+
+- The Common Log Format — [Apache access log docs](https://httpd.apache.org/docs/2.4/logs.html#accesslog)
+- CLI ergonomics: [`clap`](https://docs.rs/clap) (Rust) · [`flag`](https://pkg.go.dev/flag) (Go) · [`argparse`](https://docs.python.org/3/library/argparse.html) (Python)
+- [Command Line Interface Guidelines](https://clig.dev/) — clig.dev
+- ripgrep's author on performance — [burntsushi's benchmarking methodology](https://blog.burntsushi.net/ripgrep/)
+
+<Progress />

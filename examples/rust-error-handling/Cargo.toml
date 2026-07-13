@@ -1,0 +1,17 @@
+[package]
+name = "error_handling"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Error Handling with Result, Option and the ? operator."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free on purpose: the lesson's code must compile and test offline
+# on a stable toolchain with `cargo test` and `cargo run`.
+
+[[bin]]
+name = "userparse"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

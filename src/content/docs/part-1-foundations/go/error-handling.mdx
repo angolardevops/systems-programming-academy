@@ -1,0 +1,520 @@
+---
+title: "Go: Error Handling"
+description: Errors are values in Go — returned, checked, and wrapped, not thrown. The error interface, sentinel errors, custom error types, %w wrapping, and errors.Is/As, with complete tested examples.
+difficulty: beginner
+estimatedMinutes: 28
+languages: [go]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={28} languages={["go"]} />
+
+Go has no exceptions. An operation that can fail returns an **error value** as its
+last result, and the caller checks it — right there, in the open. The famous `if
+err != nil` is not boilerplate to resent; it is the language insisting you decide
+what happens when things go wrong, at the exact place they might. This lesson
+covers the whole model: the `error` interface, sentinel and custom errors,
+wrapping, and the `errors.Is`/`errors.As` inspection tools.
+
+<Aside type="note" title="Prerequisites">
+  You need [Structs, Methods & Interfaces](/systems-programming-academy/part-1-foundations/go/interfaces/) —
+  an error is just a value satisfying a one-method interface.
+</Aside>
+
+All code is from the tested module
+[`examples/go-errors/`](https://github.com/angolardevops/systems-programming-academy)
+(`go test` green, `go vet` clean). Every snippet is **complete** — a runnable
+`package main`, or a whole declaration from the module.
+
+## Errors are values
+
+`error` is a built-in **interface** with a single method:
+
+```go
+type error interface {
+	Error() string
+}
+```
+
+A function that can fail returns `(result, error)`. `nil` means success.
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("42")
+	if err != nil {
+		fmt.Println("failed:", err)
+		return
+	}
+	fmt.Println("parsed:", n) // parsed: 42
+
+	_, err = strconv.Atoi("oops")
+	if err != nil {
+		fmt.Println("failed:", err) // failed: strconv.Atoi: parsing "oops": invalid syntax
+	}
+}
+```
+
+Output:
+
+```text
+parsed: 42
+failed: strconv.Atoi: parsing "oops": invalid syntax
+```
+
+<Aside type="tip" title="Handle where you can, return where you can't">
+  If a function can meaningfully react to an error, handle it. Otherwise return it
+  to the caller (usually with added context — see wrapping below). Don't log *and*
+  return the same error; that double-reports it.
+</Aside>
+
+## Custom error types
+
+Because `error` is just an interface, any type with an `Error() string` method is
+an error. A struct lets you carry **structured detail**:
+
+```go title="users.go"
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+```
+
+A complete program returning and printing one:
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+func checkName(name string) error {
+	if name == "" {
+		return &ValidationError{Field: "name", Reason: "must not be empty"}
+	}
+	return nil
+}
+
+func main() {
+	if err := checkName(""); err != nil {
+		fmt.Println(err) // invalid name: must not be empty
+	}
+	fmt.Println(checkName("Ada")) // <nil>
+}
+```
+
+Output:
+
+```text
+invalid name: must not be empty
+<nil>
+```
+
+## Sentinel errors and `errors.Is`
+
+A **sentinel** is a package-level error value callers compare against. Use
+`errors.Is` (not `==`) so it still matches after wrapping:
+
+```go title="users.go"
+var ErrNotFound = errors.New("user not found")
+```
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrNotFound = errors.New("not found")
+
+var db = map[string]string{"1": "Ada"}
+
+func lookup(id string) (string, error) {
+	name, ok := db[id]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return name, nil
+}
+
+func main() {
+	_, err := lookup("999")
+	if errors.Is(err, ErrNotFound) {
+		fmt.Println("no such user") // no such user
+	}
+}
+```
+
+Output:
+
+```text
+no such user
+```
+
+## Wrapping with `%w`
+
+Return an error with **added context** using `fmt.Errorf` and the `%w` verb. The
+wrapped error stays reachable — `errors.Is`/`errors.As` walk the whole chain.
+
+<Mermaid title="Wrapping builds a chain that errors.Is/As can walk" code={`flowchart LR
+  A["strconv error: invalid syntax"] -->|wrapped by %w| B["parsing age: ..."]
+  B -->|wrapped by %w| C["line 'Bob, x': ..."]
+  C --> D["errors.Is / errors.As walk back to any layer"]`} />
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+)
+
+func parseAge(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parsing age %q: %w", s, err) // %w wraps
+	}
+	return n, nil
+}
+
+func main() {
+	_, err := parseAge("twelve")
+	fmt.Println(err) // parsing age "twelve": strconv.Atoi: parsing "twelve": invalid syntax
+
+	// errors.Is reaches through the wrapper to the underlying sentinel:
+	fmt.Println(errors.Is(err, strconv.ErrSyntax)) // true
+}
+```
+
+Output:
+
+```text
+parsing age "twelve": strconv.Atoi: parsing "twelve": invalid syntax
+true
+```
+
+## Extracting a typed error with `errors.As`
+
+Where `errors.Is` matches a *value*, `errors.As` finds an error of a *type* in the
+chain and binds it, so you can read its fields:
+
+```go title="main.go — complete, runnable"
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct {
+	Field  string
+	Reason string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+func validate() error {
+	return fmt.Errorf("request failed: %w", &ValidationError{Field: "age", Reason: "must be positive"})
+}
+
+func main() {
+	err := validate()
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("bad field:", ve.Field) // bad field: age
+	}
+}
+```
+
+Output:
+
+```text
+bad field: age
+```
+
+<Quiz
+  question={'After wrapping an error with %w, how should a caller check for a specific sentinel error?'}
+  options={[
+    { text: "With == , e.g. err == ErrNotFound.", },
+    { text: "With errors.Is(err, ErrNotFound), which walks the wrapped chain.", correct: true },
+    { text: "By comparing err.Error() strings.", },
+    { text: "You can't; wrapping hides the original.", },
+  ]}
+  explanation="Once an error is wrapped with %w, `err == ErrNotFound` is false because `err` is now the wrapper. `errors.Is(err, ErrNotFound)` unwraps the chain and returns true if any layer matches. Use `errors.Is` for sentinel values and `errors.As` for concrete error types — never string comparison."
+/>
+
+## Panic and recover (use sparingly)
+
+`panic` unwinds the stack like an exception; `recover` (in a deferred function)
+stops it. Reserve them for **truly unrecoverable** situations or programmer bugs —
+not for ordinary control flow. Idiomatic Go returns errors.
+
+```go title="main.go — complete, runnable"
+package main
+
+import "fmt"
+
+func safeDivide(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil // panics if b == 0
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2)) // 5 <nil>
+	fmt.Println(safeDivide(10, 0)) // 0 recovered: runtime error: integer divide by zero
+}
+```
+
+Output:
+
+```text
+5 <nil>
+0 recovered: runtime error: integer divide by zero
+```
+
+## Common mistakes & debugging
+
+### 1. Ignoring the error
+
+```go
+n, _ := strconv.Atoi(userInput) // ✗ silently uses 0 on bad input
+```
+
+`go vet` and linters flag many ignored errors. **Fix:** check it, or if you truly
+mean to discard it, make that explicit and comment why.
+
+### 2. Comparing with `==` after wrapping
+
+```go
+if err == ErrNotFound { ... } // ✗ false once err has been wrapped with %w
+```
+
+**Fix:** `errors.Is(err, ErrNotFound)`.
+
+### 3. `%v` instead of `%w` when you meant to wrap
+
+```go
+return fmt.Errorf("context: %v", err) // formats the error but does NOT wrap it
+```
+
+With `%v` the chain is broken — `errors.Is`/`errors.As` can't reach the cause.
+**Fix:** use `%w` when you want the original to remain inspectable.
+
+## Exercises
+
+<Interview question="Exercise 1 — Return and check a sentinel error.">
+
+Write `sqrt(x float64) (float64, error)` that returns a sentinel `ErrNegative` for
+negative input. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"math"
+)
+
+var ErrNegative = errors.New("cannot sqrt a negative number")
+
+func sqrt(x float64) (float64, error) {
+	if x < 0 {
+		return 0, ErrNegative
+	}
+	return math.Sqrt(x), nil
+}
+
+func main() {
+	r, err := sqrt(144)
+	fmt.Println(r, err) // 12 <nil>
+	_, err = sqrt(-1)
+	fmt.Println(errors.Is(err, ErrNegative)) // true
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Wrap an error with context.">
+
+Write `readConfig(name string) error` that wraps a lower-level error with the file
+name using `%w`, and show `errors.Is` still matches. Complete program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrMissing = errors.New("missing")
+
+func readConfig(name string) error {
+	// pretend the lookup failed with ErrMissing
+	return fmt.Errorf("reading config %q: %w", name, ErrMissing)
+}
+
+func main() {
+	err := readConfig("app.toml")
+	fmt.Println(err)                       // reading config "app.toml": missing
+	fmt.Println(errors.Is(err, ErrMissing)) // true
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Extract a custom error with errors.As.">
+
+Given a wrapped `*ValidationError`, use `errors.As` to read its `Field`. Complete
+program.
+
+**Solution — complete, runnable:**
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct{ Field string }
+
+func (e *ValidationError) Error() string { return "invalid " + e.Field }
+
+func do() error {
+	return fmt.Errorf("op failed: %w", &ValidationError{Field: "email"})
+}
+
+func main() {
+	err := do()
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("field:", ve.Field) // field: email
+	}
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Return `(result, error)`; check `if err != nil` | `panic` for ordinary, recoverable failures |
+| Wrap with `%w` to add context | `%v` when you meant to keep the cause inspectable |
+| `errors.Is` for sentinels, `errors.As` for types | `err == Sentinel` after wrapping, or string matching |
+| Sentinel errors for well-known conditions | A new `errors.New` everywhere for the same condition |
+| Handle **or** return — not both | Log and return the same error (double reporting) |
+| Add context at each layer ("reading config: ...") | Returning the bare error with no trail |
+
+## Mini-project
+
+**Build a config loader with typed errors.** Parse `key=value` lines into a
+struct. Define a `ConfigError` type carrying the offending line number and key,
+and a sentinel `ErrDuplicateKey`. `Load` should wrap lower-level parse errors with
+`%w` and line context. Write table-driven tests that use `errors.Is` (for
+`ErrDuplicateKey`) and `errors.As` (for `*ConfigError`).
+
+Requirements: uses a custom error type and a sentinel, wraps with `%w`, table-driven
+tests covering each error path, and `go vet` clean.
+
+## Interview questions
+
+<Interview question="Why does Go use returned error values instead of exceptions?">
+
+Because it makes error handling **explicit and local**: the failure path is right
+next to the code that can fail, visible in the type signature `(T, error)`, and the
+compiler-adjacent tooling (`go vet`, linters) can flag ignored errors. Exceptions
+create invisible control flow that jumps up the stack; Go's designers preferred
+that every caller consciously decide what to do. `panic`/`recover` exist for truly
+exceptional cases, not routine errors.
+
+</Interview>
+
+<Interview question="What is the difference between errors.Is and errors.As?">
+
+`errors.Is(err, target)` reports whether any error in the wrapped chain **equals**
+a specific sentinel value (like `ErrNotFound`). `errors.As(err, &target)` finds the
+first error in the chain of a specific **type**, and assigns it to `target` so you
+can read its fields. Use `Is` to detect known conditions; use `As` to extract
+structured detail from a custom error type. Both unwrap `%w` chains.
+
+</Interview>
+
+<Interview question="What does %w do in fmt.Errorf?">
+
+`%w` wraps the given error inside the new one, recording it as the cause. The new
+error's message includes the wrapped error's text, and `errors.Is`/`errors.As` can
+walk back to the original. Using `%v` instead formats the error as text but breaks
+the chain, so the cause becomes uninspectable. Only one `%w` is allowed per
+`Errorf` call.
+
+</Interview>
+
+<Interview question="When is panic appropriate in Go?">
+
+For unrecoverable situations that indicate a bug or make continuing meaningless: a
+violated invariant, an impossible switch case, failure to initialise something the
+program cannot run without (often at startup). Libraries should almost never panic
+on caller input — return an error instead. `recover` is mainly used at process or
+goroutine boundaries (e.g. an HTTP server turning a handler panic into a 500)
+rather than as routine control flow.
+
+</Interview>
+
+## Challenge
+
+Take a script full of `panic`/`log.Fatal` calls and rewrite it so functions return
+errors up to `main`, which handles them once. Add a custom error type for one
+domain failure and a sentinel for another, then write tests using `errors.Is` and
+`errors.As`. Feed it broken input and confirm it reports a clear, wrapped message
+("reading config \"x\": parsing line 3: ...") instead of a stack trace. That trail
+of context is what turns a mysterious crash into an actionable error.
+
+## References & further reading
+
+- *A Tour of Go* — [errors](https://go.dev/tour/methods/19)
+- Go blog — [working with errors in Go 1.13](https://go.dev/blog/go1.13-errors) (`%w`, `Is`, `As`)
+- *Effective Go* — [errors](https://go.dev/doc/effective_go#errors)
+- `errors` package — [documentation](https://pkg.go.dev/errors)
+
+<Progress />

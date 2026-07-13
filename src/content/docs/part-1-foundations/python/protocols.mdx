@@ -1,0 +1,415 @@
+---
+title: "Python: Protocols & Duck Typing"
+description: If it quacks like a duck, it's a duck. Python's duck typing made checkable with typing.Protocol — structural typing with no inheritance, plus @runtime_checkable and how Protocols compare to ABCs. Complete tested examples.
+difficulty: intermediate
+estimatedMinutes: 28
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={28} languages={["python"]} />
+
+Python has always been duck-typed: *"if it walks like a duck and quacks like a
+duck, it's a duck."* Your code cares about what an object **can do**, not which
+class it descends from — pass anything with a `.read()` method to code expecting a
+file, and it works. For years this power was invisible to type checkers. Then PEP
+544 added **`typing.Protocol`**, which describes a set of methods and lets any
+object that has them satisfy it **structurally** — duck typing, now checkable. This
+lesson connects the runtime idea to the static tool.
+
+<Aside type="note" title="Prerequisites">
+  You need [Type Hints](/systems-programming-academy/part-1-foundations/python/type-hints/) and the
+  [data model](/systems-programming-academy/part-1-foundations/python/data-model/). Protocols are a kind of
+  structural type hint.
+</Aside>
+
+All code is from the tested module
+[`examples/py-protocols/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` green — 8 tests incl. doctests — `ruff` clean). Every snippet
+is **complete**.
+
+## Duck typing: behaviour over inheritance
+
+A function that calls `.quack()` works on *anything* with a `.quack()` method — no
+shared base class required.
+
+```python title="main.py — complete, runnable"
+class Duck:
+    def quack(self):
+        return "Quack!"
+
+
+class Dog:
+    def quack(self):  # a Dog that happens to quack
+        return "Woof-quack"
+
+
+def make_it_quack(thing):
+    return thing.quack()  # cares only that .quack() exists
+
+
+print(make_it_quack(Duck()))  # Quack!
+print(make_it_quack(Dog()))   # Woof-quack
+```
+
+Output:
+
+```text
+Quack!
+Woof-quack
+```
+
+This is flexible but, without types, a checker can't warn you when you pass
+something that *can't* quack. `Protocol` fixes that.
+
+## `typing.Protocol`: structural typing
+
+Declare a `Protocol` listing the required methods. Any object with those methods
+satisfies it — **it does not inherit from the protocol**. A checker then verifies
+callers pass conforming objects.
+
+```python title="protocols_demo.py"
+from typing import Protocol
+
+
+class SupportsQuack(Protocol):
+    def quack(self) -> str: ...
+
+
+def make_it_quack(thing: SupportsQuack) -> str:
+    return thing.quack()
+```
+
+`Duck` and `Dog` never mention `SupportsQuack`, yet both are accepted — structural,
+implicit satisfaction, exactly like Go interfaces.
+
+<Mermaid title="Structural satisfaction: no inheritance, just matching methods" code={`flowchart LR
+  B["Button (has render)"] -->|satisfies structurally| P["Protocol Renderable"]
+  H["Heading (has render)"] -->|satisfies structurally| P
+  P --> F["render_page(widgets: list[Renderable])"]`} />
+
+A complete program with two unrelated classes behind one protocol:
+
+```python title="main.py — complete, runnable"
+from typing import Protocol
+
+
+class Renderable(Protocol):
+    def render(self) -> str: ...
+
+
+class Button:
+    def __init__(self, label):
+        self.label = label
+
+    def render(self):
+        return f"[ {self.label} ]"
+
+
+class Heading:
+    def __init__(self, text):
+        self.text = text
+
+    def render(self):
+        return f"# {self.text}"
+
+
+def render_page(widgets: list[Renderable]) -> str:
+    return "\n".join(w.render() for w in widgets)
+
+
+print(render_page([Heading("Home"), Button("OK")]))
+```
+
+Output:
+
+```text
+# Home
+[ OK ]
+```
+
+## `@runtime_checkable`: `isinstance` against a Protocol
+
+By default a `Protocol` is a static-only concept — `isinstance(x, MyProtocol)`
+raises. Decorate it with `@runtime_checkable` and `isinstance` works, checking
+(only) that the methods **exist**.
+
+```python title="main.py — complete, runnable"
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Sized(Protocol):
+    def __len__(self) -> int: ...
+
+
+print(isinstance([1, 2, 3], Sized))  # True  (list has __len__)
+print(isinstance("hello", Sized))    # True  (str has __len__)
+print(isinstance(42, Sized))         # False (int has no __len__)
+```
+
+Output:
+
+```text
+True
+True
+False
+```
+
+<Aside type="caution" title="runtime_checkable only checks names, not signatures">
+  `isinstance(x, MyProtocol)` with `@runtime_checkable` verifies the required
+  methods *exist* — it does not check their argument types or return type. So a
+  class with a `render()` that takes wrong arguments still passes the isinstance
+  check. Static checking (mypy/pyright) does verify signatures; the runtime check
+  is a coarser, best-effort test.
+</Aside>
+
+<Quiz
+  question={'How does a class declare that it satisfies a typing.Protocol?'}
+  options={[
+    { text: "By inheriting: class Button(Renderable).", },
+    { text: "It does not declare anything — having the required methods is enough (structural typing).", correct: true },
+    { text: "By registering with Protocol.register().", },
+    { text: "By adding a @protocol decorator.", },
+  ]}
+  explanation="Protocols use structural (implicit) satisfaction: any class with the required methods satisfies the protocol, with no inheritance or registration. This lets you define a Protocol for types you don't own, and lets unrelated classes (Button, Heading) satisfy the same protocol. It is the same model as Go interfaces — and the opposite of ABCs, which use nominal (explicit) subclassing."
+/>
+
+## Protocol vs ABC
+
+Python has two ways to express "a type with these methods":
+
+| | `typing.Protocol` (structural) | `abc.ABC` (nominal) |
+| --- | --- | --- |
+| Satisfaction | implicit — just have the methods | explicit — must subclass |
+| Works for types you don't own | ✅ yes | ❌ no (can't add a base class) |
+| `isinstance` | only with `@runtime_checkable` | always |
+| Enforces implementation at instantiation | ❌ no (checker only) | ✅ yes (`TypeError` if abstract methods unimplemented) |
+| Best for | describing capabilities across unrelated types | a designed class hierarchy you control |
+
+Reach for `Protocol` to describe "anything that can X" (especially third-party
+types); reach for an `ABC` when you own the hierarchy and want to *force* subclasses
+to implement methods.
+
+## Common mistakes & debugging
+
+### 1. `isinstance` on a Protocol without `@runtime_checkable`
+
+```python
+from typing import Protocol
+
+class Reader(Protocol):
+    def read(self) -> str: ...
+
+isinstance(open("f"), Reader)  # ✗ TypeError
+```
+
+```text
+TypeError: Instance and class checks can only be used with @runtime_checkable protocols
+```
+
+**Fix:** add `@runtime_checkable` above the protocol — or, better, rely on static
+checking and avoid the runtime `isinstance` entirely.
+
+### 2. Expecting `runtime_checkable` to validate signatures
+
+As noted, it only checks method *presence*. A class with a wrongly-shaped method
+passes `isinstance` but fails static checking. Don't treat the runtime check as full
+validation.
+
+### 3. Reaching for an ABC when a Protocol fits better
+
+If you find yourself wanting to type "anything with a `.close()` method" but can't
+make third-party classes inherit your ABC, that's the signal to use a `Protocol`
+instead — it works on types you don't control.
+
+## Exercises
+
+<Interview question="Exercise 1 — Define and use a Protocol.">
+
+Write a `Comparable`-style `HasArea` protocol (`area() -> float`) and a function
+that sums areas of any objects that have it. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+from typing import Protocol
+
+
+class HasArea(Protocol):
+    def area(self) -> float: ...
+
+
+class Square:
+    def __init__(self, side):
+        self.side = side
+
+    def area(self):
+        return self.side * self.side
+
+
+class Circle:
+    def __init__(self, r):
+        self.r = r
+
+    def area(self):
+        return 3.14159 * self.r * self.r
+
+
+def total_area(shapes: list[HasArea]) -> float:
+    return sum(s.area() for s in shapes)
+
+
+print(total_area([Square(2), Circle(1)]))  # 7.14159
+```
+
+`Square` and `Circle` satisfy `HasArea` without inheriting from it.
+
+</Interview>
+
+<Interview question="Exercise 2 — A runtime_checkable protocol.">
+
+Make a `Closeable` protocol usable with `isinstance`. Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+class Connection:
+    def close(self):
+        pass
+
+
+print(isinstance(Connection(), Closeable))  # True
+print(isinstance(42, Closeable))            # False
+```
+
+</Interview>
+
+<Interview question="Exercise 3 — Duck typing without any Protocol.">
+
+Write a `describe` function that works on anything with a `name` attribute.
+Complete program.
+
+**Solution — complete, runnable:**
+
+```python
+def describe(thing):
+    return f"This is {thing.name}"
+
+
+class Cat:
+    name = "Felix"
+
+
+class Product:
+    def __init__(self, name):
+        self.name = name
+
+
+print(describe(Cat()))              # This is Felix
+print(describe(Product("Widget")))  # This is Widget
+```
+
+No shared type is needed at runtime — duck typing. Adding a `Named(Protocol)` with a
+`name: str` attribute would let a checker verify callers.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| `Protocol` to type "anything that can X" | Forcing an inheritance hierarchy for capability |
+| Small protocols (one or two methods) | A giant protocol nothing can fully satisfy |
+| `Protocol` for third-party / unrelated types | An ABC that outside classes can't subclass |
+| Static checking as the primary guarantee | Relying on `isinstance` for full validation |
+| `@runtime_checkable` only when you truly need `isinstance` | Decorating every protocol out of habit |
+| `ABC` when you own the hierarchy and must force methods | `Protocol` when you need enforced implementation |
+
+## Mini-project
+
+**Build a plugin system with a Protocol.** Define a `Plugin` protocol with `name()
+-> str` and `run(data: str) -> str`. Implement three unrelated plugin classes
+(uppercase, reverse, repeat) that satisfy it without inheritance. Write a
+`run_pipeline(plugins: list[Plugin], data: str) -> str` that threads the data
+through each. Add a `@runtime_checkable` variant and a test using `isinstance`.
+
+Requirements: structural satisfaction (no shared base), `python3 -m unittest` green
+with doctests, and `ruff` clean.
+
+## Interview questions
+
+<Interview question="What is duck typing?">
+
+Duck typing is Python's approach of judging an object by its behaviour rather than
+its type: if it has the methods and attributes an operation needs, it can be used,
+regardless of its class or ancestry. "If it walks like a duck and quacks like a
+duck, it's a duck." It makes code flexible and decoupled, but without type hints a
+checker can't warn you before runtime when an object lacks the needed method.
+
+</Interview>
+
+<Interview question="What is typing.Protocol and how does it relate to duck typing?">
+
+`typing.Protocol` (PEP 544) is a way to describe a structural type — a set of
+methods/attributes — so static checkers can verify duck typing. Any class that has
+the required members satisfies the protocol *implicitly*, with no inheritance. It
+brings duck typing into the type system: you get the flexibility of "anything that
+can X" plus the safety of a checker flagging objects that can't. It mirrors Go's
+implicitly-satisfied interfaces.
+
+</Interview>
+
+<Interview question="What is the difference between a Protocol and an ABC?">
+
+A `Protocol` uses **structural** typing: satisfaction is implicit — any class with
+the right methods qualifies, even ones you don't own. An `abc.ABC` uses **nominal**
+typing: a class must explicitly subclass it, and the ABC can force subclasses to
+implement abstract methods (raising `TypeError` at instantiation otherwise). Use a
+Protocol to describe capabilities across unrelated/third-party types; use an ABC
+when you control the hierarchy and want enforced implementation.
+
+</Interview>
+
+<Interview question="What does @runtime_checkable do, and what are its limits?">
+
+It lets you use a Protocol with `isinstance()`/`issubclass()`. Without it, those
+raise `TypeError`. The important limit is that the runtime check only verifies the
+required methods **exist by name** — it ignores their signatures and return types.
+So an object can pass `isinstance(x, MyProtocol)` yet still be misused; only static
+checking validates the full shape. Use it sparingly, when a genuine runtime check is
+needed.
+
+</Interview>
+
+## Challenge
+
+Find a place in your code where you used inheritance or `isinstance` chains just to
+say "this thing can be rendered / saved / compared", and replace the base class with
+a `Protocol`. Notice that classes you *don't own* — a third-party model, a stdlib
+type — can now satisfy it too, which inheritance could never allow. Then run mypy and
+watch it verify the callers structurally. That shift from "what is it?" to "what can
+it do?" is the essence of Pythonic, duck-typed design.
+
+## References & further reading
+
+- Python docs — [`typing.Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol)
+- PEP 544 — [Protocols: structural subtyping](https://peps.python.org/pep-0544/)
+- Python docs — [`abc` — abstract base classes](https://docs.python.org/3/library/abc.html)
+- *Fluent Python* (Ramalho), ch. 13 — "Interfaces, Protocols, and ABCs"
+
+<Progress />

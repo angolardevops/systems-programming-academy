@@ -1,0 +1,439 @@
+---
+title: "Rust: Smart Pointers e Mutabilidade Interior"
+description: Box, Rc e RefCell — alocação no heap, posse partilhada e mutação através de uma referência partilhada. Quando precisa deles, como se compõem em Rc<RefCell<T>>, e a armadilha dos ciclos — com exemplos testados.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["rust"]} />
+
+A posse simples — um dono, borrows verificados em compilação — cobre a maioria do
+código. Mas algumas formas não encaixam: um tipo que se contém a si próprio, dados
+com vários donos, ou um valor que tem de mutar através de uma referência
+partilhada. Os **smart pointers** são tipos da biblioteca que tratam destes casos
+mantendo as garantias de segurança do Rust. Esta lição cobre os três que vai mesmo
+usar: `Box`, `Rc` e `RefCell`.
+
+<Aside type="note" title="Pré-requisitos">
+  Precisa de [Ownership](/systems-programming-academy/pt/part-1-foundations/rust/ownership/) (moves, borrows) e
+  idealmente [Traits](/systems-programming-academy/pt/part-1-foundations/rust/traits/). É um tópico avançado de
+  Fundamentos — vá com calma.
+</Aside>
+
+Todo o código vem do crate testado
+[`examples/rust-smart-pointers/`](https://github.com/angolardevops/systems-programming-academy)
+(7 testes, `cargo clippy` limpo). Cada bloco é **completo**.
+
+## Qual ponteiro para qual tarefa
+
+| Tipo | Dá-lhe | Custo | Usar quando |
+| --- | --- | --- | --- |
+| `Box<T>` | Alocação no heap, um dono | uma alocação | tipos recursivos, valores grandes, trait objects |
+| `Rc<T>` | Posse partilhada (vários donos) | incremento de contador | um valor com vários donos, single-thread |
+| `RefCell<T>` | Mutação através de `&`, verificada em runtime | borrow check em runtime | mutabilidade interior |
+| `Rc<RefCell<T>>` | Partilhado **e** mutável | ambos | um nó partilhado e mutável |
+
+<Aside type="tip" title="Threads precisam de Arc/Mutex, não Rc/RefCell">
+  `Rc` e `RefCell` são **single-thread**. Os primos thread-safe são `Arc<T>`
+  (contador atómico) e `Mutex<T>`/`RwLock<T>`. Vemos esses na lição
+  [Concorrência Básica](/systems-programming-academy/pt/part-1-foundations/rust/concurrency/) — as ideias daqui
+  transferem-se diretamente.
+</Aside>
+
+## `Box<T>`: um dono, no heap
+
+`Box<T>` põe um valor no heap e é seu dono. O seu uso matador são os **tipos
+recursivos**: um `enum` que se contém tem, em princípio, tamanho infinito — a menos
+que a parte recursiva esteja atrás de um ponteiro de tamanho conhecido, que é
+exatamente o que o `Box` é.
+
+```rust title="src/lib.rs"
+#[derive(Debug, PartialEq, Eq)]
+pub enum List {
+    Cons(i32, Box<List>), // a cauda é um ponteiro, por isso List tem tamanho finito
+    Nil,
+}
+
+impl List {
+    pub fn sum(&self) -> i32 {
+        match self {
+            List::Cons(value, tail) => value + tail.sum(), // Box desreferencia sozinho
+            List::Nil => 0,
+        }
+    }
+}
+```
+
+Um programa completo:
+
+```rust title="main.rs — completo, executável"
+#[derive(Debug)]
+enum List {
+    Cons(i32, Box<List>),
+    Nil,
+}
+use List::{Cons, Nil};
+
+fn sum(list: &List) -> i32 {
+    match list {
+        Cons(v, tail) => v + sum(tail),
+        Nil => 0,
+    }
+}
+
+fn main() {
+    // 1 -> 2 -> 3 -> Nil
+    let list = Cons(1, Box::new(Cons(2, Box::new(Cons(3, Box::new(Nil))))));
+    println!("sum = {}", sum(&list)); // sum = 6
+}
+```
+
+Saída:
+
+```text
+sum = 6
+```
+
+Sem o `Box`, `enum List { Cons(i32, List), Nil }` não compila:
+
+```text
+error[E0072]: recursive type `List` has infinite size
+  = help: insert some indirection (e.g., a `Box`) to break the cycle
+```
+
+## `Rc<T>`: vários donos dos mesmos dados
+
+Às vezes um valor precisa mesmo de vários donos — um nó referenciado de dois
+sítios, config partilhada por uma árvore. `Rc<T>` ("reference counted") conta
+quantos donos existem e liberta o valor quando o último é descartado. `Rc::clone`
+é **barato**: incrementa um contador, não faz cópia profunda.
+
+```rust title="src/lib.rs"
+use std::rc::Rc;
+
+pub fn shared_owners() -> usize {
+    let a = Rc::new(String::from("shared config"));
+    let _b = Rc::clone(&a); // +1 dono
+    let _c = Rc::clone(&a); // +1 dono
+    Rc::strong_count(&a) // 3 enquanto a, _b, _c vivem
+}
+```
+
+Um programa completo a mostrar a contagem a subir e a descer:
+
+```rust title="main.rs — completo, executável"
+use std::rc::Rc;
+
+fn main() {
+    let a = Rc::new(vec![1, 2, 3]);
+    println!("count after a = {}", Rc::strong_count(&a)); // 1
+    let b = Rc::clone(&a);
+    println!("count after b = {}", Rc::strong_count(&a)); // 2
+    {
+        let c = Rc::clone(&a);
+        println!("count in scope = {}", Rc::strong_count(&a)); // 3
+        println!("b and c see: {:?} {:?}", b, c);
+    }
+    println!("count after scope = {}", Rc::strong_count(&a)); // 2
+}
+```
+
+Saída:
+
+```text
+count after a = 1
+count after b = 2
+count in scope = 3
+b and c see: [1, 2, 3] [1, 2, 3]
+count after scope = 2
+```
+
+<Aside type="caution" title="Rc sozinho é só-leitura">
+  `Rc<T>` dá acesso partilhado **imutável** — não consegue um `&mut` através dele,
+  porque isso deixaria dois donos mutar ao mesmo tempo. Para mutar dados
+  partilhados combina-o com `RefCell`, a seguir.
+</Aside>
+
+## `RefCell<T>`: mutar através de uma referência partilhada
+
+Normalmente o borrow checker impõe "um `&mut` ou muitos `&`" em compilação. O
+`RefCell<T>` move essa verificação para **runtime**: pode chamar `borrow_mut()`
+num `RefCell` de que só tem um `&`. Se quebrar a regra (dois `borrow_mut` ao mesmo
+tempo), entra em pânico em vez de não compilar.
+
+Combine `Rc` (partilhar) com `RefCell` (mutar) para estado partilhado e mutável:
+
+```rust title="src/lib.rs"
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Clone)]
+pub struct Counter {
+    inner: Rc<RefCell<i64>>,
+}
+
+impl Counter {
+    pub fn new() -> Self {
+        Counter { inner: Rc::new(RefCell::new(0)) }
+    }
+    pub fn add(&self, n: i64) {      // repare: &self, mas muta
+        *self.inner.borrow_mut() += n;
+    }
+    pub fn get(&self) -> i64 {
+        *self.inner.borrow()
+    }
+    pub fn handle(&self) -> Counter { // um segundo handle para o MESMO counter
+        self.clone()
+    }
+}
+```
+
+Um programa completo — dois handles, um valor partilhado:
+
+```rust title="main.rs — completo, executável"
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn main() {
+    let shared = Rc::new(RefCell::new(0i64));
+    let handle = Rc::clone(&shared); // segundo dono da mesma cell
+
+    *shared.borrow_mut() += 10;
+    *handle.borrow_mut() += 5;       // muta pelo outro handle
+
+    println!("value = {}", shared.borrow()); // value = 15
+    println!("owners = {}", Rc::strong_count(&shared)); // owners = 2
+}
+```
+
+Saída:
+
+```text
+value = 15
+owners = 2
+```
+
+<Quiz
+  question={'O que é que o RefCell move de compilação para runtime?'}
+  options={[
+    { text: "A alocação de memória." },
+    { text: "O borrow check — um &mut ou muitos & — imposto por pânico se violado em runtime.", correct: true },
+    { text: "A verificação de tipos do valor interior." },
+    { text: "A contagem de referências." },
+  ]}
+  explanation="O `RefCell<T>` continua a impor a regra de aliasing do Rust (um borrow mutável, ou muitos imutáveis), mas verifica-a dinamicamente: `borrow()`/`borrow_mut()` seguem os borrows ativos e entram em pânico se violar a regra. Troca uma garantia de compilação pela flexibilidade de mutar através de uma referência partilhada."
+/>
+
+## Erros comuns & depuração
+
+### 1. Duplo `borrow_mut()` entra em pânico em runtime
+
+```rust
+use std::cell::RefCell;
+
+fn main() {
+    let cell = RefCell::new(5);
+    let a = cell.borrow_mut();
+    let b = cell.borrow_mut(); // ✗ segundo borrow mutável enquanto `a` vive
+    println!("{a} {b}");
+}
+```
+
+```text
+thread 'main' panicked at src/main.rs:6:18:
+already borrowed: BorrowMutError
+```
+
+**Correção:** mantenha os borrows curtos — deixe um `borrow_mut()` terminar
+(descartá-lo) antes de tomar o próximo. Este bug compila; só a execução (ou um
+teste) o revela, o preço da verificação em runtime.
+
+### 2. Ciclos de referências vazam memória
+
+Dois `Rc`s que apontam um para o outro (via `RefCell`) mantêm mutuamente a
+contagem acima de zero para sempre — nenhum é libertado. O Rust é seguro em
+memória, mas isto é uma fuga, não comportamento indefinido.
+
+**Correção:** faça uma direção ser `Weak<T>` (uma referência não-possuidora que não
+mantém o valor vivo). Pai → filho é `Rc`; filho → pai é `Weak`.
+
+### 3. Recorrer a `Rc<RefCell<T>>` cedo demais
+
+É fácil abusar da mutabilidade partilhada. A maioria dos problemas fica mais limpa
+com posse simples, borrows, ou passar dados por valor. Recorra a `Rc<RefCell<T>>`
+só quando tem mesmo estado partilhado e mutável (grafos, listas de observadores,
+algumas árvores).
+
+## Exercícios
+
+<Interview question="Exercício 1 — Profundidade de uma árvore binária com Box.">
+
+Defina `Tree { Leaf, Node(Box<Tree>, Box<Tree>) }` e uma função `depth`. `fn main`
+completo.
+
+**Solução — completa, executável:**
+
+```rust
+enum Tree {
+    Leaf,
+    Node(Box<Tree>, Box<Tree>),
+}
+
+fn depth(t: &Tree) -> u32 {
+    match t {
+        Tree::Leaf => 0,
+        Tree::Node(l, r) => 1 + depth(l).max(depth(r)),
+    }
+}
+
+fn main() {
+    // Uma árvore de profundidade 2 à esquerda.
+    let t = Tree::Node(
+        Box::new(Tree::Node(Box::new(Tree::Leaf), Box::new(Tree::Leaf))),
+        Box::new(Tree::Leaf),
+    );
+    println!("depth = {}", depth(&t)); // depth = 2
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Partilhar um Vec entre dois donos com Rc.">
+
+Crie um `Rc<Vec<i32>>`, clone-o, e mostre que ambos os handles veem os mesmos
+dados e a strong count é 2.
+
+**Solução — completa, executável:**
+
+```rust
+use std::rc::Rc;
+
+fn main() {
+    let data = Rc::new(vec![10, 20, 30]);
+    let alias = Rc::clone(&data);
+    println!("{:?}", data);   // [10, 20, 30]
+    println!("{:?}", alias);  // [10, 20, 30]
+    println!("count = {}", Rc::strong_count(&data)); // count = 2
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 3 — Um log partilhado com Rc<RefCell<..>>.">
+
+Construa um log a que dois handles podem acrescentar, e depois leia todas as
+linhas.
+
+**Solução — completa, executável:**
+
+```rust
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn main() {
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let writer = Rc::clone(&log);
+
+    log.borrow_mut().push("started".to_string());
+    writer.borrow_mut().push("did work".to_string()); // pelo outro handle
+
+    println!("{:?}", log.borrow()); // ["started", "did work"]
+}
+```
+
+Ambos os handles mutam o mesmo `Vec` porque partilham um `RefCell` atrás de um
+`Rc`.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| `Box` para recursão, valores grandes, trait objects | `Box` à volta de um valor pequeno sem razão |
+| `Rc` para posse partilhada genuína | `Rc` para fugir de pensar na posse |
+| `Rc<RefCell<T>>` só para estado partilhado *mutável* | `Rc<RefCell<T>>` como contentor por defeito |
+| `Weak` para quebrar ciclos pai↔filho | Dois `Rc`s a apontar um para o outro (fuga) |
+| Manter os borrows de `RefCell` curtos | Segurar um `borrow_mut()` durante outras chamadas |
+| Preferir posse/borrows simples primeiro | Recorrer a smart pointers por hábito |
+
+## Mini-projeto
+
+**Construa um `Graph` de nós partilhados.** Modele um pequeno grafo dirigido onde
+os nós são `Rc<RefCell<Node>>` e cada `Node` tem `value: i32` e `edges:
+Vec<Rc<RefCell<Node>>>`. Escreva funções para acrescentar uma aresta e para somar
+todos os valores dos nós alcançáveis a partir de um nó inicial (registe os nós
+visitados para evitar ciclos infinitos).
+
+Requisitos: usa `Rc<RefCell<..>>`, trata um ciclo sem entrar em loop infinito, pelo
+menos quatro casos `#[test]`, e `cargo clippy` limpo. Bónus: troque uma aresta de
+retorno por `Weak` e observe a diferença na `strong_count`.
+
+## Perguntas de entrevista
+
+<Interview question="Quando usaria Box<T>?">
+
+Três casos principais: (1) **tipos recursivos**, onde um valor tem de se conter e
+precisa de um ponteiro de tamanho conhecido para ter tamanho finito; (2) **valores
+grandes** que quer mover barato (mover um `Box` move um ponteiro, não a carga
+toda); (3) **trait objects**, guardar `Box<dyn Trait>` para tipos heterogéneos. O
+`Box` é o smart pointer mais simples: um dono, alocação no heap, sem custo extra em
+runtime além da alocação.
+
+</Interview>
+
+<Interview question="O que é mutabilidade interior e quando precisa dela?">
+
+Mutabilidade interior é mutar um valor através de uma referência partilhada (`&`),
+o que as regras normais de borrow proíbem. Tipos como `RefCell<T>` (single-thread)
+e `Mutex<T>` (multi-thread) fornecem-na movendo a verificação de aliasing para
+runtime. Precisa dela quando uma API só lhe dá `&self` mas tem de mutar estado
+interno — caches, contadores, registos de observadores, nós de grafo partilhados.
+
+</Interview>
+
+<Interview question="Qual a diferença entre Rc e Arc?">
+
+Ambos dão posse partilhada via contagem de referências. `Rc<T>` usa um contador
+simples (não-atómico) e é portanto **single-thread** — mais barato, mas não
+`Send`/`Sync`. `Arc<T>` ("atomic Rc") usa operações atómicas na contagem para poder
+ser partilhado entre threads, a um pequeno custo de desempenho. Use `Rc` numa só
+thread e `Arc` ao cruzar fronteiras de threads.
+
+</Interview>
+
+<Interview question="Como pode o Rust seguro ainda vazar memória com Rc?">
+
+Se dois `Rc`s apontam um para o outro (um ciclo), cada um mantém a strong count do
+outro em 1, por isso nenhum é descartado — a memória nunca é libertada. Isto é uma
+*fuga*, que o Rust considera segura (sem ponteiros pendentes, sem comportamento
+indefinido). A correção é fazer um lado ser `Weak<T>`, que referencia o valor sem
+incrementar a strong count, para o ciclo poder ser recolhido.
+
+</Interview>
+
+## Desafio
+
+Pegue no cons `List` desta lição e estenda-o a uma lista duplamente ligada, onde
+cada nó aponta para `next` e `prev`. Vai bater logo no problema do ciclo — `next`
+como `Rc` e `prev` como `Rc` vaza. Resolva-o com `Weak` para os ponteiros de
+retorno, e escreva um teste com `Rc::strong_count` / `Rc::weak_count` que prove que
+os nós são mesmo libertados. Acertar uma lista duplamente ligada em Rust seguro
+ensina o modelo de posse mais a fundo do que qualquer leitura.
+
+## Referências & leitura adicional
+
+- *The Rust Programming Language* (o Livro), cap. 15 — [“Smart Pointers”](https://doc.rust-lang.org/book/ch15-00-smart-pointers.html)
+- `std::boxed::Box` — [documentação](https://doc.rust-lang.org/std/boxed/struct.Box.html)
+- `std::rc::Rc` e `Weak` — [documentação](https://doc.rust-lang.org/std/rc/index.html)
+- `std::cell::RefCell` — [documentação](https://doc.rust-lang.org/std/cell/struct.RefCell.html)
+
+<Progress />

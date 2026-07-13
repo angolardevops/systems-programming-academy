@@ -1,0 +1,55 @@
+---
+// Self-contained interactive multiple-choice quiz. No framework, no external JS.
+// Accessible: options are real <button>s; the explanation is announced on reveal.
+interface Option {
+  text: string;
+  correct?: boolean;
+}
+interface Props {
+  question: string;
+  options: Option[];
+  explanation?: string;
+}
+const { question, options, explanation } = Astro.props;
+const id = 'quiz-' + Math.random().toString(36).slice(2, 9);
+---
+
+<div class="spa-quiz not-content" data-quiz id={id}>
+  <p class="spa-quiz-q">{question}</p>
+  <div role="group" aria-label="Answer options">
+    {options.map((opt, i) => (
+      <button class="spa-quiz-opt" type="button" data-correct={opt.correct ? 'true' : 'false'} data-i={i}>
+        {opt.text}
+      </button>
+    ))}
+  </div>
+  {explanation && (
+    <p class="spa-quiz-explain" hidden aria-live="polite">{explanation}</p>
+  )}
+</div>
+
+<script>
+  // Wire every quiz on the page once. Idempotent across view transitions.
+  function initQuizzes() {
+    document.querySelectorAll<HTMLElement>('[data-quiz]').forEach((quiz) => {
+      if (quiz.dataset.ready === '1') return;
+      quiz.dataset.ready = '1';
+      const buttons = Array.from(quiz.querySelectorAll<HTMLButtonElement>('.spa-quiz-opt'));
+      const explain = quiz.querySelector<HTMLElement>('.spa-quiz-explain');
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const correct = btn.dataset.correct === 'true';
+          btn.classList.add(correct ? 'is-correct' : 'is-wrong');
+          if (!correct) {
+            const right = buttons.find((b) => b.dataset.correct === 'true');
+            right?.classList.add('is-correct');
+          }
+          buttons.forEach((b) => (b.disabled = true));
+          if (explain) explain.hidden = false;
+        });
+      });
+    });
+  }
+  initQuizzes();
+  document.addEventListener('astro:page-load', initQuizzes);
+</script>

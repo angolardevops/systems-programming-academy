@@ -1,0 +1,409 @@
+---
+title: "Rust: Testing & Documentation"
+description: Rust ships a test runner and a doc-test system in the box. Learn unit tests, integration tests, doc-tests that keep examples honest, and should_panic — with a fully tested companion crate.
+difficulty: beginner
+estimatedMinutes: 26
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={26} languages={["rust"]} />
+
+Most ecosystems bolt testing on with a third-party framework. Rust builds it into
+the language and `cargo`: write `#[test]`, run `cargo test`, done. Better still,
+the examples in your documentation are compiled and run as tests, so your docs
+can never quietly rot. This lesson covers the three kinds of test — unit,
+integration, and doc — plus failure testing, using a small bank-account library
+that actually runs.
+
+<Aside type="note" title="Prerequisites">
+  You should be comfortable with functions, `struct`/`enum`, and
+  [error handling](/systems-programming-academy/part-1-foundations/rust/error-handling/) (`Result`).
+</Aside>
+
+Everything here is from the tested crate
+[`examples/rust-testing/`](https://github.com/angolardevops/systems-programming-academy).
+Running `cargo test` there reports **8 unit + 1 integration + 2 doc-tests**, all
+passing.
+
+## The three kinds of test
+
+<Mermaid title="Where each kind of test lives" code={`flowchart TD
+  C["cargo test"] --> U["Unit tests: inside src/, see private items"]
+  C --> I["Integration tests: in tests/, use the public API only"]
+  C --> D["Doc-tests: code in /// comments, compiled and run"]`} />
+
+| Kind | Lives in | Sees | Answers |
+| --- | --- | --- | --- |
+| **Unit** | `#[cfg(test)] mod tests` in `src/` | private + public | "does this function work?" |
+| **Integration** | `tests/*.rs` (separate crate) | public API only | "do the pieces work together?" |
+| **Doc-test** | ` ``` ` blocks in `///` docs | public API | "is the documented example true?" |
+
+## Unit tests
+
+Unit tests live next to the code, in a module gated by `#[cfg(test)]` so they are
+compiled only for `cargo test` (never shipped in your release binary). `use
+super::*;` pulls the whole module — including private items — into scope.
+
+```rust title="src/lib.rs"
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_sums_two_numbers() {
+        assert_eq!(add(2, 2), 4);
+        assert_eq!(add(-5, 5), 0);
+    }
+}
+```
+
+The core macros:
+
+- `assert!(cond)` — fail if `cond` is false.
+- `assert_eq!(a, b)` / `assert_ne!(a, b)` — fail if the two are (un)equal, printing
+  both values on failure.
+
+Run them:
+
+```bash
+cargo test
+```
+
+```text
+running 8 tests
+test tests::add_sums_two_numbers ... ok
+test tests::deposit_increases_balance ... ok
+...
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+## Testing failure: `should_panic` and `Result`
+
+Some functions are *supposed* to panic on bad input. `#[should_panic]` asserts
+exactly that, and `expected = "..."` pins the message so you don't accidentally
+pass on the *wrong* panic:
+
+```rust title="src/lib.rs"
+pub fn divide(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("division by zero");
+    }
+    a / b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "division by zero")]
+    fn divide_by_zero_panics() {
+        divide(1, 0);
+    }
+}
+```
+
+A test can also **return `Result`** and use `?` internally — it passes if it
+returns `Ok(())`, which lets you chain fallible steps without a pile of
+`.unwrap()`:
+
+```rust title="src/lib.rs"
+#[test]
+fn deposit_then_withdraw_roundtrips() -> Result<(), BankError> {
+    let mut acc = Account::new(0);
+    acc.deposit(100)?;
+    acc.withdraw(40)?;
+    assert_eq!(acc.balance(), 60);
+    Ok(())
+}
+```
+
+<Quiz
+  question={'Why add expected = "..." to a #[should_panic] test?'}
+  options={[
+    { text: "It makes the test run faster.", },
+    { text: "So the test only passes if the panic message contains that text — guarding against passing on the wrong panic.", correct: true },
+    { text: "It is required; #[should_panic] won't compile without it.", },
+    { text: "It suppresses the panic output.", },
+  ]}
+  explanation={'Without expected, a #[should_panic] test passes on any panic — even one from an unrelated bug. Adding expected = "..." requires the panic message to contain that substring, so the test proves the code panicked for the reason you intended.'}
+/>
+
+## Integration tests
+
+Put a file in `tests/` and Cargo compiles it as a **separate crate** that depends
+on yours — so it sees only the public API, exactly like a real user. This is
+where you test that components cooperate.
+
+```rust title="tests/integration.rs"
+use testing::{Account, BankError};
+
+#[test]
+fn a_full_customer_session() {
+    let mut acc = Account::new(0);
+    assert_eq!(acc.deposit(200), Ok(200));
+    assert_eq!(acc.deposit(50), Ok(250));
+    assert_eq!(acc.withdraw(75), Ok(175));
+    assert_eq!(acc.balance(), 175);
+
+    // Overdraw is rejected and leaves the balance intact.
+    assert_eq!(
+        acc.withdraw(1_000),
+        Err(BankError::InsufficientFunds { balance: 175, requested: 1_000 })
+    );
+}
+```
+
+`cargo test` runs this automatically, in its own section of the output.
+
+## Doc-tests: examples that can't lie
+
+Any ` ```rust ` block inside a `///` doc comment is compiled and run by `cargo
+test`. If you change `add` to subtract, this test fails — so the documentation is
+guaranteed to match the code.
+
+```rust title="src/lib.rs"
+/// Adds two balances.
+///
+/// # Examples
+///
+/// ```
+/// use testing::add;
+/// assert_eq!(add(2, 40), 42);
+/// ```
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+```
+
+```text
+   Doc-tests testing
+running 2 tests
+test src/lib.rs - add (line 16) ... ok
+test src/lib.rs - Account::new (line 45) ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+<Aside type="tip" title="Doc-test tricks">
+  Hide setup lines from the rendered docs by prefixing them with `#` (they still
+  run): `# use testing::add;`. Mark an example that should *not* run with
+  ```` ```no_run ````, and one that should fail to compile with
+  ```` ```compile_fail ````.
+</Aside>
+
+## Useful `cargo test` flags
+
+```bash
+cargo test deposit          # run only tests whose name contains "deposit"
+cargo test -- --nocapture   # show println! output from passing tests
+cargo test -- --test-threads=1  # run serially (deterministic ordering)
+cargo test --doc            # run only doc-tests
+```
+
+Mark a slow or flaky test `#[ignore]` to skip it by default; run ignored ones
+with `cargo test -- --ignored`.
+
+## Common mistakes & debugging
+
+### 1. Forgetting `#[test]`
+
+A test function without the `#[test]` attribute is just a normal function that
+never runs. If "your test passes" but the count didn't go up, check the attribute.
+
+### 2. `assert_eq!` on a type that isn't `PartialEq`/`Debug`
+
+```text
+error[E0369]: binary operation `==` cannot be applied to type `Account`
+error[E0277]: `Account` doesn't implement `Debug`
+```
+
+**Fix:** derive them on the type you assert over: `#[derive(Debug, PartialEq)]`.
+`assert_eq!` needs `PartialEq` to compare and `Debug` to print on failure.
+
+### 3. Relying on test order
+
+Tests run **in parallel, in an unspecified order**, by default. A test that
+depends on another having run first is a bug. Make each test set up its own state
+(as every test above does with a fresh `Account`).
+
+## Exercises
+
+<Interview question="Exercise 1 — Write a should_panic test.">
+
+Given `fn first(v: &[i32]) -> i32 { v[0] }`, write a test proving it panics on an
+empty slice, pinning the panic message.
+
+**Solution:**
+
+```rust
+fn first(v: &[i32]) -> i32 {
+    v[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn first_panics_on_empty() {
+        first(&[]);
+    }
+}
+```
+
+The real panic message is "index out of bounds: the len is 0 but the index is 0";
+`expected` only needs to be a substring.
+
+</Interview>
+
+<Interview question="Exercise 2 — Write a doc-test.">
+
+Add a documentation example to `fn double(n: i64) -> i64 { n * 2 }` that `cargo
+test` will run.
+
+**Solution:**
+
+```rust
+/// Doubles a number.
+///
+/// # Examples
+///
+/// ```
+/// # use mycrate::double;
+/// assert_eq!(double(21), 42);
+/// ```
+pub fn double(n: i64) -> i64 {
+    n * 2
+}
+```
+
+The `#` hides the `use` line from the rendered docs but still compiles it. (Rename
+`mycrate` to your crate's name.)
+
+</Interview>
+
+<Interview question="Exercise 3 — Test a Result-returning function two ways.">
+
+For `fn parse_port(s: &str) -> Result<u16, std::num::ParseIntError> { s.parse() }`,
+write one test for the Ok case and one for the Err case.
+
+**Solution:**
+
+```rust
+fn parse_port(s: &str) -> Result<u16, std::num::ParseIntError> {
+    s.parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_port() {
+        assert_eq!(parse_port("8080"), Ok(8080));
+    }
+
+    #[test]
+    fn rejects_non_numeric() {
+        assert!(parse_port("nope").is_err());
+    }
+}
+```
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| One behaviour per test, descriptive name | One giant test asserting twenty things |
+| Fresh state per test (no shared mutable globals) | Tests that depend on run order |
+| Doc-tests on every public function | Examples in prose that were never compiled |
+| `#[should_panic(expected=...)]` with a message | Bare `#[should_panic]` that hides which panic |
+| Integration tests for the public contract | Only unit tests; the seams go untested |
+| Assert the *observable* result | Assert private implementation details |
+
+## Mini-project
+
+**Test-drive a `Stack<T>`.** Write a generic `Stack<T>` with `push`, `pop`
+(returns `Option<T>`), `peek`, `len`, and `is_empty`. Before/while writing it,
+add:
+
+- Unit tests for push/pop/peek on an empty and a non-empty stack.
+- A doc-test on `push` showing a small example.
+- An integration test in `tests/` exercising a realistic sequence.
+
+Requirements: all tests pass with `cargo test`, `cargo clippy` clean, and at
+least one test that returns `Result` or uses `#[should_panic]`.
+
+## Interview questions
+
+<Interview question="What is the difference between unit and integration tests in Rust?">
+
+Unit tests live inside the crate (in a `#[cfg(test)] mod tests`) and can access
+private items; they test small pieces in isolation. Integration tests live in the
+`tests/` directory, are each compiled as a separate crate, and can only use the
+public API — so they verify the library as an external consumer sees it. Both run
+under `cargo test`.
+
+</Interview>
+
+<Interview question="What are doc-tests and why are they valuable?">
+
+Doc-tests are code examples inside `///` documentation comments that `cargo test`
+compiles and runs. They are valuable because they make documentation
+*executable*: an example that drifts from the code fails the build, so users can
+trust that the snippets in the docs actually work. They double as both
+documentation and regression tests.
+
+</Interview>
+
+<Interview question="How do you test that a function panics?">
+
+Annotate the test with `#[should_panic]`, optionally `#[should_panic(expected =
+"substring")]` to require the panic message contain a specific substring. The
+test passes only if the body panics (and, with `expected`, panics with the right
+message). For recoverable errors, prefer returning `Result` and asserting on
+`Err` rather than panicking.
+
+</Interview>
+
+<Interview question="Why do Rust tests run in parallel, and when would you disable it?">
+
+Cargo runs tests on multiple threads by default for speed. This is safe as long
+as tests don't share mutable state. Disable it with `cargo test --
+--test-threads=1` when tests touch a shared resource that isn't synchronised — a
+file, an environment variable, a fixed network port — or when you need
+deterministic ordering to debug an interaction.
+
+</Interview>
+
+## Challenge
+
+Take a function you wrote in an earlier lesson (a parser, `first_adult`,
+`sum_of_even_squares`) and get it to **100% behavioural coverage**: one test per
+branch, per error variant, and per boundary (empty input, single element, the
+overflow edge). Then deliberately introduce a bug and confirm a test catches it.
+The goal isn't a coverage number — it's the habit of asking "what input would
+break this?" for every line you write.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 11 — [“Writing Automated Tests”](https://doc.rust-lang.org/book/ch11-00-testing.html)
+- *Rust by Example* — [testing](https://doc.rust-lang.org/rust-by-example/testing.html)
+- `rustdoc` book — [documentation tests](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html)
+- Cargo book — [`cargo test`](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
+
+<Progress />

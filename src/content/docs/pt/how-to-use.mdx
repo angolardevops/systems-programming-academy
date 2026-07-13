@@ -1,0 +1,65 @@
+---
+title: Como usar esta Academia
+description: Funcionalidades da plataforma — pesquisa, progresso, modo escuro, correr o código e uso offline.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Esta página é um passeio rápido pelas funcionalidades para tirar o máximo de
+cada lição.
+
+## Funcionalidades de leitura
+
+- **Pesquisa** — carregue em <kbd>/</kbd> (ou clique na caixa) para pesquisar todas as lições. Funciona offline depois de o site ser construído.
+- **Modo escuro / claro** — no topo. Diagramas e código mudam de tema automaticamente.
+- **Troca de idioma** — English ⇄ Português, canto superior direito. A sua escolha é memorizada.
+- **Tempo de leitura & dificuldade** — indicados no topo de cada lição.
+- **Registo de progresso** — clique em *Marcar lição como concluída* no fim. O progresso fica guardado localmente no seu navegador (sem conta, sem servidor).
+
+<Aside type="note" title="Privacidade">
+  O progresso e os marcadores ficam no `localStorage` do navegador. Nada é
+  enviado para lado nenhum. Limpar os dados do site apaga o progresso.
+</Aside>
+
+## Correr o código
+
+O código de cada lição vive num projeto real e compilável em `examples/`. Para
+correr o código da lição de ownership em Rust:
+
+<Steps>
+
+1. Instale a toolchain da linguagem (por exemplo [rustup](https://rustup.rs) para Rust).
+
+2. Clone o repositório e entre no exemplo:
+
+   ```bash
+   git clone https://github.com/angolardevops/systems-programming-academy
+   cd systems-programming-academy/academy/examples/rust-ownership
+   ```
+
+3. Corra os testes — o mesmo comando que o nosso CI corre:
+
+   ```bash
+   cargo test
+   ```
+
+4. Corra o benchmark para reproduzir os números da lição:
+
+   ```bash
+   cargo run --release --bin bench
+   ```
+
+</Steps>
+
+## Elementos interativos
+
+- **Botões de copiar** em cada bloco de código (passe o rato no canto superior direito).
+- **Quizzes** dão feedback imediato e uma explicação.
+- **Perguntas de entrevista** são recolhíveis — pense primeiro, revele depois.
+- **Diagramas** são desenhados com Mermaid e seguem o seu tema claro/escuro.
+
+## Uso offline
+
+O site é uma build estática. Depois de o visitar uma vez (ou de o construir com
+`npm run build`), a pesquisa e todas as páginas funcionam sem ligação à rede —
+útil num avião ou numa sala de aula com Wi-Fi fraco.

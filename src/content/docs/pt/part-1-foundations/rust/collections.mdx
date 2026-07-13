@@ -1,0 +1,481 @@
+---
+title: "Rust: Coleções e Iteradores"
+description: Vec, HashMap e String, e os adaptadores de iterador preguiçosos que os tornam ergonómicos e de custo zero — com exemplos completos e testados e um benchmark que prova que as cadeias de iteradores rivalizam com ciclos escritos à mão.
+difficulty: beginner
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Benchmark from '../../../../../components/Benchmark.astro';
+import Interview from '../../../../../components/Interview.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={30} languages={["rust"]} />
+
+Noventa por cento do Rust do dia-a-dia toca em três coleções — um array
+crescível (`Vec<T>`), um mapa de hash (`HashMap<K, V>`) e uma string possuída
+(`String`) — conduzidas por **iteradores**: pipelines preguiçosos e componíveis
+que se leem como uma frase e compilam para código tão rápido como um ciclo
+escrito à mão. Esta lição torna ambas as metades concretas, com programas que
+pode correr sem alterações.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve conhecer `struct`, funções e os básicos de borrowing de
+  [Ownership](/systems-programming-academy/pt/part-1-foundations/rust/ownership/). As closures (`|x| x + 1`)
+  aparecem ao longo do texto e são introduzidas à medida que surgem.
+</Aside>
+
+Todo o código vem do crate testado
+[`examples/rust-collections/`](https://github.com/angolardevops/systems-programming-academy)
+(7 testes, `cargo clippy` limpo). Cada bloco é **completo**: ou tem o seu próprio
+`fn main`, ou é um item inteiro que pode colar num ficheiro.
+
+## As três coleções num relance
+
+| Coleção | Usa-se para | Operações-chave |
+| --- | --- | --- |
+| `Vec<T>` | Uma lista ordenada e crescível | `push`, `pop`, índice `v[i]`, `iter` |
+| `HashMap<K, V>` | Pesquisa chave → valor | `insert`, `get`, `entry` |
+| `String` | Texto UTF-8 possuído e crescível | `push_str`, `+`, `format!`, `chars` |
+
+`Vec` e `String` são donos de um buffer no heap com um comprimento e uma
+capacidade; ultrapassar a capacidade realoca (O(1) amortizado). `HashMap` dá
+pesquisa média O(1).
+
+## Um programa completo: `Vec` e `String`
+
+```rust title="main.rs — completo, executável"
+fn main() {
+    // Construir um Vec e fazê-lo crescer.
+    let mut nums: Vec<i32> = Vec::new();
+    for i in 1..=5 {
+        nums.push(i);
+    }
+    nums.push(6);
+    println!("nums = {nums:?}");        // nums = [1, 2, 3, 4, 5, 6]
+    println!("len = {}", nums.len());   // len = 6
+    println!("first = {:?}", nums.first()); // first = Some(1)
+
+    // Construir uma String a partir de pedaços.
+    let mut greeting = String::from("Hello");
+    greeting.push_str(", world");
+    greeting.push('!');
+    let shout = format!("{greeting} ({} chars)", greeting.chars().count());
+    println!("{shout}"); // Hello, world! (13 chars)
+}
+```
+
+<Aside type="caution" title="Indexar pode entrar em pânico">
+  `nums[10]` num vetor de 6 elementos **entra em pânico** com "index out of
+  bounds". Quando um índice pode ser inválido, prefira `nums.get(10)` que devolve
+  `Option<&T>` — o compilador obriga-o então a tratar o caso `None`.
+</Aside>
+
+## Iteradores: pipelines preguiçosos
+
+Um iterador produz itens um de cada vez. **Adaptadores** como `map` e `filter` são
+*preguiçosos* — constroem uma descrição do trabalho e não fazem nada até um
+**consumidor** como `sum`, `collect` ou um ciclo `for` os conduzir.
+
+<Mermaid title="Um pipeline preguiçoso corre numa única passagem" code={`flowchart LR
+  S["fonte: &[1,2,3,4,5,6]"] --> F["filter: manter pares"]
+  F --> M["map: elevar ao quadrado"]
+  M --> C["consumidor: sum -> 56"]`} />
+
+```rust title="src/lib.rs"
+pub fn sum_of_even_squares(nums: &[i64]) -> i64 {
+    nums.iter()
+        .filter(|&&n| n % 2 == 0) // preguiçoso: ainda não corre nada
+        .map(|&n| n * n)          // ainda preguiçoso
+        .sum()                    // consumidor: agora o pipeline corre, uma vez
+}
+```
+
+Aqui está o kit completo num programa executável:
+
+```rust title="main.rs — completo, executável"
+fn main() {
+    let nums = [1, 2, 3, 4, 5, 6];
+
+    // map + filter + collect para um novo Vec
+    let even_squares: Vec<i32> = nums.iter().filter(|&&n| n % 2 == 0).map(|n| n * n).collect();
+    println!("even squares: {even_squares:?}"); // [4, 16, 36]
+
+    // fold: acumular num único valor (aqui, um produto)
+    let product: i32 = nums.iter().fold(1, |acc, &n| acc * n);
+    println!("product: {product}"); // 720
+
+    // enumerate: emparelhar cada item com o seu índice
+    for (i, n) in nums.iter().enumerate().take(2) {
+        println!("index {i} -> {n}");
+    }
+
+    // zip: juntar dois iteradores
+    let letters = ['a', 'b', 'c'];
+    let paired: Vec<(char, i32)> = letters.iter().copied().zip(nums.iter().copied()).collect();
+    println!("paired: {paired:?}"); // [('a', 1), ('b', 2), ('c', 3)]
+
+    // any / all / count
+    println!("any > 5? {}", nums.iter().any(|&n| n > 5)); // true
+    println!("all > 0? {}", nums.iter().all(|&n| n > 0)); // true
+}
+```
+
+Saída:
+
+```text
+even squares: [4, 16, 36]
+product: 720
+index 0 -> 1
+index 1 -> 2
+paired: [('a', 1), ('b', 2), ('c', 3)]
+any > 5? true
+all > 0? true
+```
+
+## `HashMap` e a entry API
+
+O padrão de `HashMap` mais útil é **obter-ou-criar-e-atualizar**, feito numa só
+pesquisa com `entry`. O exemplo clássico é contar palavras:
+
+```rust title="src/lib.rs"
+use std::collections::HashMap;
+
+pub fn word_count(text: &str) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for raw in text.split_whitespace() {
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if word.is_empty() {
+            continue;
+        }
+        // entry(word).or_insert(0) devolve &mut para a contagem, criando-a a 0
+        // na primeira vez. O * desreferencia para podermos somar.
+        *counts.entry(word).or_insert(0) += 1;
+    }
+    counts
+}
+```
+
+Um programa completo que o usa:
+
+```rust title="main.rs — completo, executável"
+use std::collections::HashMap;
+
+fn main() {
+    let text = "the cat sat on the mat the cat purred";
+    let mut counts: HashMap<&str, i32> = HashMap::new();
+    for word in text.split_whitespace() {
+        *counts.entry(word).or_insert(0) += 1;
+    }
+
+    // Ordenar para saída determinística (a ordem de iteração do HashMap não é garantida).
+    let mut pairs: Vec<(&&str, &i32)> = counts.iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (word, count) in pairs {
+        println!("{word}: {count}");
+    }
+}
+```
+
+Saída:
+
+```text
+the: 3
+cat: 2
+mat: 1
+on: 1
+purred: 1
+sat: 1
+```
+
+<Quiz
+  question="Porque é que `for word in map { ... }` às vezes imprime as entradas em ordem diferente a cada execução?"
+  options={[
+    { text: "É um bug no seu código." },
+    { text: "A ordem de iteração do HashMap é intencionalmente não especificada (e aleatória, para resistir a DoS).", correct: true },
+    { text: "O HashMap ordena sempre por chave, por isso não devia mudar." },
+    { text: "Só se o mapa tiver mais de 8 entradas." },
+  ]}
+  explanation="`HashMap` não dá garantia de ordem, e o hasher default do Rust é semeado aleatoriamente por processo para resistir a ataques de hash-flooding. Se precisa de ordem estável, recolha para um Vec e ordene, ou use um BTreeMap (ordenado por chave)."
+/>
+
+## Desempenho: iteradores são de custo zero
+
+Uma cadeia preguiçosa de iteradores compila essencialmente para o mesmo código
+máquina que um ciclo escrito à mão — a famosa "abstração de custo zero". O
+binário `examples/rust-collections/src/bin/iterbench.rs` calcula a soma dos
+quadrados dos pares sobre 10.000 elementos de três formas. Números reais de
+`cargo run --release --bin iterbench`:
+
+<Benchmark
+  metric="Tempo por iteração (menos é melhor)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Ciclo com índice (manual)", value: 4195, unit: "ns", note: "baseline" },
+    { label: "Cadeia de iteradores", value: 4500, unit: "ns", note: "uma passagem, sem alloc" },
+    { label: "collect() intermédio", value: 6461, unit: "ns", note: "alloc + passagem extra" },
+  ]}
+/>
+
+A cadeia e o ciclo à mão estão dentro do ruído um do outro. Materializar um `Vec`
+intermédio entre passos, porém, paga uma alocação no heap e uma segunda passagem
+— a única coisa a evitar.
+
+<Aside type="tip" title="Regra prática">
+  Encadeie adaptadores à vontade e faça `collect` **uma vez** no fim. Cada
+  `collect()` extra no meio de um pipeline é uma alocação que provavelmente não
+  precisa. Prefira `iter()` (empresta) a `into_iter()` (consome) a menos que
+  queira mesmo tomar posse dos elementos.
+</Aside>
+
+## Erros comuns & depuração
+
+### 1. Mutar uma coleção enquanto a itera
+
+```rust
+fn main() {
+    let mut v = vec![1, 2, 3];
+    for x in &v {
+        v.push(*x); // ✗ não pode emprestar `v` como mutável enquanto a itera
+    }
+}
+```
+
+```text
+error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable
+```
+
+**Correção:** recolha primeiro o que quer acrescentar, depois estenda — ou use
+índices. O borrow checker está a evitar a invalidação de iteradores, uma fonte
+clássica de bugs noutras linguagens.
+
+```rust
+fn main() {
+    let mut v = vec![1, 2, 3];
+    let doubled: Vec<i32> = v.iter().map(|x| x * 2).collect();
+    v.extend(doubled);
+    println!("{v:?}"); // [1, 2, 3, 2, 4, 6]
+}
+```
+
+### 2. O `collect` precisa de saber o tipo alvo
+
+```rust
+fn main() {
+    let squares = (1..=3).map(|n| n * n).collect(); // ✗ collect para O QUÊ?
+    println!("{squares:?}");
+}
+```
+
+```text
+error[E0283]: type annotations needed
+  = note: cannot infer type for type parameter `B` declared on the associated function `collect`
+```
+
+**Correção:** anote a ligação ou use o turbofish para o `collect` saber o alvo:
+
+```rust
+fn main() {
+    let squares: Vec<i32> = (1..=3).map(|n| n * n).collect();
+    // ou: let squares = (1..=3).map(|n| n * n).collect::<Vec<i32>>();
+    println!("{squares:?}"); // [1, 4, 9]
+}
+```
+
+### 3. Aceder a um índice que não existe
+
+```rust
+fn main() {
+    let v = vec![10, 20];
+    println!("{}", v[5]); // ✗ pânico em runtime
+}
+```
+
+```text
+thread 'main' panicked at src/main.rs:3:20:
+index out of bounds: the len is 2 but the index is 5
+```
+
+**Correção:** use `v.get(5)` que devolve `Option<&T>`, e trate o `None` — sem pânico.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Somar apenas os números positivos.">
+
+Escreva `sum_positive(nums: &[i64]) -> i64` usando uma cadeia de iteradores (sem
+ciclo manual). Forneça um `fn main` completo.
+
+**Solução — completa, executável:**
+
+```rust
+fn sum_positive(nums: &[i64]) -> i64 {
+    nums.iter().filter(|&&n| n > 0).sum()
+}
+
+fn main() {
+    println!("{}", sum_positive(&[-3, 4, -1, 10, 0])); // 14
+    println!("{}", sum_positive(&[-1, -2]));            // 0
+}
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Inverter um HashMap de palavra -> contagem para contagem -> palavras.">
+
+Dadas as contagens, produza um mapa de cada contagem para a lista ordenada de
+palavras com essa contagem.
+
+**Solução — completa, executável:**
+
+```rust
+use std::collections::HashMap;
+
+fn invert(counts: &HashMap<String, i32>) -> HashMap<i32, Vec<String>> {
+    let mut out: HashMap<i32, Vec<String>> = HashMap::new();
+    for (word, &count) in counts {
+        out.entry(count).or_default().push(word.clone());
+    }
+    for words in out.values_mut() {
+        words.sort();
+    }
+    out
+}
+
+fn main() {
+    let mut counts = HashMap::new();
+    counts.insert("a".to_string(), 2);
+    counts.insert("b".to_string(), 1);
+    counts.insert("c".to_string(), 2);
+    let inv = invert(&counts);
+    println!("{:?}", inv.get(&2)); // Some(["a", "c"])
+    println!("{:?}", inv.get(&1)); // Some(["b"])
+}
+```
+
+`or_default()` insere um `Vec` vazio na primeira vez que uma contagem aparece — a
+entry API de novo, desta vez a criar uma lista crescível.
+
+</Interview>
+
+<Interview question="Exercício 3 — Encontrar a palavra mais longa com iteradores.">
+
+Escreva `longest(text: &str) -> Option<&str>` que devolve a palavra mais longa
+(separada por espaços), usando `max_by_key`. `fn main` completo.
+
+**Solução — completa, executável:**
+
+```rust
+fn longest(text: &str) -> Option<&str> {
+    text.split_whitespace().max_by_key(|w| w.len())
+}
+
+fn main() {
+    println!("{:?}", longest("the quick brown fox jumped")); // Some("jumped")
+    println!("{:?}", longest(""));                            // None
+}
+```
+
+Dois pontos a reter. `longest` devolve `&str` emprestado de `text` — sem alocação,
+ligando de volta à lição de ownership. E atenção aos empates: quando várias
+palavras partilham o comprimento máximo, o `max_by_key` devolve a **última**, não
+a primeira (comportamento documentado da std) — use `min_by_key`/um fold manual
+se precisar da primeira.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Encadear adaptadores, `collect` uma vez no fim | `collect()` entre cada passo |
+| `entry(k).or_insert(..)` para obter-ou-criar | `get` + `contains_key` + `insert` (três pesquisas) |
+| `v.get(i)` quando o índice pode ser inválido | `v[i]` e torcer para nunca entrar em pânico |
+| `iter()` para emprestar; `into_iter()` para consumir | `clone()` da coleção toda só para a iterar |
+| `BTreeMap` quando precisa de chaves ordenadas | Ordenar as entradas de um `HashMap` a cada leitura |
+| `String` para texto possuído, `&str` para emprestado | Receber `String` em parâmetros que só lê |
+
+## Mini-projeto
+
+**Construa um sumarizador de colunas CSV.** Dado um `&str` de linhas separadas por
+vírgulas (a primeira é o cabeçalho), faça parsing para `Vec<HashMap<String,
+String>>` (um mapa por linha, cabeçalho → célula). Depois escreva:
+
+- `column(rows, name) -> Vec<&str>` a devolver os valores dessa coluna.
+- `numeric_summary(values) -> Option<(f64, f64, f64)>` a devolver (mín, máx, média)
+  dos valores que fazem parse como `f64`, ou `None` se nenhum fizer.
+
+Requisitos:
+
+- Usa `Vec`, `HashMap` e adaptadores de iterador (`filter_map`, `collect`).
+- Pelo menos quatro casos `#[test]`, incluindo uma coluna vazia.
+- `cargo clippy` limpo, e um `fn main` que imprime um sumário de uma tabela exemplo.
+
+Isto liga as três coleções mais o kit de iteradores e o tratamento de
+`Option`/`Result` de lições anteriores.
+
+## Perguntas de entrevista
+
+<Interview question="O que significa 'preguiçoso' para os adaptadores de iterador, e porque importa?">
+
+Adaptadores como `map`, `filter` e `take` não fazem trabalho quando chamados —
+devolvem um novo iterador que *descreve* a transformação. Nada corre até um
+consumidor (`for`, `sum`, `collect`, `count`, …) puxar os itens. A preguiça
+permite compor pipelines longos que ainda correm numa única passagem sem coleções
+intermédias, e torna utilizáveis os iteradores infinitos (como `(0..)`) desde que
+algo os limite (`take(n)`).
+
+</Interview>
+
+<Interview question="Quando escolheria um BTreeMap em vez de um HashMap?">
+
+Use `HashMap` para o caso comum: pesquisa média O(1), sem necessidade de ordem.
+Use `BTreeMap` quando precisa das chaves **ordenadas** — para iterar por ordem,
+procurar intervalos (`range(a..b)`), ou obter a chave mínima/máxima barato. O
+`BTreeMap` tem operações O(log n) e sem hashing aleatório, por isso a sua ordem de
+iteração é determinística.
+
+</Interview>
+
+<Interview question="Qual a diferença entre iter(), iter_mut() e into_iter()?">
+
+`iter()` produz referências partilhadas `&T` (empresta a coleção, deixa-a
+intacta). `iter_mut()` produz referências mutáveis `&mut T` (empresta como mutável
+para alterar elementos no lugar). `into_iter()` consome a coleção e produz valores
+possuídos `T`. Escolha conforme queira ler, mutar ou tomar posse dos elementos.
+
+</Interview>
+
+<Interview question="Porque é que indexar uma String por inteiro não compila em Rust?">
+
+Uma `String` é UTF-8, onde um "caractere" pode ocupar vários bytes, por isso
+`s[3]` não tem um significado único, barato e correto — o byte 3 pode cair no meio
+de um caractere. O Rust proíbe `s[i]` e oferece escolhas explícitas:
+`s.chars().nth(i)` para o i-ésimo escalar Unicode, `s.bytes()` para bytes crus, ou
+slicing por um intervalo de bytes conhecido `&s[0..4]`. Troca conveniência por
+correção.
+
+</Interview>
+
+## Desafio
+
+Pegue num ficheiro de texto que tenha (um log, um livro, um CSV) e escreva um
+pequeno programa que reporte as 10 palavras mais frequentes, o comprimento médio
+das linhas e o número de palavras únicas — usando apenas `Vec`,
+`HashMap`/`BTreeMap` e cadeias de iteradores, sem ciclos de índice manuais. Depois
+passe-o pelo `cargo clippy` e aceite cada sugestão: é provável que aprenda um
+adaptador que não sabia que existia (`filter_map`, `flat_map`, `dedup_by_key`, …).
+Esse ciclo de feedback é a forma mais rápida de interiorizar o vocabulário dos
+iteradores.
+
+## Referências & leitura adicional
+
+- *The Rust Programming Language* (o Livro), cap. 8 — [“Common Collections”](https://doc.rust-lang.org/book/ch08-00-common-collections.html)
+- *The Rust Programming Language* (o Livro), cap. 13 — [iteradores e closures](https://doc.rust-lang.org/book/ch13-00-functional-features.html)
+- `std::iter::Iterator` — [a lista completa de adaptadores](https://doc.rust-lang.org/std/iter/trait.Iterator.html)
+- `std::collections` — [escolher uma coleção](https://doc.rust-lang.org/std/collections/index.html)
+
+<Progress />

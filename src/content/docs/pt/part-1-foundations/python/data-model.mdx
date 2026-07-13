@@ -1,0 +1,389 @@
+---
+title: "Python: O Modelo de Dados"
+description: Os métodos dunder são como os seus objetos encaixam na sintaxe do Python — len(), indexação, iteração, aritmética, repr. Implemente __len__/__getitem__/__repr__/__eq__/__add__ e a linguagem funciona também para os seus tipos. Exemplos completos e testados.
+difficulty: intermediate
+estimatedMinutes: 30
+languages: [python]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
+import Quiz from '../../../../../components/Quiz.astro';
+import Interview from '../../../../../components/Interview.astro';
+import LessonMeta from '../../../../../components/LessonMeta.astro';
+import Progress from '../../../../../components/Progress.astro';
+
+<LessonMeta difficulty="intermediate" minutes={30} languages={["python"]} />
+
+O segredo da elegância do Python é o **modelo de dados**: um conjunto de métodos
+especiais, escritos com duplo underscore (`__len__`, `__getitem__`, `__repr__`,
+`__add__`… — "dunders"), que o interpretador chama por si. Nunca chama
+`obj.__len__()`; escreve `len(obj)` e o Python chama-o por si. Implemente os
+dunders certos e os seus objetos suportam `len()`, indexação, slicing, iteração,
+`in`, aritmética e impressão limpa — com a *mesma sintaxe dos tipos embutidos*. É
+isto que os Pythonistas querem dizer com "Pythonic". Esta lição torna-o concreto.
+
+<Aside type="note" title="Pré-requisitos">
+  Deve conhecer classes Python (`class`, `__init__`, `self`) e built-ins básicos
+  (`len`, `for`, `in`). Tudo sobre métodos dunder é construído aqui.
+</Aside>
+
+Todo o código vem do módulo testado
+[`examples/py-datamodel/`](https://github.com/angolardevops/systems-programming-academy)
+(`python3 -m unittest` verde — 13 testes incluindo doctests — `ruff` limpo). Cada
+bloco é **completo**: um programa executável, ou uma classe inteira que pode colar.
+
+## Dois métodos fazem uma sequência
+
+Implemente apenas `__len__` e `__getitem__`, e o seu objeto torna-se uma sequência
+completa — `len()`, indexação, slicing, iteração, `in` e `reversed()` funcionam
+todos, nenhum dos quais escreveu.
+
+```python title="main.py — completo, executável"
+from collections import namedtuple
+
+Card = namedtuple("Card", ["rank", "suit"])
+
+
+class FrenchDeck:
+    ranks = [str(n) for n in range(2, 11)] + list("JQKA")
+    suits = ["spades", "diamonds", "clubs", "hearts"]
+
+    def __init__(self):
+        self._cards = [Card(rank, suit) for suit in self.suits for rank in self.ranks]
+
+    def __len__(self):
+        return len(self._cards)
+
+    def __getitem__(self, position):
+        return self._cards[position]
+
+
+deck = FrenchDeck()
+print(len(deck))                    # 52
+print(deck[0])                      # Card(rank='2', suit='spades')
+print(deck[-1])                     # Card(rank='A', suit='hearts')
+print(Card("Q", "hearts") in deck)  # True   (in funciona via iteração)
+print(deck[:2])                     # as duas primeiras cartas (slicing também funciona)
+```
+
+Saída:
+
+```text
+52
+Card(rank='2', suit='spades')
+Card(rank='A', suit='hearts')
+True
+[Card(rank='2', suit='spades'), Card(rank='3', suit='spades')]
+```
+
+<Mermaid title="A sintaxe embutida despacha para os seus métodos dunder" code={`flowchart LR
+  A["len(deck)"] --> B["deck.__len__()"]
+  C["deck[0]"] --> D["deck.__getitem__(0)"]
+  E["card in deck"] --> F["itera via __getitem__"]
+  G["for c in deck"] --> F`} />
+
+<Aside type="tip" title="Raramente chama os dunders diretamente">
+  Escreva `len(x)`, não `x.__len__()`; `x + y`, não `x.__add__(y)`; `repr(x)`, não
+  `x.__repr__()`. O interpretador mapeia a sintaxe para o dunder. Defini-los é como
+  *adere* a essa sintaxe; chamá-los diretamente é um code smell.
+</Aside>
+
+## Aritmética e representação
+
+Um tipo numérico exibe os dunders de operador e de exibição. `__repr__` dá uma
+string inequívoca e idealmente parecida com código-fonte; `__add__`/`__mul__`
+alimentam `+` e `*`; `__eq__` alimenta `==`; `__bool__` decide a veracidade.
+
+```python title="main.py — completo, executável"
+import math
+
+
+class Vector:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def __repr__(self):
+        return f"Vector({self.x!r}, {self.y!r})"
+
+    def __eq__(self, other):
+        if not isinstance(other, Vector):
+            return NotImplemented
+        return (self.x, self.y) == (other.x, other.y)
+
+    def __abs__(self):
+        return math.hypot(self.x, self.y)
+
+    def __bool__(self):
+        return bool(abs(self))
+
+    def __add__(self, other):
+        return Vector(self.x + other.x, self.y + other.y)
+
+    def __mul__(self, scalar):
+        return Vector(self.x * scalar, self.y * scalar)
+
+
+print(Vector(3, 4))                  # Vector(3, 4)      (via __repr__)
+print(abs(Vector(3, 4)))             # 5.0
+print(Vector(1, 2) + Vector(2, 4))   # Vector(3, 6)
+print(Vector(2, 3) * 3)              # Vector(6, 9)
+print(bool(Vector(0, 0)))            # False
+print(Vector(1, 2) == Vector(1, 2))  # True
+```
+
+Saída:
+
+```text
+Vector(3, 4)
+5.0
+Vector(3, 6)
+Vector(6, 9)
+False
+True
+```
+
+## `__repr__` vs `__str__`
+
+`__repr__` é para programadores — inequívoco, mostrado no REPL e pelo `repr()`.
+`__str__` é para utilizadores finais — legível, usado por `print()` e `str()`. Se
+só definir um, faça-o `__repr__` (é o fallback do `__str__`).
+
+```python title="main.py — completo, executável"
+class Temperature:
+    def __init__(self, celsius):
+        self.celsius = celsius
+
+    def __repr__(self):
+        return f"Temperature(celsius={self.celsius!r})"
+
+    def __str__(self):
+        return f"{self.celsius}°C"
+
+
+t = Temperature(21)
+print(str(t))   # 21°C            (amigável para humanos)
+print(repr(t))  # Temperature(celsius=21)   (inequívoco)
+print(t)        # 21°C            (print usa __str__)
+```
+
+Saída:
+
+```text
+21°C
+Temperature(celsius=21)
+21°C
+```
+
+<Quiz
+  question={'Implementa apenas __len__ e __getitem__ numa classe. Qual destes NÃO funciona automaticamente?'}
+  options={[
+    { text: "Iterar com um ciclo for.", },
+    { text: "O teste de pertença in.", },
+    { text: "Adição in-place com += (__iadd__).", correct: true },
+    { text: "Slicing com obj[1:3].", },
+  ]}
+  explanation="O __getitem__ sozinho dá-lhe iteração, `in` e slicing (o Python recorre a ele para os três), e o __len__ dá o len(). Mas o += precisa do seu próprio dunder (__iadd__, ou __add__ mais rebinding); não é derivado de __len__/__getitem__. Cada pedaço de sintaxe mapeia para métodos especiais específicos."
+/>
+
+## Erros comuns & depuração
+
+### 1. Definir `__eq__` mas esquecer `__hash__`
+
+```python
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+    def __eq__(self, other):
+        return (self.x, self.y) == (other.x, other.y)
+
+# Point() é agora NÃO-HASHÁVEL — não pode ser chave de dict nem membro de set:
+# {Point(1, 2)}  ->  TypeError: unhashable type: 'Point'
+```
+
+Definir `__eq__` põe `__hash__` a `None`. **Correção:** se as instâncias forem
+imutáveis e devem ser hasháveis, defina também `__hash__` (p. ex. `return
+hash((self.x, self.y))`), ou use `@dataclass(frozen=True)` que faz ambos por si.
+
+### 2. Devolver `False` em vez de `NotImplemented`
+
+No `__eq__`, quando o outro operando é de um tipo inesperado, devolva
+`NotImplemented` (não `False`). Isto deixa o Python tentar a operação refletida e
+mantém as comparações simétricas. Devolver `False` pode fazer `a == b` e `b == a`
+discordarem.
+
+### 3. Um `__repr__` enganador
+
+O `__repr__` deve ser inequívoco e, onde prático, parecer o código que recria o
+objeto (`Vector(3, 4)`). Um vago `<Vector object>` desperdiça a melhor ferramenta
+de depuração que tem. Use `!r` na f-string para dar repr aos campos.
+
+## Exercícios
+
+<Interview question="Exercício 1 — Tornar uma classe imprimível e comparável.">
+
+Dê a uma classe `Money` um bom `__repr__` e `__eq__`. Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+class Money:
+    def __init__(self, cents):
+        self.cents = cents
+
+    def __repr__(self):
+        return f"Money(cents={self.cents!r})"
+
+    def __eq__(self, other):
+        if not isinstance(other, Money):
+            return NotImplemented
+        return self.cents == other.cents
+
+
+print(Money(500))                 # Money(cents=500)
+print(Money(500) == Money(500))   # True
+print(Money(500) == Money(499))   # False
+```
+
+</Interview>
+
+<Interview question="Exercício 2 — Adicionar suporte para o operador +.">
+
+Dê ao `Money` um `__add__` para `Money(500) + Money(250)` funcionar. Programa
+completo.
+
+**Solução — completa, executável:**
+
+```python
+class Money:
+    def __init__(self, cents):
+        self.cents = cents
+
+    def __repr__(self):
+        return f"Money(cents={self.cents!r})"
+
+    def __add__(self, other):
+        return Money(self.cents + other.cents)
+
+
+print(Money(500) + Money(250))  # Money(cents=750)
+```
+
+</Interview>
+
+<Interview question="Exercício 3 — Tornar um objeto iterável via __getitem__.">
+
+Escreva uma `Playlist` que envolve uma lista de músicas e suporta iteração e `len`.
+Programa completo.
+
+**Solução — completa, executável:**
+
+```python
+class Playlist:
+    def __init__(self, songs):
+        self._songs = list(songs)
+
+    def __len__(self):
+        return len(self._songs)
+
+    def __getitem__(self, i):
+        return self._songs[i]
+
+
+pl = Playlist(["a", "b", "c"])
+print(len(pl))    # 3
+print(pl[1])      # b
+print("c" in pl)  # True
+print(list(pl))   # ['a', 'b', 'c']
+```
+
+Iteração, `in` e slicing vêm todos do único `__getitem__`.
+
+</Interview>
+
+## Boas práticas vs anti-padrões
+
+| ✅ Boa prática | ❌ Anti-padrão |
+| --- | --- |
+| Escrever `len(x)` / `x + y`; deixar o dispatch acontecer | Chamar `x.__len__()` / `x.__add__(y)` diretamente |
+| `__repr__` inequívoco (parece código-fonte) | Deixar o default `<Foo object at 0x...>` |
+| Devolver `NotImplemented` para tipos de operando desconhecidos | Devolver `False`/levantar exceção no `__eq__` |
+| Definir `__hash__` quando define `__eq__` (se hashável) | `__eq__` sozinho, quebrando o hashing em silêncio |
+| `@dataclass` para simples portadores de dados | Escrever à mão o boilerplate de `__init__`/`__repr__`/`__eq__` |
+| `__getitem__`/`__len__` para tipos tipo-sequência | Métodos próprios `.get_item()` / `.size()` |
+
+## Mini-projeto
+
+**Construa um `Vector` imutável com o protocolo numérico completo.** Estenda o
+`Vector` acima com `__sub__`, `__neg__`, `__eq__` + `__hash__` (torne-o hashável),
+`__iter__` (para `x, y = v` funcionar), e um `__mul__` escalar que também trate `3
+* v` via `__rmul__`. Acrescente doctests a cada método.
+
+Requisitos: `python3 -m unittest` verde (incluindo doctests), `ruff` limpo, e um
+`__repr__` que faz round-trip por `eval`.
+
+## Perguntas de entrevista
+
+<Interview question="O que são métodos dunder e porque os usa o Python?">
+
+Os métodos dunder ("double underscore") como `__len__`, `__getitem__`, `__add__` e
+`__repr__` são os ganchos do modelo de dados do Python. O interpretador chama-os em
+resposta a sintaxe e built-ins: `len(x)` chama `x.__len__()`, `a + b` chama
+`a.__add__(b)`, `x[i]` chama `x.__getitem__(i)`. Deixam os tipos definidos pelo
+utilizador integrar-se perfeitamente com os operadores e funções da linguagem, para
+os seus objetos se comportarem como built-ins. Implementa-os para aderir; raramente
+os chama diretamente.
+
+</Interview>
+
+<Interview question="Qual a diferença entre __repr__ e __str__?">
+
+O `__repr__` é para programadores: uma representação inequívoca, idealmente parecida
+com Python válido para recriar o objeto; é o que o REPL e o `repr()` mostram. O
+`__str__` é para utilizadores finais: uma string legível, possivelmente menos
+precisa, usada por `print()` e `str()`. Se o `__str__` estiver ausente, o Python
+recorre ao `__repr__`, por isso definir `__repr__` é a prioridade maior.
+
+</Interview>
+
+<Interview question="Porque pode definir __eq__ quebrar o uso dos seus objetos em sets ou dicts?">
+
+Quando define `__eq__`, o Python põe o `__hash__` da classe a `None`, tornando as
+instâncias não-hasháveis — por isso não podem ser chaves de dict nem membros de set
+(daria `TypeError: unhashable type`). Isto é deliberado: dois objetos iguais têm de
+ter o mesmo hash, e o Python não o pode garantir automaticamente. Se os seus objetos
+forem imutáveis e devem ser hasháveis, defina também `__hash__`, ou use um dataclass
+frozen.
+
+</Interview>
+
+<Interview question="O que faz devolver NotImplemented do __eq__ ou __add__?">
+
+Diz ao Python "não sei como tratar este tipo de operando", levando o interpretador a
+tentar o método refletido no outro operando (p. ex. `other.__radd__` ou
+`other.__eq__`), e se esse também recusar, a recorrer a um default (identidade para
+`==`, ou `TypeError` para aritmética). Isto mantém as operações simétricas e
+extensíveis. Note que `NotImplemented` (um singleton especial) é diferente de
+`NotImplementedError` (uma exceção).
+
+</Interview>
+
+## Desafio
+
+Pegue numa classe simples sua com um `__init__` escrito à mão e transforme-a num
+`@dataclass`, depois acrescente os dunders que a fazem sentir nativa: `__iter__`
+para unpacking, `__getitem__` se for tipo-sequência, métodos de comparação (ou
+`order=True`). Tente fazer `eval(repr(obj)) == obj` valer. Depois leia de volta o
+comportamento do objeto: que funções built-in agora "funcionam" que antes não? Essa
+lista — `len`, `iter`, `in`, `sorted`, `==`, f-strings — é a recompensa de falar o
+modelo de dados fluentemente.
+
+## Referências & leitura adicional
+
+- *Fluent Python* (Ramalho), cap. 1 — "The Python Data Model" (o exemplo FrenchDeck)
+- Docs do Python — [o modelo de dados / nomes de métodos especiais](https://docs.python.org/3/reference/datamodel.html#special-method-names)
+- Docs do Python — [`dataclasses`](https://docs.python.org/3/library/dataclasses.html)
+- Docs do Python — [`collections.namedtuple`](https://docs.python.org/3/library/collections.html#collections.namedtuple)
+
+<Progress />

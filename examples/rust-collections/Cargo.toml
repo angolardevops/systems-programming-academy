@@ -1,0 +1,20 @@
+[package]
+name = "collections"
+version = "0.1.0"
+edition = "2021"
+description = "Executable, tested companion code for the Academy lesson: Collections & Iterators (Vec, HashMap, String, iterator adapters)."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+# Dependency-free: compiles and tests offline with `cargo test`, and the
+# iterator micro-benchmark runs with `cargo run --release --bin iterbench`.
+
+[[bin]]
+name = "iterbench"
+path = "src/bin/iterbench.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

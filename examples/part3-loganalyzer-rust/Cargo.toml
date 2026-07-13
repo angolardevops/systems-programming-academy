@@ -1,0 +1,17 @@
+[package]
+name = "loganalyzer"
+version = "0.1.0"
+edition = "2021"
+description = "Log analyzer CLI (Rust) — Part 3 project."
+authors = ["Walter Angolar"]
+license = "MIT"
+
+[[bin]]
+name = "loganalyzer"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

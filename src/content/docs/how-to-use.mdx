@@ -1,0 +1,67 @@
+---
+title: How to use this Academy
+description: Features of the platform — search, progress tracking, dark mode, running the code, and offline use.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+This page is a quick tour of the platform features so you can get the most out
+of every lesson.
+
+## Reading features
+
+- **Search** — press <kbd>/</kbd> (or click the search box) to search every lesson.
+  Search works offline once the site is built.
+- **Dark / light mode** — toggle in the top bar. Diagrams and code re-theme automatically.
+- **Language switch** — English ⇄ Português, top-right. Your choice is remembered.
+- **Estimated reading time & difficulty** — shown at the top of every lesson.
+- **Progress tracking** — click *Mark lesson complete* at the end of a lesson. Progress
+  is stored locally in your browser (no account, no server).
+
+<Aside type="note" title="Privacy">
+  Progress and bookmarks are stored in your browser's `localStorage`. Nothing is
+  sent anywhere. Clearing site data resets your progress.
+</Aside>
+
+## Running the code
+
+Every lesson's code lives in a real, compilable project under `examples/`. To run
+the companion code for the Rust ownership lesson:
+
+<Steps>
+
+1. Install the toolchain for the language (e.g. [rustup](https://rustup.rs) for Rust).
+
+2. Clone the repository and enter the example:
+
+   ```bash
+   git clone https://github.com/angolardevops/systems-programming-academy
+   cd systems-programming-academy/academy/examples/rust-ownership
+   ```
+
+3. Run the tests — this is the same command our CI runs:
+
+   ```bash
+   cargo test
+   ```
+
+4. Run the benchmark to reproduce the numbers in the lesson:
+
+   ```bash
+   cargo run --release --bin bench
+   ```
+
+</Steps>
+
+## Interactive elements
+
+- **Copy buttons** appear on every code block (hover the top-right corner).
+- **Quizzes** give instant feedback and an explanation.
+- **Interview questions** are collapsible — think first, then reveal the answer.
+- **Diagrams** are rendered with Mermaid and follow your light/dark theme.
+
+## Offline use
+
+The site is a static build. After you have visited it once (or built it yourself
+with `npm run build`), search and all pages work with no network connection —
+useful on a plane or in a classroom with poor Wi-Fi.

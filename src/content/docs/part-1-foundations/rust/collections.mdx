@@ -1,0 +1,477 @@
+---
+title: "Rust: Collections & Iterators"
+description: Vec, HashMap and String, and the lazy iterator adapters that make them ergonomic and zero-cost — with complete, tested examples and a benchmark proving iterator chains rival hand-written loops.
+difficulty: beginner
+estimatedMinutes: 30
+languages: [rust]
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="beginner" minutes={30} languages={["rust"]} />
+
+Ninety percent of everyday Rust touches three collections — a growable array
+(`Vec<T>`), a hash map (`HashMap<K, V>`), and an owned string (`String`) — driven
+by **iterators**: lazy, composable pipelines that read like a sentence and
+compile down to code as fast as a hand-written loop. This lesson makes both
+halves concrete, with programs you can run unchanged.
+
+<Aside type="note" title="Prerequisites">
+  You should know `struct`, functions, and borrowing basics from
+  [Ownership](/systems-programming-academy/part-1-foundations/rust/ownership/). Closures (`|x| x + 1`) appear
+  throughout and are introduced as they arrive.
+</Aside>
+
+All code is from the tested crate
+[`examples/rust-collections/`](https://github.com/angolardevops/systems-programming-academy)
+(7 passing tests, clean `cargo clippy`). Every snippet is **complete**: it either
+has its own `fn main`, or is a whole item you can drop into a file.
+
+## The three collections at a glance
+
+| Collection | Use it for | Key operations |
+| --- | --- | --- |
+| `Vec<T>` | An ordered, growable list | `push`, `pop`, index `v[i]`, `iter` |
+| `HashMap<K, V>` | Key → value lookup | `insert`, `get`, `entry` |
+| `String` | Owned, growable UTF-8 text | `push_str`, `+`, `format!`, `chars` |
+
+`Vec` and `String` own a heap buffer with a length and a capacity; pushing past
+capacity reallocates (amortised O(1)). `HashMap` gives average O(1) lookup.
+
+## A complete program: `Vec` and `String`
+
+```rust title="main.rs — complete, runnable"
+fn main() {
+    // Build a Vec and grow it.
+    let mut nums: Vec<i32> = Vec::new();
+    for i in 1..=5 {
+        nums.push(i);
+    }
+    nums.push(6);
+    println!("nums = {nums:?}");        // nums = [1, 2, 3, 4, 5, 6]
+    println!("len = {}", nums.len());   // len = 6
+    println!("first = {:?}", nums.first()); // first = Some(1)
+
+    // Build a String from pieces.
+    let mut greeting = String::from("Hello");
+    greeting.push_str(", world");
+    greeting.push('!');
+    let shout = format!("{greeting} ({} chars)", greeting.chars().count());
+    println!("{shout}"); // Hello, world! (13 chars)
+}
+```
+
+<Aside type="caution" title="Indexing can panic">
+  `nums[10]` on a 6-element vector **panics** with "index out of bounds". When an
+  index might be invalid, prefer `nums.get(10)` which returns `Option<&T>` — the
+  compiler then makes you handle the `None` case.
+</Aside>
+
+## Iterators: lazy pipelines
+
+An iterator produces items one at a time. **Adapters** like `map` and `filter`
+are *lazy* — they build a description of the work and do nothing until a
+**consumer** like `sum`, `collect`, or a `for` loop drives them.
+
+<Mermaid title="A lazy iterator pipeline runs in a single pass" code={`flowchart LR
+  S["source: &[1,2,3,4,5,6]"] --> F["filter: keep evens"]
+  F --> M["map: square each"]
+  M --> C["consumer: sum -> 56"]`} />
+
+```rust title="src/lib.rs"
+pub fn sum_of_even_squares(nums: &[i64]) -> i64 {
+    nums.iter()
+        .filter(|&&n| n % 2 == 0) // lazy: nothing runs yet
+        .map(|&n| n * n)          // still lazy
+        .sum()                    // consumer: now the pipeline runs, once
+}
+```
+
+Here is the full toolkit in one runnable program:
+
+```rust title="main.rs — complete, runnable"
+fn main() {
+    let nums = [1, 2, 3, 4, 5, 6];
+
+    // map + filter + collect into a new Vec
+    let even_squares: Vec<i32> = nums.iter().filter(|&&n| n % 2 == 0).map(|n| n * n).collect();
+    println!("even squares: {even_squares:?}"); // [4, 16, 36]
+
+    // fold: accumulate to a single value (here, a product)
+    let product: i32 = nums.iter().fold(1, |acc, &n| acc * n);
+    println!("product: {product}"); // 720
+
+    // enumerate: pair each item with its index
+    for (i, n) in nums.iter().enumerate().take(2) {
+        println!("index {i} -> {n}");
+    }
+
+    // zip two iterators together
+    let letters = ['a', 'b', 'c'];
+    let paired: Vec<(char, i32)> = letters.iter().copied().zip(nums.iter().copied()).collect();
+    println!("paired: {paired:?}"); // [('a', 1), ('b', 2), ('c', 3)]
+
+    // any / all / count
+    println!("any > 5? {}", nums.iter().any(|&n| n > 5)); // true
+    println!("all > 0? {}", nums.iter().all(|&n| n > 0)); // true
+}
+```
+
+Output:
+
+```text
+even squares: [4, 16, 36]
+product: 720
+index 0 -> 1
+index 1 -> 2
+paired: [('a', 1), ('b', 2), ('c', 3)]
+any > 5? true
+all > 0? true
+```
+
+## `HashMap` and the entry API
+
+The single most useful `HashMap` pattern is **get-or-create-then-update**, done
+in one lookup with `entry`. The classic example is counting words:
+
+```rust title="src/lib.rs"
+use std::collections::HashMap;
+
+pub fn word_count(text: &str) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for raw in text.split_whitespace() {
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if word.is_empty() {
+            continue;
+        }
+        // entry(word).or_insert(0) returns &mut to the count, creating it at 0
+        // the first time. The * dereferences it so we can add.
+        *counts.entry(word).or_insert(0) += 1;
+    }
+    counts
+}
+```
+
+A complete program that uses it:
+
+```rust title="main.rs — complete, runnable"
+use std::collections::HashMap;
+
+fn main() {
+    let text = "the cat sat on the mat the cat purred";
+    let mut counts: HashMap<&str, i32> = HashMap::new();
+    for word in text.split_whitespace() {
+        *counts.entry(word).or_insert(0) += 1;
+    }
+
+    // Sort for deterministic output (HashMap iteration order is unspecified).
+    let mut pairs: Vec<(&&str, &i32)> = counts.iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (word, count) in pairs {
+        println!("{word}: {count}");
+    }
+}
+```
+
+Output:
+
+```text
+the: 3
+cat: 2
+mat: 1
+on: 1
+purred: 1
+sat: 1
+```
+
+<Quiz
+  question="Why does `for word in map { ... }` sometimes print entries in a different order each run?"
+  options={[
+    { text: "It's a bug in your code.", },
+    { text: "HashMap iteration order is intentionally unspecified (and randomized for DoS resistance).", correct: true },
+    { text: "HashMap always sorts by key, so it shouldn't change.", },
+    { text: "Only if the map has more than 8 entries.", },
+  ]}
+  explanation="`HashMap` makes no ordering guarantee, and Rust's default hasher is randomly seeded per process to resist hash-flooding denial-of-service attacks. If you need a stable order, collect into a Vec and sort it, or use a BTreeMap (sorted by key)."
+/>
+
+## Performance: iterators are zero-cost
+
+A lazy iterator chain compiles to essentially the same machine code as a
+hand-written loop — the famous "zero-cost abstraction". The binary
+`examples/rust-collections/src/bin/iterbench.rs` computes the sum of squares of
+evens over 10,000 elements three ways. Real numbers from
+`cargo run --release --bin iterbench`:
+
+<Benchmark
+  metric="Time per iteration (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Index loop (manual)", value: 4195, unit: "ns", note: "baseline" },
+    { label: "Iterator chain", value: 4500, unit: "ns", note: "one pass, no alloc" },
+    { label: "Intermediate collect()", value: 6461, unit: "ns", note: "extra alloc + pass" },
+  ]}
+/>
+
+The chain and the hand-written loop are within noise of each other. Materialising
+an intermediate `Vec` between steps, however, pays for a heap allocation and a
+second pass — the one thing to avoid.
+
+<Aside type="tip" title="Rule of thumb">
+  Chain adapters freely and `collect` **once** at the end. Every extra
+  `collect()` in the middle of a pipeline is an allocation you probably don't
+  need. Prefer `iter()` (borrow) over `into_iter()` (consume) unless you actually
+  want to take ownership of the elements.
+</Aside>
+
+## Common mistakes & debugging
+
+### 1. Mutating a collection while iterating it
+
+```rust
+fn main() {
+    let mut v = vec![1, 2, 3];
+    for x in &v {
+        v.push(*x); // ✗ can't borrow `v` as mutable while iterating it
+    }
+}
+```
+
+```text
+error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable
+```
+
+**Fix:** collect what you want to add first, then extend — or use indices. The
+borrow checker is preventing iterator invalidation, a classic source of bugs in
+other languages.
+
+```rust
+fn main() {
+    let mut v = vec![1, 2, 3];
+    let doubled: Vec<i32> = v.iter().map(|x| x * 2).collect();
+    v.extend(doubled);
+    println!("{v:?}"); // [1, 2, 3, 2, 4, 6]
+}
+```
+
+### 2. `collect` needs to know the target type
+
+```rust
+fn main() {
+    let squares = (1..=3).map(|n| n * n).collect(); // ✗ collect into WHAT?
+    println!("{squares:?}");
+}
+```
+
+```text
+error[E0283]: type annotations needed
+  = note: cannot infer type for type parameter `B` declared on the associated function `collect`
+```
+
+**Fix:** annotate the binding or use the turbofish so `collect` knows the target:
+
+```rust
+fn main() {
+    let squares: Vec<i32> = (1..=3).map(|n| n * n).collect();
+    // or: let squares = (1..=3).map(|n| n * n).collect::<Vec<i32>>();
+    println!("{squares:?}"); // [1, 4, 9]
+}
+```
+
+### 3. Reaching for an index that isn't there
+
+```rust
+fn main() {
+    let v = vec![10, 20];
+    println!("{}", v[5]); // ✗ panics at runtime
+}
+```
+
+```text
+thread 'main' panicked at src/main.rs:3:20:
+index out of bounds: the len is 2 but the index is 5
+```
+
+**Fix:** use `v.get(5)` which returns `Option<&T>`, and handle `None` — no panic.
+
+## Exercises
+
+<Interview question="Exercise 1 — Sum only the positive numbers.">
+
+Write `sum_positive(nums: &[i64]) -> i64` using an iterator chain (no manual
+loop). Provide a complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+fn sum_positive(nums: &[i64]) -> i64 {
+    nums.iter().filter(|&&n| n > 0).sum()
+}
+
+fn main() {
+    println!("{}", sum_positive(&[-3, 4, -1, 10, 0])); // 14
+    println!("{}", sum_positive(&[-1, -2]));            // 0
+}
+```
+
+</Interview>
+
+<Interview question="Exercise 2 — Invert a HashMap of word -> count into count -> words.">
+
+Given counts, produce a map from each count to the sorted list of words with that
+count.
+
+**Solution — complete, runnable:**
+
+```rust
+use std::collections::HashMap;
+
+fn invert(counts: &HashMap<String, i32>) -> HashMap<i32, Vec<String>> {
+    let mut out: HashMap<i32, Vec<String>> = HashMap::new();
+    for (word, &count) in counts {
+        out.entry(count).or_default().push(word.clone());
+    }
+    for words in out.values_mut() {
+        words.sort();
+    }
+    out
+}
+
+fn main() {
+    let mut counts = HashMap::new();
+    counts.insert("a".to_string(), 2);
+    counts.insert("b".to_string(), 1);
+    counts.insert("c".to_string(), 2);
+    let inv = invert(&counts);
+    println!("{:?}", inv.get(&2)); // Some(["a", "c"])
+    println!("{:?}", inv.get(&1)); // Some(["b"])
+}
+```
+
+`or_default()` inserts an empty `Vec` the first time a count is seen — the entry
+API again, this time creating a growable list.
+
+</Interview>
+
+<Interview question="Exercise 3 — Find the longest word with iterators.">
+
+Write `longest(text: &str) -> Option<&str>` returning the longest whitespace
+word, using `max_by_key`. Complete `fn main`.
+
+**Solution — complete, runnable:**
+
+```rust
+fn longest(text: &str) -> Option<&str> {
+    text.split_whitespace().max_by_key(|w| w.len())
+}
+
+fn main() {
+    println!("{:?}", longest("the quick brown fox jumped")); // Some("jumped")
+    println!("{:?}", longest(""));                            // None
+}
+```
+
+Two things to note. `longest` returns `&str` borrowed from `text` — no
+allocation, tying back to the ownership lesson. And beware ties: when several
+words share the maximum length, `max_by_key` returns the **last** one, not the
+first (this is documented std behaviour) — pick `min_by_key`/a manual fold if you
+need the first.
+
+</Interview>
+
+## Best practices vs anti-patterns
+
+| ✅ Best practice | ❌ Anti-pattern |
+| --- | --- |
+| Chain adapters, `collect` once at the end | `collect()` between every step |
+| `entry(k).or_insert(..)` for get-or-create | `get` + `contains_key` + `insert` (three lookups) |
+| `v.get(i)` when the index may be invalid | `v[i]` and hope it never panics |
+| `iter()` to borrow; `into_iter()` to consume | `clone()` the whole collection to iterate it |
+| `BTreeMap` when you need sorted keys | Sorting a `HashMap`'s entries on every read |
+| `String` for owned text, `&str` for borrowed | Taking `String` params you only read |
+
+## Mini-project
+
+**Build a CSV column summariser.** Given a `&str` of comma-separated rows (first
+row is a header), parse it into `Vec<HashMap<String, String>>` (one map per row,
+header → cell). Then write:
+
+- `column(rows, name) -> Vec<&str>` returning that column's values.
+- `numeric_summary(values) -> Option<(f64, f64, f64)>` returning (min, max, mean)
+  of the values that parse as `f64`, or `None` if none parse.
+
+Requirements:
+
+- Uses `Vec`, `HashMap`, and iterator adapters (`filter_map`, `collect`).
+- At least four `#[test]` cases, including an empty column.
+- `cargo clippy` clean, and a `fn main` that prints a summary of a sample table.
+
+This ties together all three collections plus the iterator toolkit and the
+`Option`/`Result` handling from earlier lessons.
+
+## Interview questions
+
+<Interview question="What does 'lazy' mean for iterator adapters, and why does it matter?">
+
+Adapters like `map`, `filter` and `take` don't do any work when called — they
+return a new iterator that *describes* the transformation. Nothing runs until a
+consumer (`for`, `sum`, `collect`, `count`, …) pulls items through. Laziness lets
+you compose long pipelines that still run in a single pass with no intermediate
+collections, and it makes infinite iterators (like `(0..)`) usable as long as
+something bounds them (`take(n)`).
+
+</Interview>
+
+<Interview question="When would you choose a BTreeMap over a HashMap?">
+
+Use `HashMap` for the common case: average O(1) lookup, no ordering needed. Use
+`BTreeMap` when you need keys kept **sorted** — to iterate in order, find ranges
+(`range(a..b)`), or get the min/max key cheaply. `BTreeMap` has O(log n)
+operations and no random hashing, so its iteration order is deterministic.
+
+</Interview>
+
+<Interview question="What is the difference between iter(), iter_mut() and into_iter()?">
+
+`iter()` yields shared references `&T` (borrows the collection, leaves it intact).
+`iter_mut()` yields mutable references `&mut T` (borrows mutably so you can change
+elements in place). `into_iter()` consumes the collection and yields owned values
+`T`. Choose based on whether you need to read, mutate, or take ownership of the
+elements.
+
+</Interview>
+
+<Interview question="Why does String indexing by integer not compile in Rust?">
+
+`String` is UTF-8, where a "character" may span multiple bytes, so `s[3]` has no
+single, cheap, correct meaning — byte 3 might land in the middle of a character.
+Rust forbids `s[i]` and instead offers explicit choices: `s.chars().nth(i)` for
+the i-th Unicode scalar, `s.bytes()` for raw bytes, or slicing by a known-valid
+byte range `&s[0..4]`. It trades convenience for correctness.
+
+</Interview>
+
+## Challenge
+
+Take a text file you have (a log, a book, some CSV) and write a small program
+that reports its top 10 words, the average line length, and the number of unique
+words — using only `Vec`, `HashMap`/`BTreeMap`, and iterator chains, with no
+manual index loops. Then run it through `cargo clippy` and accept every
+suggestion: you will likely learn an adapter you didn't know existed
+(`filter_map`, `flat_map`, `dedup_by_key`, …). That feedback loop is the fastest
+way to internalise the iterator vocabulary.
+
+## References & further reading
+
+- *The Rust Programming Language* (the Book), ch. 8 — [“Common Collections”](https://doc.rust-lang.org/book/ch08-00-common-collections.html)
+- *The Rust Programming Language* (the Book), ch. 13 — [iterators and closures](https://doc.rust-lang.org/book/ch13-00-functional-features.html)
+- `std::iter::Iterator` — [the full adapter list](https://doc.rust-lang.org/std/iter/trait.Iterator.html)
+- `std::collections` — [choosing a collection](https://doc.rust-lang.org/std/collections/index.html)
+
+<Progress />
