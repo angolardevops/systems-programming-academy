@@ -29,6 +29,11 @@ export default defineConfig({
           label: 'Start Here',
           translations: { 'pt-BR': 'Comece Aqui' },
           items: [
+            {
+              label: 'About the Author',
+              translations: { 'pt-BR': 'Sobre o Autor' },
+              slug: 'about-the-author',
+            },
             { label: 'Welcome', translations: { 'pt-BR': 'Bem-vindo' }, slug: 'welcome' },
             {
               label: 'How to use this Academy',
