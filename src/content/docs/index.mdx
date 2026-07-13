@@ -52,14 +52,18 @@ sit at different points on the systems-programming spectrum.
 
 | Part | Focus |
 | --- | --- |
-| **1 · Foundations** | Language cores: memory, types, ownership, error handling, testing. |
-| **2 · Real-World Engineering** | Architecture, CI/CD, observability, security — compared across languages. |
-| **3 · DevOps Automation** | Build real tooling: CLIs, exporters, config generators. |
-| **4 · Concurrency & Parallelism** | Threads, async, channels — culminating in a mini-NGINX. |
-| **5 · Building Frameworks** | Rebuild an ORM, a web framework, and a green-thread runtime from scratch. |
-| **Capstone** | A production microservice platform, no frameworks, each language where it fits. |
+| **1 · Foundations** | Language cores: ownership, types, error handling, generics, concurrency, testing — 20 lessons across all three languages. |
+| **2 · Real-World Engineering** | Repository & DI, config, logging, caching, the testing pyramid, hexagonal architecture, CI/CD. |
+| **3 · DevOps Automation** | Four real tools built and benchmarked three ways: a log analyzer, a metrics exporter, a config generator, a health-check agent. |
+| **4 · Concurrency & Parallelism** | Threads & shared state, channels, async I/O — culminating in a **mini-NGINX** web server. |
+| **5 · Building Frameworks** | Rebuild the pieces of a web app: routing, a query builder, a DI container, validation, a template engine, a JSON serializer, and a test framework. |
+| **Capstone** | A secure guestbook that defeats SQL-injection and XSS, then runs for real on HTTP + SQLite — closed by a measured comparison of the three languages. |
 
-:::note[Status]
-This is an actively developed open educational resource. **Part 1 → Rust → Ownership**
-is complete and fully tested; more lessons are being built to the same bar.
+:::note[Status: complete]
+The full curriculum is built and published — **every lesson executable, tested, and
+benchmarked in Python, Go, and Rust, in English and Português.** Start with the
+[Welcome guide](/systems-programming-academy/welcome/), jump straight to
+[Part 1 · Ownership](/systems-programming-academy/part-1-foundations/rust/ownership/),
+or read the closing synthesis,
+[The Three Languages Compared](/systems-programming-academy/capstone/three-languages/).
 :::
