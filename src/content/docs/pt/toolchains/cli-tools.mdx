@@ -1,0 +1,283 @@
+---
+title: "As Toolchains: cargo · uv · go"
+description: "As ferramentas de linha de comandos que todos os exemplos desta academia usam — como compilar, correr, testar, formatar, fazer lint e produzir releases em Rust (cargo), Python (uv) e Go, mais os ficheiros de config (Cargo.toml, pyproject.toml, go.mod) que seguram tudo."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Antes da primeira lição, conhece as ferramentas. Todos os exemplos desta academia
+são compilados, corridos e testados com a toolchain de linha de comandos padrão de
+cada linguagem — e conhecer essas ferramentas *é* a diferença entre ler código e
+contribuir para ele. Esta página é a referência a que voltarás: o punhado de
+comandos que cobrem 95% do trabalho diário em cada linguagem, os builds de release,
+os formatadores e linters, e os ficheiros de config que descrevem um projeto.
+
+<Aside type="tip" title="Aprende a ferramenta, não só a linguagem">
+  Uma linguagem que consegues escrever mas não compilar, testar ou fazer lint é uma
+  linguagem que só consegues ler. A contribuição open source corre sobre estes
+  comandos: clone, install, build, correr os testes, formatar, lint, abrir um PR.
+  Ganha fluência aqui e todos os projetos dos três ecossistemas se abrem para ti.
+</Aside>
+
+## Rust — `cargo`
+
+O `cargo` é a ferramenta de build, o gestor de pacotes, o test runner e o script
+runner do Rust, num só. Instalas com o **rustup** (o instalador da toolchain Rust):
+
+```bash
+# Instalar a toolchain Rust (inclui cargo, rustc, rustup)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+rustup update            # atualizar para o Rust stable mais recente
+rustup component add clippy rustfmt   # linter + formatador (normalmente já vêm)
+```
+
+### Comandos do dia-a-dia
+
+```bash
+cargo new my-crate       # criar um projeto novo (um "crate")
+cargo run                # compilar e correr (build de debug)
+cargo build              # compilar para target/debug/
+cargo test               # correr todos os testes (unit, integração, doc-tests)
+cargo fmt                # formatar (rustfmt) — a academia corre `cargo fmt --check` no CI
+cargo clippy             # lint — a academia corre `cargo clippy -- -D warnings` (avisos = erros)
+cargo doc --open         # gerar e abrir a documentação de API do crate
+```
+
+Todos os exemplos Rust desta academia passam exatamente três portões, os mesmos
+que o CI corre:
+
+```bash
+cargo fmt --check                 # a formatação está correta
+cargo clippy -- -D warnings       # sem avisos de lint
+cargo test                        # todos os testes verdes
+```
+
+### Builds de release
+
+O build de debug é rápido a compilar mas lento a correr. Um **build de release**
+liga as otimizações — foi isto que todos os benchmarks da academia usaram:
+
+```bash
+cargo run --release      # correr otimizado
+cargo build --release    # binário otimizado em target/release/
+```
+
+A diferença de tamanho e velocidade é real: o analisador de logs da Parte 3 foi
+~7× mais rápido em release. Distribui builds de release; desenvolve em debug.
+
+### `Cargo.toml` — o manifesto do projeto
+
+Um ficheiro TOML que descreve o crate. O essencial:
+
+```toml
+[package]
+name = "my-crate"
+version = "0.1.0"
+edition = "2021"          # a edição do Rust (época da linguagem)
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }  # um crate + uma feature flag
+serde = "1.0"             # atalho para versão "^1.0"
+
+[profile.release]
+strip = true              # remover símbolos para um binário mais pequeno
+
+[[bin]]
+name = "mytool"           # um target de binário extra
+path = "src/main.rs"
+```
+
+O `cargo` escreve também um **`Cargo.lock`** que fixa versões exatas das
+dependências para builds reproduzíveis — commita-o para aplicações; para
+bibliotecas pode ser ignorado.
+
+## Python — `uv`
+
+O `uv` é um gestor de projetos e pacotes de Python rápido e moderno (da Astral, a
+criadora do `ruff`). Substitui o antigo emaranhado de `pip` + `venv` +
+`virtualenv` + `pyenv` por uma só ferramenta. Instala-o e deixa-o gerir versões de
+Python, ambientes virtuais e dependências por ti.
+
+```bash
+# Instalar o uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv python install 3.12   # instalar uma versão de Python, sem Python de sistema
+```
+
+### Comandos do dia-a-dia
+
+```bash
+uv init my-project       # criar um projeto com um pyproject.toml
+uv add requests          # adicionar uma dependência (escreve pyproject.toml + uv.lock)
+uv run python app.py     # correr dentro do ambiente do projeto (auto-criado)
+uv run pytest            # correr o test runner nesse ambiente
+uv sync                  # instalar exatamente o que o lockfile especifica
+uv venv                  # criar um ambiente virtual explicitamente (se quiseres)
+uvx ruff check .         # correr uma ferramenta sem a instalar (uvx = uv tool run)
+```
+
+O `uv run <cmd>` é o comando de todos os dias: garante que o ambiente existe, tem
+as dependências certas, e corre o teu comando lá dentro — sem `activate` manual. Os
+exemplos Python da academia correm as verificações assim:
+
+```bash
+uv run ruff format --check .     # a formatação está correta
+uv run ruff check .              # o lint está limpo
+uv run python -m unittest discover -s . -p 'test_*.py'   # testes verdes
+```
+
+### `ruff` — formatar e fazer lint numa só ferramenta
+
+O `ruff` é um formatador *e* linter de Python extremamente rápido (uma só
+ferramenta a substituir `black`, `isort`, `flake8` e mais). A academia usa-o em
+todo o lado:
+
+```bash
+uv run ruff format .     # formatar (como `cargo fmt` / `gofmt`)
+uv run ruff check .      # lint (como `cargo clippy` / `go vet`)
+uv run ruff check --fix .  # corrigir automaticamente o que conseguir
+```
+
+### Release / distribuição
+
+O Python não compila para um binário nativo por omissão. Para *distribuir* um
+projeto Python constróis um wheel:
+
+```bash
+uv build                 # produzir um wheel + sdist em dist/
+```
+
+Para um executável de ficheiro único (como o Go/Rust distribuem), ferramentas como
+o `pyinstaller` empacotam o interpretador com o teu código — mas o caminho comum é
+publicar um pacote no PyPI (`uv publish`) ou distribuir uma imagem de container.
+
+### `pyproject.toml` — o manifesto do projeto
+
+O standard moderno para config de projetos Python — um ficheiro TOML para
+metadados, dependências e definições de ferramentas:
+
+```toml
+[project]
+name = "my-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["requests>=2.31"]
+
+[tool.ruff]
+line-length = 100        # config do ruff (formatador + linter)
+
+[build-system]
+requires = ["hatchling"]         # como o pacote é construído
+build-backend = "hatchling.build"
+```
+
+O `uv` escreve um **`uv.lock`** para instalações reproduzíveis — commita-o para
+aplicações.
+
+## Go — `go`
+
+A toolchain do Go é um único comando `go`, instalado de
+[go.dev/dl](https://go.dev/dl/). Compila, corre, testa e gere módulos sem
+ferramentas externas — pilhas incluídas, deliberadamente.
+
+### Comandos do dia-a-dia
+
+```bash
+go mod init example.com/mytool   # iniciar um módulo (escreve go.mod)
+go run .                 # compilar e correr o pacote atual
+go build                 # compilar para um binário na pasta atual
+go test ./...            # correr todos os testes em todos os pacotes
+go vet ./...             # reportar construções suspeitas (como um linter)
+gofmt -w .               # formatar o código no sítio (formatar é obrigatório em Go)
+go get github.com/x/y    # adicionar uma dependência (atualiza go.mod + go.sum)
+```
+
+Os exemplos Go da academia passam os mesmos três portões que o CI:
+
+```bash
+test -z "$(gofmt -l .)"   # tudo gofmt-limpo (gofmt -l lista ficheiros não formatados)
+go vet ./...              # sem construções suspeitas
+go test -race ./...       # testes passam, e o race detector não encontra data races
+```
+
+A flag `-race` é a funcionalidade matadora do Go para concorrência (ver a
+[lição de Threads](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)):
+instrumenta o binário para apanhar data races em runtime.
+
+### Builds de release
+
+O `go build` já produz um binário nativo estático e sem dependências. Para um
+binário de produção mais pequeno e cross-compilation:
+
+```bash
+go build -ldflags="-s -w"        # remover info de debug para um binário mais pequeno
+GOOS=linux GOARCH=arm64 go build # cross-compilar para outro OS/arch, sem malabarismo de toolchain
+```
+
+Cross-compilar só definindo duas variáveis de ambiente é um superpoder do Go — uma
+máquina constrói binários para todas as plataformas.
+
+### `go.mod` — o ficheiro de módulo
+
+Não é TOML, mas um formato de texto simples que declara o módulo, a sua versão de
+Go, e as suas dependências:
+
+```text
+module example.com/mytool
+
+go 1.23
+
+require (
+    github.com/spf13/cobra v1.8.0
+    modernc.org/sqlite v1.53.0
+)
+```
+
+O Go escreve também um **`go.sum`** com checksums criptográficos de cada
+dependência — commita-o sempre; é o que torna os builds à prova de adulteração e
+reproduzíveis.
+
+## A folha de consulta
+
+A mesma tarefa, três ferramentas:
+
+| Tarefa | Rust | Python (uv) | Go |
+| --- | --- | --- | --- |
+| Novo projeto | `cargo new` | `uv init` | `go mod init` |
+| Correr | `cargo run` | `uv run python x.py` | `go run .` |
+| Build | `cargo build` | `uv build` (wheel) | `go build` |
+| Build de release | `cargo build --release` | `uv build` + publish | `go build -ldflags="-s -w"` |
+| Testar | `cargo test` | `uv run pytest` | `go test ./...` |
+| Formatar | `cargo fmt` | `uv run ruff format` | `gofmt -w .` |
+| Lint | `cargo clippy` | `uv run ruff check` | `go vet ./...` |
+| Adicionar dependência | editar `Cargo.toml` / `cargo add` | `uv add x` | `go get x` |
+| Ficheiro de manifesto | `Cargo.toml` | `pyproject.toml` | `go.mod` |
+| Lockfile | `Cargo.lock` | `uv.lock` | `go.sum` |
+
+<Aside type="note" title="Porque os exemplos da academia são dependency-free">
+  Quase todos os exemplos desta academia usam apenas a biblioteca padrão da sua
+  linguagem — sem crates ou pacotes externos — para os poderes correr com
+  `cargo test`, `uv run` ou `go test` sem nada para instalar. As ferramentas acima
+  são exatamente aquilo a que recorres no momento em que adicionas uma dependência
+  real, como faz a
+  [app guestbook a correr](/systems-programming-academy/pt/capstone/running-app/)
+  com um driver SQLite real.
+</Aside>
+
+## O que vem a seguir
+
+Já sabes compilar, correr, testar, formatar e fazer lint nas três linguagens — o
+ciclo diário de qualquer contribuidor. A seguir, aprende o workflow que leva a tua
+mudança *para dentro* de um projeto: o
+[guia de Git & GitHub](/systems-programming-academy/pt/toolchains/git-github/).
+Depois encontra algo em que trabalhar em
+[Onde Contribuir](/systems-programming-academy/pt/toolchains/contributing/).
+
+## Referências
+
+- Rust — [The Cargo Book](https://doc.rust-lang.org/cargo/) · [rustup](https://rustup.rs/)
+- Python — [documentação do uv](https://docs.astral.sh/uv/) · [ruff](https://docs.astral.sh/ruff/) · [spec do pyproject.toml](https://packaging.python.org/en/latest/specifications/pyproject-toml/)
+- Go — [docs do comando go](https://pkg.go.dev/cmd/go) · [How to Write Go Code](https://go.dev/doc/code)
+- [Especificação TOML](https://toml.io/) — o formato de config que Rust e Python usam

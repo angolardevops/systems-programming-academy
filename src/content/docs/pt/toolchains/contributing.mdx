@@ -1,0 +1,132 @@
+---
+title: "Onde Contribuir: Projetos Open-Source"
+description: "Projetos open-source acessíveis a principiantes em Rust, Go e Python onde podes pôr o conhecimento desta academia a trabalhar — como encontrar good first issues, a etiqueta que faz um PR ser aceite, e uma lista de partida para cada linguagem."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Tens as linguagens, as ferramentas e o workflow de git. O último passo é o melhor:
+contribuir para algo real. O open source é como transformas conhecimento num
+histórico — cada pull request aceite é prova pública de que consegues ler um
+codebase, seguir as suas convenções, e distribuir uma mudança. Esta página
+aponta-te projetos que acolhem novatos e mostra-te como encontrar o teu primeiro
+issue.
+
+<Aside type="tip" title="Começa absurdamente pequeno">
+  A tua primeira contribuição deve ser minúscula — um typo nos docs, um teste em
+  falta, uma mensagem de erro clarificada. O objetivo do primeiro PR é aprender o
+  *processo* (fork, branch, PR, revisão, merge), não reescrever o projeto. Mudanças
+  pequenas, corretas e bem descritas são aceites depressa e constroem a confiança
+  que te deixa pegar em trabalho maior.
+</Aside>
+
+## Como encontrar um good first issue
+
+A maioria dos projetos saudáveis etiqueta trabalho acessível a principiantes.
+Usa-as:
+
+```bash
+# A partir do GitHub CLI, dentro de um repo clonado:
+gh issue list --label "good first issue"
+gh issue list --label "help wanted"
+```
+
+Ou pesquisa em todo o GitHub no browser:
+
+- [github.com/topics/good-first-issue](https://github.com/topics/good-first-issue)
+- Pesquisa: `label:"good first issue" state:open language:rust` (troca a linguagem)
+- [goodfirstissue.dev](https://goodfirstissue.dev/) e [up-for-grabs.net](https://up-for-grabs.net/) agregam-nos de vários projetos.
+
+Antes de escreveres código, **lê o `CONTRIBUTING.md` do projeto e o Código de
+Conduta**, corre a sua suite de testes localmente (já sabes como), e comenta no
+issue a dizer que o vais fazer — para duas pessoas não duplicarem o trabalho.
+
+## Projetos Rust
+
+O ecossistema Rust é famoso por ser acolhedor, com forte cultura de tooling e
+revisão.
+
+- **[rustlings](https://github.com/rust-lang/rustlings)** — pequenos exercícios
+  para aprender Rust; contribuir correções e exercícios é uma rampa suave.
+- **[ripgrep](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)**,
+  **[bat](https://github.com/sharkdp/bat)** — ferramentas CLI adoradas (o `grep`,
+  `find` e `cat` rápidos), bem testadas e acessíveis — mesmo na onda desta academia
+  depois da Parte 3.
+- **[Bevy](https://github.com/bevyengine/bevy)** — um game engine data-driven com
+  uma comunidade excecionalmente acolhedora e muitos `good first issue`.
+- **[serde](https://github.com/serde-rs/serde)** / **[tokio](https://github.com/tokio-rs/tokio)** —
+  as fundações de serialização e async que reconstruíste em miniatura nas Partes
+  4–5; contribuir aqui é avançado mas profundamente educativo.
+
+## Projetos Go
+
+A simplicidade do Go torna os seus codebases invulgarmente fáceis de ler e de
+contribuir.
+
+- **[Cobra](https://github.com/spf13/cobra)** — a framework de CLI por trás do
+  `kubectl`, `gh` e Hugo; um passo natural depois dos projetos CLI da Parte 3.
+- **[Charm](https://github.com/charmbracelet)** (`bubbletea`, `lipgloss`) —
+  bibliotecas de UI de terminal lindíssimas com uma comunidade amigável e ativa.
+- **[Hugo](https://github.com/gohugoio/hugo)** — o gerador de sites estáticos
+  popular; grande mas bem organizado, com muitos issues bem delimitados.
+- **[Caddy](https://github.com/caddyserver/caddy)** — um servidor web moderno em
+  Go; um ótimo encaixe depois da lição mini-NGINX da Parte 4.
+
+## Projetos Python
+
+O Python tem o maior e mais variado ecossistema open source — há um projeto para o
+que quer que te interesse.
+
+- **[Textual](https://github.com/Textualize/textual)** / **[Rich](https://github.com/Textualize/rich)** —
+  bibliotecas de UI de terminal e pretty-printing com docs excelentes e uma equipa
+  acolhedora.
+- **[httpx](https://github.com/encode/httpx)** / **[Starlette](https://github.com/encode/starlette)** —
+  cliente HTTP moderno e framework ASGI; codebases limpos e bem testados.
+- **[pytest](https://github.com/pytest-dev/pytest)** — a framework de testes cuja
+  essência reconstruíste na Parte 5; contribuir plugins ou correções é uma
+  masterclass.
+- **[Django](https://github.com/django/django)** — a framework web com pilhas
+  incluídas, com um processo de contribuição invulgarmente estruturado e amigo de
+  mentoria.
+
+<Aside type="note" title="Contribui para as ferramentas que agora usas">
+  Um tipo especial de satisfação: contribuir para o **`uv`** e o **`ruff`**
+  ([astral-sh](https://github.com/astral-sh)) — as ferramentas de Python desta
+  academia, ambas escritas em *Rust* — e fechas o ciclo, usando as competências das
+  três linguagens num só projeto.
+</Aside>
+
+## A etiqueta que faz um PR ser aceite
+
+Os maintainers são voluntários com tempo limitado. Respeita-o e as tuas mudanças
+entram:
+
+- **Um PR, uma preocupação.** Uma mudança focada é fácil de rever; uma dispersa
+  emperra. (A academia sinalizou isto em cada lição — unidades pequenas e
+  coerentes.)
+- **Inclui um teste.** Uma mudança com um teste que a prova é muito mais confiável
+  do que uma sem — exatamente a disciplina que cada exemplo aqui modelou.
+- **Segue o estilo do projeto.** Corre o formatador e o linter dele (`cargo fmt`,
+  `ruff format`, `gofmt`) antes de enviar; não reformates código não relacionado.
+- **Escreve uma descrição de PR clara.** O quê, o porquê, e como testaste. Liga o
+  issue que fecha.
+- **Sê paciente e gracioso na revisão.** Os revisores estão a ajudar-te; responde
+  ao feedback, pergunta quando não for claro, e agradece. A reputação acumula.
+
+## O círculo completo
+
+Esta academia ensinou-te a construir software a partir dos primeiros princípios —
+as linguagens, a engenharia, a concorrência, as frameworks — tudo executável,
+testado e medido. Contribuir para open source é onde isso deixa de ser prática e se
+torna real: a tua mudança testada, num projeto real, usada por pessoas reais.
+Escolhe um issue pequeno num projeto que admiras, aplica a
+[toolchain](/systems-programming-academy/pt/toolchains/cli-tools/) e o
+[workflow de git](/systems-programming-academy/pt/toolchains/git-github/) que agora
+conheces, e abre o teu primeiro pull request. É esse o objetivo inteiro de aprender
+a construir: construir coisas que importam, com os outros.
+
+## Referências
+
+- [How to Contribute to Open Source](https://opensource.guide/how-to-contribute/) — o guia definitivo
+- [First Contributions](https://github.com/firstcontributions/first-contributions) — um primeiro PR na prática
+- Buscadores de issues: [goodfirstissue.dev](https://goodfirstissue.dev/) · [up-for-grabs.net](https://up-for-grabs.net/) · [github.com/topics/good-first-issue](https://github.com/topics/good-first-issue)

@@ -1,0 +1,217 @@
+---
+title: "Git & GitHub for Contributors"
+description: "A practical guide to the version-control workflow that open source runs on — the core git commands (init, clone, branch, commit, pull, push, merge, rebase, cherry-pick, worktree, stash) with the collaborative context of when to reach for each, plus the GitHub CLI (gh) that operates GitHub from your terminal."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+You can write flawless code in three languages and still not contribute to a
+single project, because contribution is a *workflow*, not a language. That
+workflow is **git** (the version-control tool) and **GitHub** (where projects
+live and collaborate). This guide teaches the commands you actually use, and —
+more importantly — *when* and *why* to use each in a team.
+
+<Aside type="tip" title="Git is a graph of commits">
+  Everything below makes sense once you hold one mental model: a git repository
+  is a graph of **commits** (snapshots), and **branches** are just movable
+  labels pointing at commits. "Merging", "rebasing", "cherry-picking" are all
+  ways of moving work between branches in that graph. Keep the graph in your
+  head and the commands stop being magic.
+</Aside>
+
+## Starting a repository
+
+```bash
+git init                 # turn the current folder into a git repo (new project)
+git clone <url>          # download an existing repo (someone else's project)
+git status               # what's changed, what's staged — run this constantly
+git log --oneline --graph  # see the commit history as a graph
+```
+
+**When:** `git init` for a project you're starting; `git clone` for one that
+exists. `git status` and `git log` are the two you run all day to orient
+yourself.
+
+## The core loop: change, stage, commit
+
+```bash
+git add <file>           # stage a file's changes for the next commit
+git add -p               # stage interactively, hunk by hunk (review as you go)
+git commit -m "message"  # record staged changes as a commit
+git diff                 # what changed but isn't staged yet
+git diff --staged        # what's staged for the next commit
+```
+
+**When:** every time you finish a coherent piece of work. A good commit is small
+and self-contained, with a message that says *why*, not just *what*. This is the
+heartbeat of git — you'll do it dozens of times a day.
+
+<Aside type="note" title="Anatomy of a good commit message">
+  A concise imperative summary line (`Fix race in cache eviction`), a blank line,
+  then a paragraph explaining the *why* if it isn't obvious. Reviewers read the
+  message before the diff; a clear one makes your change easy to accept.
+</Aside>
+
+## Branches: work without disturbing others
+
+```bash
+git branch                       # list branches
+git switch -c fix-the-bug        # create and switch to a new branch (modern)
+git checkout -b fix-the-bug      # the same, older syntax
+git switch main                  # switch back to main
+git branch -d fix-the-bug        # delete a merged branch
+```
+
+**When:** *always start a change on a branch*, never directly on `main`. A
+branch isolates your work so `main` stays stable and shippable, and so several
+people (or several features) can proceed in parallel without stepping on each
+other. This is the single most important collaborative habit.
+
+## Syncing with the remote: pull, push, fetch
+
+```bash
+git remote -v                    # show the remote repositories (usually "origin")
+git fetch                        # download remote changes WITHOUT merging them
+git pull                         # fetch + merge remote changes into your branch
+git push                         # upload your commits to the remote
+git push -u origin fix-the-bug   # push a new branch and set it to track origin
+```
+
+**When:** `git pull` before you start work (get everyone's latest); `git push`
+when you want to share or back up your commits. `git fetch` is the cautious
+version of pull — download and *look* before merging, useful when you want to
+see what changed without touching your working state.
+
+## Combining work: merge and rebase
+
+Two ways to bring one branch's commits into another:
+
+```bash
+git merge feature        # merge feature's commits into the current branch
+git rebase main          # replay your branch's commits on top of the latest main
+```
+
+**When:** **merge** preserves history exactly, creating a merge commit — it's
+honest about what happened and is the safe default, especially for shared
+branches. **rebase** rewrites your branch to sit on top of the latest `main`,
+producing a clean, linear history — great for tidying *your own* feature branch
+before opening a pull request, but never rebase a branch others have already
+pulled (it rewrites commits they depend on). Rule of thumb: *merge to integrate,
+rebase to tidy your local work*.
+
+## Precision tools: cherry-pick, stash, worktree
+
+```bash
+git cherry-pick <commit>   # apply one specific commit onto the current branch
+git stash                  # shelve uncommitted changes to get a clean slate
+git stash pop              # bring the shelved changes back
+git worktree add ../hotfix main   # check out another branch in a second folder
+```
+
+- **`cherry-pick`** — when you need *one* commit from another branch (a bug fix
+  that must go into a release branch, say) without merging everything else.
+- **`stash`** — when you're mid-change and need a clean tree *right now* (to pull,
+  switch branches, or test something), then resume. A quick save-and-restore.
+- **`worktree`** — when you need two branches checked out *at once* in separate
+  folders (review a PR while your feature is still building), without re-cloning.
+  A power move for juggling parallel work.
+
+## Undoing things safely
+
+```bash
+git restore <file>         # discard uncommitted changes to a file
+git reset --soft HEAD~1    # undo the last commit, keep the changes staged
+git revert <commit>        # make a NEW commit that undoes an old one (safe on shared history)
+```
+
+**When:** `git revert` on anything already pushed (it undoes without rewriting
+history, so it's safe for teammates); `git reset` only for local commits you
+haven't shared. The golden rule of collaboration: **never rewrite history that
+others have pulled.**
+
+## The contributor's workflow, end to end
+
+Putting it together — the exact sequence to contribute to someone else's project:
+
+<Aside type="note" title="Fork → branch → PR">
+  1. **Fork** the project on GitHub (your own copy).
+  2. `git clone` your fork, `git switch -c my-fix` to start a branch.
+  3. Make the change, `git add`, `git commit` in small steps.
+  4. `git push -u origin my-fix` to send the branch to your fork.
+  5. Open a **pull request** from your branch to the original project.
+  6. Respond to review, push more commits; when approved, a maintainer merges it.
+
+  This is how essentially every open-source contribution happens. Read the
+  project's `CONTRIBUTING.md` first — it tells you the local conventions.
+</Aside>
+
+## GitHub from the terminal: the `gh` CLI
+
+The **GitHub CLI** (`gh`) operates GitHub — issues, pull requests, forks,
+releases — without leaving your terminal, and jumps to the web UI when you want
+it.
+
+```bash
+gh auth login            # authenticate once (opens a browser to sign in)
+gh repo fork --clone     # fork a repo AND clone your fork in one step
+gh repo clone owner/name # clone a repo by its GitHub path
+gh repo create           # create a new repo (this academy was published with it)
+```
+
+### Pull requests and issues
+
+```bash
+gh pr create             # open a PR from your current branch (prompts for title/body)
+gh pr list               # list open PRs
+gh pr checkout 42        # check out PR #42 locally to test it
+gh pr view 42 --web      # open PR #42 in the browser
+gh pr status             # PRs relevant to you (yours, review requests)
+
+gh issue list            # list issues
+gh issue create          # file a new issue
+gh issue list --label "good first issue"   # find beginner-friendly work
+```
+
+### Jumping to the UI
+
+`gh` is a bridge, not a replacement — when you want GitHub's web interface, it
+takes you straight there:
+
+```bash
+gh browse                # open the current repo in your browser
+gh pr view --web         # open the current branch's PR page
+gh issue view 7 --web    # open issue #7 in the browser
+gh repo view --web       # open the repo's GitHub page
+```
+
+**When:** use `gh` for the fast path — `gh pr create` and `gh pr checkout` save
+real time — and `--web` / `gh browse` whenever a task is easier by clicking
+(reviewing a large diff, editing repo settings, browsing Actions). The terminal
+and the UI are two views of the same GitHub; `gh` lets you move between them
+fluidly.
+
+## Git & GitHub cheat sheet
+
+| Goal | Command |
+| --- | --- |
+| Start / copy a repo | `git init` · `git clone <url>` |
+| See state / history | `git status` · `git log --oneline --graph` |
+| Save work | `git add -p` · `git commit -m "…"` |
+| Branch | `git switch -c name` · `git switch main` |
+| Sync | `git pull` · `git push -u origin name` · `git fetch` |
+| Integrate | `git merge branch` (integrate) · `git rebase main` (tidy) |
+| Grab one commit | `git cherry-pick <sha>` |
+| Shelve / restore | `git stash` · `git stash pop` |
+| Two branches at once | `git worktree add ../dir branch` |
+| Undo safely (shared) | `git revert <sha>` |
+| Fork + clone | `gh repo fork --clone` |
+| Open a PR | `gh pr create` |
+| Test someone's PR | `gh pr checkout <n>` |
+| Jump to the web UI | `gh browse` · `gh pr view --web` |
+
+## References
+
+- [Pro Git book](https://git-scm.com/book) (free, the definitive reference) · [git docs](https://git-scm.com/docs)
+- [GitHub CLI manual](https://cli.github.com/manual/) · [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow)
+- [Oh Shit, Git!?!](https://ohshitgit.com/) — getting out of common git messes
+- [First Contributions](https://github.com/firstcontributions/first-contributions) — a repo that walks you through your first PR

@@ -67,6 +67,27 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Toolchains & Contributing',
+          translations: { 'pt-BR': 'Ferramentas & Contribuir' },
+          items: [
+            {
+              label: 'The Toolchains: cargo · uv · go',
+              translations: { 'pt-BR': 'As Toolchains: cargo · uv · go' },
+              slug: 'toolchains/cli-tools',
+            },
+            {
+              label: 'Git & GitHub for Contributors',
+              translations: { 'pt-BR': 'Git & GitHub para Contribuidores' },
+              slug: 'toolchains/git-github',
+            },
+            {
+              label: 'Where to Contribute',
+              translations: { 'pt-BR': 'Onde Contribuir' },
+              slug: 'toolchains/contributing',
+            },
+          ],
+        },
+        {
           label: 'Part 1 · Foundations',
           translations: { 'pt-BR': 'Parte 1 · Fundamentos' },
           items: [

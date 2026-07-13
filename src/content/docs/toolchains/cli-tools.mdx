@@ -1,0 +1,278 @@
+---
+title: "The Toolchains: cargo · uv · go"
+description: "The command-line tools every example in this academy uses — how to build, run, test, format, lint, and ship releases in Rust (cargo), Python (uv), and Go, plus the config files (Cargo.toml, pyproject.toml, go.mod) that hold it all together."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Before the first lesson, meet the tools. Every example in this academy is built,
+run, and tested with a language's standard command-line toolchain — and knowing
+those tools *is* the difference between reading code and contributing to it. This
+page is the reference you'll come back to: the handful of commands that cover
+95% of daily work in each language, the release builds, the formatters and
+linters, and the config files that describe a project.
+
+<Aside type="tip" title="Learn the tool, not just the language">
+  A language you can write but not build, test, or lint is a language you can
+  only read. Open-source contribution runs on these commands: clone, install,
+  build, run the tests, format, lint, open a PR. Get fluent here and every
+  project in the three ecosystems opens up to you.
+</Aside>
+
+## Rust — `cargo`
+
+`cargo` is Rust's build tool, package manager, test runner, and script runner in
+one. You install it with **rustup** (the Rust toolchain installer):
+
+```bash
+# Install the Rust toolchain (includes cargo, rustc, rustup)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+rustup update            # update to the latest stable Rust
+rustup component add clippy rustfmt   # linter + formatter (usually preinstalled)
+```
+
+### Daily commands
+
+```bash
+cargo new my-crate       # create a new project (a "crate")
+cargo run                # compile and run (debug build)
+cargo build              # compile to target/debug/
+cargo test               # run all tests (unit, integration, doc-tests)
+cargo fmt                # format code (rustfmt) — the academy runs `cargo fmt --check` in CI
+cargo clippy             # lint — the academy runs `cargo clippy -- -D warnings` (warnings = errors)
+cargo doc --open         # build and open the crate's API docs
+```
+
+Every Rust example in this academy passes exactly three gates, the same ones
+its CI runs:
+
+```bash
+cargo fmt --check                 # formatting is correct
+cargo clippy -- -D warnings       # no lint warnings
+cargo test                        # all tests green
+```
+
+### Release builds
+
+The debug build is fast to compile but slow to run. A **release build** turns on
+optimizations — this is what every benchmark in the academy used:
+
+```bash
+cargo run --release      # optimized run
+cargo build --release    # optimized binary in target/release/
+```
+
+The size and speed difference is real: the Part 3 log analyzer was ~7× faster in
+release mode. Ship release builds; develop in debug.
+
+### `Cargo.toml` — the project manifest
+
+A TOML file describing the crate. The essentials:
+
+```toml
+[package]
+name = "my-crate"
+version = "0.1.0"
+edition = "2021"          # the Rust edition (language epoch)
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }  # a crate + a feature flag
+serde = "1.0"             # shorthand for version "^1.0"
+
+[profile.release]
+strip = true              # strip symbols for a smaller binary
+
+[[bin]]
+name = "mytool"           # an extra binary target
+path = "src/main.rs"
+```
+
+`cargo` also writes a **`Cargo.lock`** that pins exact dependency versions for
+reproducible builds — commit it for applications, and it's fine to ignore for
+libraries.
+
+## Python — `uv`
+
+`uv` is a fast, modern Python project and package manager (from Astral, the makers
+of `ruff`). It replaces the old tangle of `pip` + `venv` + `virtualenv` +
+`pyenv` with one tool. Install it, then let it manage Python versions,
+virtual environments, and dependencies for you.
+
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv python install 3.12   # install a Python version, no system Python needed
+```
+
+### Daily commands
+
+```bash
+uv init my-project       # create a project with a pyproject.toml
+uv add requests          # add a dependency (writes pyproject.toml + uv.lock)
+uv run python app.py     # run inside the project's environment (auto-created)
+uv run pytest            # run the test runner in that environment
+uv sync                  # install exactly what the lockfile specifies
+uv venv                  # create a virtual environment explicitly (if you want)
+uvx ruff check .         # run a tool without installing it (uvx = uv tool run)
+```
+
+`uv run <cmd>` is the everyday command: it ensures the environment exists, has
+the right dependencies, and runs your command inside it — no manual `activate`
+step. The academy's Python examples run their checks like this:
+
+```bash
+uv run ruff format --check .     # formatting is correct
+uv run ruff check .              # lint is clean
+uv run python -m unittest discover -s . -p 'test_*.py'   # tests green
+```
+
+### `ruff` — format and lint in one
+
+`ruff` is an extremely fast formatter *and* linter for Python (a single tool
+replacing `black`, `isort`, `flake8`, and more). The academy uses it everywhere:
+
+```bash
+uv run ruff format .     # format (like `cargo fmt` / `gofmt`)
+uv run ruff check .      # lint (like `cargo clippy` / `go vet`)
+uv run ruff check --fix .  # auto-fix what it can
+```
+
+### Release / distribution
+
+Python doesn't compile to a native binary by default. To *distribute* a Python
+project you build a wheel:
+
+```bash
+uv build                 # produce a wheel + sdist in dist/
+```
+
+For a single-file executable (like Go/Rust ship), tools such as `pyinstaller`
+bundle the interpreter with your code — but the common path is publishing a
+package to PyPI (`uv publish`) or shipping a container image.
+
+### `pyproject.toml` — the project manifest
+
+The modern standard for Python project config — one TOML file for metadata,
+dependencies, and tool settings:
+
+```toml
+[project]
+name = "my-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["requests>=2.31"]
+
+[tool.ruff]
+line-length = 100        # ruff (formatter + linter) config
+
+[build-system]
+requires = ["hatchling"]         # how the package is built
+build-backend = "hatchling.build"
+```
+
+`uv` writes a **`uv.lock`** for reproducible installs — commit it for
+applications.
+
+## Go — `go`
+
+Go's toolchain is a single `go` command, installed from
+[go.dev/dl](https://go.dev/dl/). It builds, runs, tests, and manages modules with
+no external tools — batteries included, deliberately.
+
+### Daily commands
+
+```bash
+go mod init example.com/mytool   # start a module (writes go.mod)
+go run .                 # compile and run the current package
+go build                 # compile to a binary in the current directory
+go test ./...            # run all tests in all packages
+go vet ./...             # report suspicious constructs (like a linter)
+gofmt -w .               # format code in place (formatting is mandatory in Go)
+go get github.com/x/y    # add a dependency (updates go.mod + go.sum)
+```
+
+The academy's Go examples pass the same three gates as its CI:
+
+```bash
+test -z "$(gofmt -l .)"   # everything is gofmt-clean (gofmt -l lists unformatted files)
+go vet ./...              # no suspicious constructs
+go test -race ./...       # tests pass, and the race detector finds no data races
+```
+
+The `-race` flag is Go's killer feature for concurrency (see the
+[Threads lesson](/systems-programming-academy/part-4-concurrency/threads-shared-state/)):
+it instruments the binary to catch data races at runtime.
+
+### Release builds
+
+`go build` already produces a static, dependency-free native binary. For a
+smaller, production binary and cross-compilation:
+
+```bash
+go build -ldflags="-s -w"        # strip debug info for a smaller binary
+GOOS=linux GOARCH=arm64 go build # cross-compile for another OS/arch, no toolchain juggling
+```
+
+Cross-compiling by just setting two environment variables is a Go superpower —
+one machine builds binaries for every platform.
+
+### `go.mod` — the module file
+
+Not TOML, but a simple text format declaring the module, its Go version, and its
+dependencies:
+
+```text
+module example.com/mytool
+
+go 1.23
+
+require (
+    github.com/spf13/cobra v1.8.0
+    modernc.org/sqlite v1.53.0
+)
+```
+
+Go also writes a **`go.sum`** with cryptographic checksums of every dependency —
+always commit it; it's what makes builds tamper-proof and reproducible.
+
+## The cheat sheet
+
+The same task, three tools:
+
+| Task | Rust | Python (uv) | Go |
+| --- | --- | --- | --- |
+| New project | `cargo new` | `uv init` | `go mod init` |
+| Run | `cargo run` | `uv run python x.py` | `go run .` |
+| Build | `cargo build` | `uv build` (wheel) | `go build` |
+| Release build | `cargo build --release` | `uv build` + publish | `go build -ldflags="-s -w"` |
+| Test | `cargo test` | `uv run pytest` | `go test ./...` |
+| Format | `cargo fmt` | `uv run ruff format` | `gofmt -w .` |
+| Lint | `cargo clippy` | `uv run ruff check` | `go vet ./...` |
+| Add dependency | edit `Cargo.toml` / `cargo add` | `uv add x` | `go get x` |
+| Manifest file | `Cargo.toml` | `pyproject.toml` | `go.mod` |
+| Lockfile | `Cargo.lock` | `uv.lock` | `go.sum` |
+
+<Aside type="note" title="Why the academy's examples are dependency-free">
+  Almost every example in this academy uses only its language's standard library
+  — no external crates or packages — so you can `cargo test`, `uv run`, or
+  `go test` them with nothing to install. The tools above are exactly what you'd
+  reach for the moment you add a real dependency, which the
+  [running guestbook app](/systems-programming-academy/capstone/running-app/)
+  does with a real SQLite driver.
+</Aside>
+
+## What next
+
+You now know how to build, run, test, format, and lint in all three languages —
+the daily loop of any contributor. Next, learn the workflow that gets your change
+*into* a project: the [Git & GitHub guide](/systems-programming-academy/toolchains/git-github/).
+Then find something to work on in [Where to Contribute](/systems-programming-academy/toolchains/contributing/).
+
+## References
+
+- Rust — [The Cargo Book](https://doc.rust-lang.org/cargo/) · [rustup](https://rustup.rs/)
+- Python — [uv documentation](https://docs.astral.sh/uv/) · [ruff](https://docs.astral.sh/ruff/) · [pyproject.toml spec](https://packaging.python.org/en/latest/specifications/pyproject-toml/)
+- Go — [go command docs](https://pkg.go.dev/cmd/go) · [How to Write Go Code](https://go.dev/doc/code)
+- [TOML specification](https://toml.io/) — the config format Rust and Python use

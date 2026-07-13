@@ -1,0 +1,219 @@
+---
+title: "Git & GitHub para Contribuidores"
+description: "Um guia prático do workflow de controlo de versões sobre o qual o open source corre — os comandos git centrais (init, clone, branch, commit, pull, push, merge, rebase, cherry-pick, worktree, stash) com o contexto colaborativo de quando usar cada um, mais o GitHub CLI (gh) que opera o GitHub a partir do terminal."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Podes escrever código impecável em três linguagens e mesmo assim não contribuir
+para um único projeto, porque contribuir é um *workflow*, não uma linguagem. Esse
+workflow é o **git** (a ferramenta de controlo de versões) e o **GitHub** (onde os
+projetos vivem e colaboram). Este guia ensina os comandos que de facto usas e —
+mais importante — *quando* e *porquê* usar cada um numa equipa.
+
+<Aside type="tip" title="Git é um grafo de commits">
+  Tudo o que se segue faz sentido assim que seguras um modelo mental: um
+  repositório git é um grafo de **commits** (snapshots), e as **branches** são só
+  etiquetas móveis a apontar para commits. "Merge", "rebase", "cherry-pick" são
+  todas formas de mover trabalho entre branches nesse grafo. Mantém o grafo na
+  cabeça e os comandos deixam de ser magia.
+</Aside>
+
+## Iniciar um repositório
+
+```bash
+git init                 # tornar a pasta atual num repo git (projeto novo)
+git clone <url>          # descarregar um repo existente (projeto de outra pessoa)
+git status               # o que mudou, o que está staged — corre isto constantemente
+git log --oneline --graph  # ver o histórico de commits como um grafo
+```
+
+**Quando:** `git init` para um projeto que estás a começar; `git clone` para um que
+existe. `git status` e `git log` são os dois que corres o dia todo para te
+orientares.
+
+## O ciclo central: mudar, staging, commit
+
+```bash
+git add <file>           # pôr as mudanças de um ficheiro em staging para o próximo commit
+git add -p               # staging interativo, pedaço a pedaço (revês à medida)
+git commit -m "mensagem" # registar as mudanças em staging como um commit
+git diff                 # o que mudou mas ainda não está staged
+git diff --staged        # o que está staged para o próximo commit
+```
+
+**Quando:** sempre que terminas um pedaço de trabalho coerente. Um bom commit é
+pequeno e autocontido, com uma mensagem que diz *porquê*, não só *o quê*. É a
+pulsação do git — vais fazê-lo dezenas de vezes por dia.
+
+<Aside type="note" title="Anatomia de uma boa mensagem de commit">
+  Uma linha-resumo imperativa e concisa (`Corrigir race na eviction da cache`),
+  uma linha em branco, depois um parágrafo a explicar o *porquê* se não for óbvio.
+  Os revisores leem a mensagem antes do diff; uma mensagem clara torna a tua
+  mudança fácil de aceitar.
+</Aside>
+
+## Branches: trabalhar sem incomodar os outros
+
+```bash
+git branch                       # listar branches
+git switch -c fix-the-bug        # criar e mudar para uma branch nova (moderno)
+git checkout -b fix-the-bug      # o mesmo, sintaxe antiga
+git switch main                  # voltar para a main
+git branch -d fix-the-bug        # apagar uma branch já merged
+```
+
+**Quando:** *começa sempre uma mudança numa branch*, nunca diretamente na `main`.
+Uma branch isola o teu trabalho para a `main` ficar estável e distribuível, e para
+várias pessoas (ou várias features) avançarem em paralelo sem se atropelarem. É o
+hábito colaborativo mais importante de todos.
+
+## Sincronizar com o remoto: pull, push, fetch
+
+```bash
+git remote -v                    # mostrar os repositórios remotos (normalmente "origin")
+git fetch                        # descarregar mudanças remotas SEM as juntar
+git pull                         # fetch + merge das mudanças remotas na tua branch
+git push                         # enviar os teus commits para o remoto
+git push -u origin fix-the-bug   # enviar uma branch nova e pô-la a track do origin
+```
+
+**Quando:** `git pull` antes de começares a trabalhar (obtém o mais recente de
+todos); `git push` quando queres partilhar ou fazer backup dos teus commits. O
+`git fetch` é a versão cautelosa do pull — descarregar e *olhar* antes de juntar,
+útil quando queres ver o que mudou sem mexer no teu estado de trabalho.
+
+## Combinar trabalho: merge e rebase
+
+Duas formas de trazer os commits de uma branch para outra:
+
+```bash
+git merge feature        # juntar os commits da feature na branch atual
+git rebase main          # reaplicar os commits da tua branch por cima da main mais recente
+```
+
+**Quando:** o **merge** preserva o histórico exatamente, criando um commit de
+merge — é honesto sobre o que aconteceu e é o default seguro, sobretudo para
+branches partilhadas. O **rebase** reescreve a tua branch para assentar por cima da
+`main` mais recente, produzindo um histórico limpo e linear — ótimo para arrumar a
+*tua própria* branch de feature antes de abrir um pull request, mas nunca faças
+rebase de uma branch que outros já fizeram pull (reescreve commits de que eles
+dependem). Regra de ouro: *merge para integrar, rebase para arrumar o teu trabalho
+local*.
+
+## Ferramentas de precisão: cherry-pick, stash, worktree
+
+```bash
+git cherry-pick <commit>   # aplicar um commit específico na branch atual
+git stash                  # arrumar mudanças não commitadas para ter tudo limpo
+git stash pop              # trazer de volta as mudanças arrumadas
+git worktree add ../hotfix main   # fazer checkout de outra branch numa segunda pasta
+```
+
+- **`cherry-pick`** — quando precisas de *um* commit de outra branch (uma correção
+  que tem de ir para uma branch de release, por exemplo) sem juntar tudo o resto.
+- **`stash`** — quando estás a meio de uma mudança e precisas de uma árvore limpa
+  *já* (para fazer pull, mudar de branch, ou testar algo), e depois retomas. Um
+  guardar-e-restaurar rápido.
+- **`worktree`** — quando precisas de duas branches em checkout *ao mesmo tempo* em
+  pastas separadas (rever um PR enquanto a tua feature ainda está a compilar), sem
+  re-clonar. Uma jogada de mestre para gerir trabalho paralelo.
+
+## Desfazer coisas em segurança
+
+```bash
+git restore <file>         # descartar mudanças não commitadas num ficheiro
+git reset --soft HEAD~1    # desfazer o último commit, manter as mudanças em staging
+git revert <commit>        # criar um NOVO commit que desfaz um antigo (seguro em histórico partilhado)
+```
+
+**Quando:** `git revert` em qualquer coisa já enviada (desfaz sem reescrever o
+histórico, por isso é seguro para colegas); `git reset` só para commits locais que
+ainda não partilhaste. A regra de ouro da colaboração: **nunca reescrevas
+histórico que outros já fizeram pull.**
+
+## O workflow do contribuidor, de ponta a ponta
+
+Juntando tudo — a sequência exata para contribuir para o projeto de outra pessoa:
+
+<Aside type="note" title="Fork → branch → PR">
+  1. **Fork** ao projeto no GitHub (a tua própria cópia).
+  2. `git clone` do teu fork, `git switch -c my-fix` para começar uma branch.
+  3. Faz a mudança, `git add`, `git commit` em passos pequenos.
+  4. `git push -u origin my-fix` para enviar a branch para o teu fork.
+  5. Abre um **pull request** da tua branch para o projeto original.
+  6. Responde à revisão, envia mais commits; quando aprovado, um maintainer faz o merge.
+
+  É assim que essencialmente toda a contribuição open source acontece. Lê primeiro
+  o `CONTRIBUTING.md` do projeto — diz-te as convenções locais.
+</Aside>
+
+## GitHub a partir do terminal: o CLI `gh`
+
+O **GitHub CLI** (`gh`) opera o GitHub — issues, pull requests, forks, releases —
+sem sair do terminal, e salta para a UI web quando a queres.
+
+```bash
+gh auth login            # autenticar uma vez (abre um browser para entrar)
+gh repo fork --clone     # fazer fork de um repo E clonar o teu fork num só passo
+gh repo clone owner/name # clonar um repo pelo seu caminho no GitHub
+gh repo create           # criar um repo novo (esta academia foi publicada com ele)
+```
+
+### Pull requests e issues
+
+```bash
+gh pr create             # abrir um PR da tua branch atual (pede título/corpo)
+gh pr list               # listar PRs abertos
+gh pr checkout 42        # fazer checkout do PR #42 localmente para o testar
+gh pr view 42 --web      # abrir o PR #42 no browser
+gh pr status             # PRs relevantes para ti (teus, pedidos de revisão)
+
+gh issue list            # listar issues
+gh issue create          # abrir um issue novo
+gh issue list --label "good first issue"   # encontrar trabalho para principiantes
+```
+
+### Saltar para a UI
+
+O `gh` é uma ponte, não um substituto — quando queres a interface web do GitHub,
+leva-te lá diretamente:
+
+```bash
+gh browse                # abrir o repo atual no browser
+gh pr view --web         # abrir a página do PR da branch atual
+gh issue view 7 --web    # abrir o issue #7 no browser
+gh repo view --web       # abrir a página do repo no GitHub
+```
+
+**Quando:** usa o `gh` para o caminho rápido — `gh pr create` e `gh pr checkout`
+poupam tempo real — e `--web` / `gh browse` sempre que uma tarefa é mais fácil a
+clicar (rever um diff grande, editar definições do repo, navegar as Actions). O
+terminal e a UI são duas vistas do mesmo GitHub; o `gh` deixa-te mover entre elas
+fluidamente.
+
+## Folha de consulta de Git & GitHub
+
+| Objetivo | Comando |
+| --- | --- |
+| Iniciar / copiar um repo | `git init` · `git clone <url>` |
+| Ver estado / histórico | `git status` · `git log --oneline --graph` |
+| Guardar trabalho | `git add -p` · `git commit -m "…"` |
+| Branch | `git switch -c nome` · `git switch main` |
+| Sincronizar | `git pull` · `git push -u origin nome` · `git fetch` |
+| Integrar | `git merge branch` (integrar) · `git rebase main` (arrumar) |
+| Agarrar um commit | `git cherry-pick <sha>` |
+| Arrumar / restaurar | `git stash` · `git stash pop` |
+| Duas branches ao mesmo tempo | `git worktree add ../dir branch` |
+| Desfazer em segurança (partilhado) | `git revert <sha>` |
+| Fork + clone | `gh repo fork --clone` |
+| Abrir um PR | `gh pr create` |
+| Testar o PR de alguém | `gh pr checkout <n>` |
+| Saltar para a UI web | `gh browse` · `gh pr view --web` |
+
+## Referências
+
+- [Livro Pro Git](https://git-scm.com/book/pt-pt) (grátis, a referência definitiva) · [docs do git](https://git-scm.com/docs)
+- [Manual do GitHub CLI](https://cli.github.com/manual/) · [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow)
+- [Oh Shit, Git!?!](https://ohshitgit.com/) — sair de trapalhadas comuns do git
+- [First Contributions](https://github.com/firstcontributions/first-contributions) — um repo que te guia pelo teu primeiro PR
