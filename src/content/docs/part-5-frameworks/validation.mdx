@@ -1,0 +1,429 @@
+---
+title: "Validation Framework: Declare, Don't Check"
+description: Build a declarative validation framework in Rust, Go, and Python. Declare a schema of rules per field; the evaluator accumulates every error at once instead of failing fast. Byte-identical error output across all three.
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Every system that accepts input from the outside world validates it — a signup
+form, an API request body, a config file, a CSV import. Done badly, that
+validation is a thicket of `if` statements smeared through a request handler.
+Done well, it is a **framework**: you *declare* the rules a record must satisfy,
+and an evaluator applies them. This lesson builds that framework in all three
+languages.
+
+The design decision that carries the lesson is **error accumulation**. A naive
+validator stops at the first problem and reports it. A good one collects
+*every* failure and returns them together. The difference is the entire user
+experience of a form: "fix your email" → submit → "now fix your password" →
+submit → "now fix your age" is infuriating; showing all three at once is
+humane. Fail-fast is right for programming errors; **user input wants
+fail-complete**.
+
+<Aside type="note" title="Declaration over imperative checking">
+  The framework shift is from *how* to *what*. Imperative validation says "if
+  the name is empty, error; if it's too short, error; if the age doesn't parse,
+  error" — the mechanism, spelled out every time. Declarative validation says
+  "name: required, 2–30 chars; age: integer 18–120" — the intent, once, as
+  data. The evaluator is written once and reused for every schema. That is the
+  same move as the router (declare routes) and the query builder (declare a
+  query): frameworks turn procedures into declarations.
+</Aside>
+
+Code:
+[`examples/part5-validator-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 8 tests each. Pure functions over string records, so the
+collected errors are directly assertable and are **byte-identical across all
+three languages**.
+
+## Declaring a schema
+
+A schema is an ordered list of fields, each with a list of rules. The rules are
+small, composable, and named after what they mean.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="validator.py"
+schema = (
+    Schema()
+    .field("username", required(), min_length(3), max_length(20))
+    .field("age", required(), in_range(18, 120))
+    .field("role", one_of("admin", "user", "guest"))
+)
+```
+
+Python models each rule as a **closure** — `min_length(3)` returns a function
+`str -> str` that reports an error or `""`. Rules are just functions, so adding
+a custom one is writing a lambda; the framework never needs to know about it.
+</TabItem>
+<TabItem label="Go">
+```go title="validator.go"
+schema := New().
+    Field("username", Required(), MinLength(3), MaxLength(20)).
+    Field("age", Required(), InRange(18, 120)).
+    Field("role", OneOf("admin", "user", "guest"))
+```
+
+Go models a rule as a small `Rule` struct tagged with its kind and parameters,
+built by helper constructors. No closures capturing state — the rule is plain
+data, which Go programmers tend to prefer for its inspectability.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+let schema = Schema::new()
+    .field("username", vec![Rule::Required, Rule::MinLength(3), Rule::MaxLength(20)])
+    .field("age", vec![Rule::Required, Rule::InRange(18, 120)])
+    .field("role", vec![Rule::OneOf(vec!["admin".into(), "user".into(), "guest".into()])]);
+```
+
+Rust models rules as an **enum** — `Rule::MinLength(3)`, `Rule::InRange(18, 120)`.
+The enum makes the set of rules a closed, exhaustively-matched type: the
+compiler guarantees the evaluator handles every variant, and adding a rule is a
+compile error until you handle it everywhere. Closed-set-as-enum vs
+open-set-as-closure is a real design fork, and each language leans its natural
+way.
+</TabItem>
+</Tabs>
+
+## The evaluator: accumulate, don't bail
+
+`validate` walks the schema and collects errors. The load-bearing detail is
+what it does *not* do: it never returns early. Every field is checked, every
+rule on every present field is checked, and all failures land in one list.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn validate(&self, data: &HashMap<String, String>) -> Vec<Error> {
+    let mut errors = Vec::new();
+    for (field, rules) in &self.fields {
+        let value = data.get(field).map(String::as_str).unwrap_or("");
+        let present = !value.is_empty();
+        let required = rules.iter().any(|r| matches!(r, Rule::Required));
+
+        if !present {
+            if required {
+                errors.push(Error { field: field.clone(), message: "is required".into() });
+            }
+            continue; // absent value: nothing else to check
+        }
+
+        for rule in rules {
+            if matches!(rule, Rule::Required) {
+                continue; // already satisfied (value is present)
+            }
+            if let Some(message) = rule.check(value) {
+                errors.push(Error { field: field.clone(), message });
+            }
+        }
+    }
+    errors
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="validator.go"
+func (s *Schema) Validate(data map[string]string) []Error {
+	errors := []Error{}
+	for _, f := range s.fields {
+		value := data[f.name]
+		present := value != ""
+		required := false
+		for _, r := range f.rules {
+			if r.isRequired() {
+				required = true
+				break
+			}
+		}
+
+		if !present {
+			if required {
+				errors = append(errors, Error{f.name, "is required"})
+			}
+			continue
+		}
+
+		for _, r := range f.rules {
+			if r.isRequired() {
+				continue
+			}
+			if msg := r.check(value); msg != "" {
+				errors = append(errors, Error{f.name, msg})
+			}
+		}
+	}
+	return errors
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="validator.py"
+def validate(self, data: dict[str, str]) -> list[Error]:
+    errors: list[Error] = []
+    for name, rules in self._fields:
+        value = data.get(name, "")
+        present = value != ""
+        is_req = any(_is_required(r) for r in rules)
+
+        if not present:
+            if is_req:
+                errors.append(Error(name, "is required"))
+            continue
+
+        for rule in rules:
+            if _is_required(rule):
+                continue
+            message = rule(value)
+            if message:
+                errors.append(Error(name, message))
+    return errors
+```
+</TabItem>
+</Tabs>
+
+The absent-value logic is the subtle part and it is the same in all three: a
+**required** field that is missing or empty produces exactly one `is required`
+error and skips its other rules (no point checking the length of a value that
+isn't there); an **optional** field that is absent is skipped entirely — that is
+precisely what "optional" means. Getting this wrong produces the classic
+double-error bug: "age is required" *and* "age must be an integer" for the same
+empty field.
+
+## The payoff: every error, at once
+
+Point the schema at a thoroughly broken record and you get the whole story in
+one pass:
+
+```text
+input:  { username: "ab", age: "twelve", role: "superadmin" }
+
+errors:
+  - username: must be at least 3 characters
+  - age: must be an integer
+  - role: must be one of admin, user, guest
+```
+
+Three independent problems, three messages, one submit. And because the schema
+is an *ordered* list and the evaluator never reorders, the output is
+deterministic — which is why the exact same eight tests, asserting these exact
+strings, pass against all three implementations, and why the three demos print
+byte-identical output.
+
+<Mermaid title="Fail-fast stops at the first error; fail-complete collects them all" code={`flowchart TD
+  I["input record"] --> FF{fail-fast}
+  FF -->|first error| E1["report 1 error, stop"]
+  E1 --> R1["user fixes it, resubmits, hits error 2..."]
+  I --> FC{fail-complete}
+  FC --> C["check EVERY field and rule"]
+  C --> E3["report all 3 errors together"]
+  E3 --> R3["user fixes all, resubmits once"]`} />
+
+## A quieter correctness win: counting characters, not bytes
+
+`min_length(4)` on `"José"` must pass — it is four characters. But `"José"` is
+*five bytes* in UTF-8 (the `é` is two bytes). A validator that measures byte
+length would wrongly reject it, and would do so only for non-ASCII input — a bug
+that sails through English-only testing and breaks for exactly the users whose
+names carry accents. Each implementation counts *characters*:
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust
+value.chars().count() < *n  // chars(), not len() (which is bytes)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+utf8.RuneCountInString(value) < r.n  // runes, not len() (which is bytes)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+len(v) < n  # Python str len is already characters
+```
+</TabItem>
+</Tabs>
+
+Rust's `len()` and Go's `len()` both return *bytes*; you must reach for
+`chars().count()` / `utf8.RuneCountInString`. Python's `len` on a `str` is
+already characters. The test `multibyte_length_counts_characters_not_bytes`
+pins this in all three — a one-line test guarding a bug class that only appears
+in production, for real people named José, Zoë, or 田中.
+
+<Aside type="tip" title="Where real validators go further">
+  Production frameworks (Pydantic, validator.js, Go's validator, Rust's
+  `validator` crate) add nested objects, cross-field rules ("password must match
+  confirmation"), type coercion, and internationalized messages. But the two
+  ideas here are the invariant core: declarative schemas and accumulated errors.
+  Everything else is features on that spine.
+</Aside>
+
+## Exercises
+
+**1. Add a custom rule (all three).** Add an `email` rule that requires an `@`
+with non-empty text on both sides (no regex needed). Notice how each language
+absorbs a new rule: Python and Go by adding a function/constructor, Rust by
+adding an enum variant — and the compiler then *forcing* you to handle it in
+`check`. Which experience do you prefer, and why?
+
+<details>
+<summary>Solution sketch</summary>
+
+Python/Go add an open-set rule with zero changes elsewhere — flexible, but a
+typo'd rule kind fails silently. Rust's enum variant won't compile until every
+`match` handles it — more friction to add, but the compiler guarantees no rule
+is ever forgotten in the evaluator. This is the open-vs-closed extensibility
+trade-off in miniature: closures/interfaces optimize for adding cases, enums
+optimize for adding operations safely. Neither is universally right; the enum
+shines when the rule set is stable and the evaluator complex.
+
+</details>
+
+**2. Add cross-field validation (any language).** Add a schema-level rule
+`fields_match("password", "password_confirm")` that errors if two fields differ.
+Why can't this live inside a single field's rule list, and where must it run in
+the evaluator?
+
+<details>
+<summary>Solution sketch</summary>
+
+A per-field rule only sees one field's value, so it structurally cannot compare
+two fields — cross-field rules need the whole record. They run as a second phase
+after per-field validation (often only if the individual fields passed, so you
+don't say "passwords don't match" when one is also empty). This is why real
+schemas separate field rules from record/model rules: they operate on different
+scopes, and conflating them is a design smell.
+
+</details>
+
+**3. Return structured errors, not strings (Rust or Go).** Change `Error` to
+carry a machine-readable `code` (`"min_length"`, `"out_of_range"`) alongside the
+human message, so an API can return JSON that a frontend localizes. What breaks
+in the tests, and what does that tell you about coupling tests to message
+wording?
+
+<details>
+<summary>Solution sketch</summary>
+
+Tests that assert exact English strings break — which reveals they were coupled
+to presentation, not behavior. Asserting on a stable `code` plus the parameters
+(`{code: "min_length", n: 3}`) tests the *rule that fired* without freezing the
+wording, so copy edits and translations don't break the suite. This is the
+lesson that error *identity* (a code) and error *presentation* (a message)
+should be separate concerns — the same separation the query-builder lesson drew
+between structure and value.
+
+</details>
+
+<Quiz
+  question={'A signup has three independent problems: short username, non-numeric age, invalid role. What does a well-designed validator return, and why?'}
+  options={[
+    { text: 'All three errors at once, so the user can fix everything in a single resubmit', correct: true, explanation: 'This is error accumulation / fail-complete. Reporting one error per submit forces the user through three round-trips for problems they could have fixed together — a needless, frustrating experience. The validator checks every field and rule and returns the full list.' },
+    { text: 'Only the first error (short username), stopping there to save work', correct: false, explanation: 'Fail-fast is appropriate for programming errors, not user input. Stopping at the first problem makes the user resubmit repeatedly, discovering one issue at a time. Validation of external input should be fail-complete.' },
+    { text: 'A generic "invalid input" without specifics', correct: false, explanation: 'A message with no detail is nearly useless — the user cannot tell what to fix. Good validation names each field and what is wrong with it.' },
+    { text: 'It throws an exception on the first failure', correct: false, explanation: 'Throwing on the first failure is fail-fast with extra steps; it surfaces one problem and discards the rest. Accumulating errors into a returned list is the correct shape for input validation.' },
+  ]}
+/>
+
+<Quiz
+  question={'An empty "age" field is marked Required and InRange(18,120). How many errors should it produce, and which?'}
+  options={[
+    { text: 'Exactly one: "is required" — the other rules are skipped because there is no value to check', correct: true, explanation: 'A missing required value yields the required error and stops; running InRange on the absent value would add a spurious "must be an integer", double-reporting one underlying problem. The evaluator checks required first and skips the rest when the value is absent.' },
+    { text: 'Two: "is required" and "must be an integer"', correct: false, explanation: 'That is the classic double-error bug. The value is absent for one reason; reporting it as both missing and malformed is confusing noise. Skip the value-shape rules when the value is not there.' },
+    { text: 'Zero, because you cannot validate what is not present', correct: false, explanation: 'The field is Required, so its absence is itself the error. Optional absent fields produce zero errors; required absent fields produce exactly the "is required" error.' },
+    { text: 'Three: required, not an integer, and out of range', correct: false, explanation: 'Piling on every rule for an absent value is maximally noisy and confusing. One clear "is required" is the correct, humane result.' },
+  ]}
+/>
+
+<Quiz
+  question={'Why does min_length count characters instead of the string\'s byte length?'}
+  options={[
+    { text: 'Because in UTF-8 a character can be multiple bytes, so byte length would wrongly reject valid non-ASCII input like "José" (4 chars, 5 bytes)', correct: true, explanation: 'Measuring bytes conflates length with encoding size. "José" is four characters but five bytes; a byte-based check rejects it against min_length(4), failing only for non-ASCII names — a bug invisible in English-only tests and real for a huge share of actual users.' },
+    { text: 'Because counting characters is faster than counting bytes', correct: false, explanation: 'Counting characters in UTF-8 is if anything slightly more work than reading a byte length. Correctness for international input, not speed, is the reason.' },
+    { text: 'Because bytes and characters are always the same anyway', correct: false, explanation: 'They are equal only for ASCII. Any accented letter, emoji, or non-Latin script has characters that span multiple bytes — which is exactly when the distinction matters.' },
+    { text: 'Because the tests happen to use short strings', correct: false, explanation: 'The choice is about correctness for all input, not the test data. The multibyte test exists precisely to pin character-counting for names like José.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Why accumulate validation errors instead of failing on the first one?">
+
+Because validation of external input is a user-experience surface, not just a
+correctness gate. Failing fast — returning at the first invalid field — forces
+the user or client into a submit-fix-submit loop, discovering one problem per
+round-trip, which is slow and infuriating for a form with several issues.
+Accumulating every error and returning them together lets the user fix
+everything in one pass. The distinction generalizes: fail-fast is right for
+*programmer* errors (a bug should stop the program loudly and early), while
+fail-complete is right for *user* errors (report the full picture so they can
+respond once). An API doing input validation should return all field errors in
+its 400 response for the same reason; clients render them next to each field.
+
+</Interview>
+
+<Interview question="Declarative vs imperative validation — what's the real difference and trade-off?">
+
+Imperative validation writes the checks inline: a sequence of `if`s in the
+handler that test and reject. Declarative validation describes the constraints
+as data — a schema — and a generic evaluator applies them. The declarative
+version wins on reuse (one evaluator, many schemas), consistency (every field
+validated the same way, errors formatted uniformly), and inspectability (you can
+serialize the schema, generate docs or a frontend from it, diff it in review).
+The cost is a layer of indirection and less flexibility for genuinely one-off,
+complex logic — a bizarre cross-field rule can be clumsier to express
+declaratively than to just write. The pragmatic answer is a declarative core for
+the common 90% (types, presence, ranges, formats) with an escape hatch for
+custom rules, which is exactly how Pydantic, JSON Schema, and the framework in
+this lesson are shaped.
+
+</Interview>
+
+<Interview question="You are validating length. What's a subtle bug that only shows up in production?">
+
+Measuring length in bytes instead of characters. In UTF-8, non-ASCII characters
+occupy multiple bytes, so a "minimum 4 characters" check implemented as a byte
+count rejects valid input like "José" (four characters, five bytes) — and only
+for names with accents or non-Latin scripts, so it passes every ASCII test and
+breaks in production for a large fraction of real users. The fix is to count
+Unicode scalar values or grapheme clusters, not bytes: `chars().count()` in
+Rust, `utf8.RuneCountInString` in Go, `len` on a `str` in Python (already
+characters). The deeper lesson is that any code touching human text must be
+explicit about its unit — bytes, code points, or graphemes — because the three
+diverge exactly where your English-speaking test data does not, and internationa
+users pay for the assumption.
+
+</Interview>
+
+## Challenge
+
+Fuse this with the earlier Part 5 lessons into an input pipeline: a
+[route](/systems-programming-academy/part-5-frameworks/routing-middleware/)
+receives a POST, a validation middleware runs the body against a schema and
+returns a 400 with the full error list if it fails, and only valid input reaches
+the handler, which uses the [query builder](/systems-programming-academy/part-5-frameworks/query-builder/)
+to persist it. Add cross-field rules and machine-readable error codes, and mount
+it on the Part 4 server. You will have built the entire trusted-input boundary of
+a web service — the layer where the outside world's messy, hostile data is turned
+into something the rest of your code can assume is clean — from first principles,
+every rule of it tested.
+
+## References & further reading
+
+- OWASP — [Input Validation Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html)
+- Python — [Pydantic](https://docs.pydantic.dev/latest/) (the declarative-validation reference in Python)
+- Go — [`go-playground/validator`](https://github.com/go-playground/validator) (struct-tag driven declaration)
+- Rust — [`validator`](https://docs.rs/validator/latest/validator/) crate · [The Rust Book on enums & pattern matching](https://doc.rust-lang.org/book/ch06-00-enums.html)
+- [JSON Schema](https://json-schema.org/) — declarative validation as a portable, language-agnostic standard
+
+<Progress />

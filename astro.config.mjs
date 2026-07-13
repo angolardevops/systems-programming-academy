@@ -310,6 +310,12 @@ export default defineConfig({
               slug: 'part-5-frameworks/di-container',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Validation Framework',
+              translations: { 'pt-BR': 'Framework de Validação' },
+              slug: 'part-5-frameworks/validation',
+              badge: { text: 'Complete', variant: 'success' },
+            },
           ],
         },
       ],

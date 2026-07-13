@@ -1,0 +1,12 @@
+[package]
+name = "part5-validator-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a validation framework is declarative rules + an evaluator
+# that accumulates errors. No I/O, no regex crate — the rules are plain checks,
+# so the whole thing is testable by asserting the collected error list.
+
+[[bin]]
+name = "validator-demo"
+path = "src/main.rs"

@@ -49,6 +49,7 @@ jobs:
           - part5-router-rust
           - part5-querybuilder-rust
           - part5-container-rust
+          - part5-validator-rust
     defaults:
       run:
         working-directory: examples/${{ matrix.crate }}
@@ -90,6 +91,7 @@ jobs:
           - part5-router-go
           - part5-querybuilder-go
           - part5-container-go
+          - part5-validator-go
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
@@ -130,6 +132,7 @@ jobs:
           - part5-router-py
           - part5-querybuilder-py
           - part5-container-py
+          - part5-validator-py
     defaults:
       run:
         working-directory: examples/${{ matrix.module }}
