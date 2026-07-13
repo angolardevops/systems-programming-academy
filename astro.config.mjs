@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 // The Ultimate Systems Programming Academy
-// Author: Walter Angolar — Technical Review: Claude Code
+// Author: Walter Angolar
 export default defineConfig({
   site: 'https://angolardevops.github.io',
   base: '/systems-programming-academy',

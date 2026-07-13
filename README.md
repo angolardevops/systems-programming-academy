@@ -97,7 +97,7 @@ Content and code are released under the [MIT License](./LICENSE).
 
 ---
 
-**Author:** Walter Angolar · **Technical Review:** Claude Code
+**Author:** Walter Angolar
 
 Educational philosophy inspired by Guido van Rossum (Python), Rob Pike (Go), and
 Graydon Hoare (Rust).
