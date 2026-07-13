@@ -1,0 +1,483 @@
+---
+title: "Project: mini-NGINX"
+description: Build a concurrent static-file HTTP server three ways — Rust thread pool, Go goroutine-per-connection, Python asyncio — with no web framework. Byte-identical responses, path-traversal defence, and a real load test at 20k requests.
+difficulty: advanced
+estimatedMinutes: 40
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Benchmark from '../../../components/Benchmark.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={40} languages={["python", "go", "rust"]} />
+
+This is where Part 4 was heading. Three lessons — [threads](/systems-programming-academy/part-4-concurrency/threads-shared-state/),
+[channels](/systems-programming-academy/part-4-concurrency/message-passing/),
+[async I/O](/systems-programming-academy/part-4-concurrency/async-io/) — now
+converge into one real program: a **static-file HTTP server**, built in all
+three languages, with **no web framework**. Raw TCP, hand-parsed requests,
+each language's natural concurrency model doing the work.
+
+The rule that keeps it honest is the same one Part 3 used: all three servers
+emit **byte-identical responses**, verified live with `cmp`. Only then does
+comparing their throughput mean anything — we are measuring three concurrency
+strategies, not three feature sets.
+
+<Aside type="caution" title="A teaching server, not a production one">
+  This serves HTTP/1.0, one request per connection, GET only. It is complete
+  and correct for what it does — including path-traversal defence — but real
+  servers add keep-alive, HTTP/1.1 and /2, streaming bodies, timeouts per
+  phase, and far more. The point is to understand the concurrent core that all
+  of those build on.
+</Aside>
+
+Code:
+[`examples/part4-mininginx-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 8–10 tests each over real sockets, Go under `-race`.
+
+## Three concurrency models, one job
+
+<Mermaid title="Same request path, three ways to run it concurrently" code={`flowchart TD
+  A["accept() a connection"] --> B{"concurrency model"}
+  B -->|Rust| C["hand it to a fixed thread pool via a channel"]
+  B -->|Go| D["go handleConnection(conn) - one goroutine"]
+  B -->|Python| E["schedule a coroutine on the event loop"]
+  C --> F["parse request line + headers"]
+  D --> F
+  E --> F
+  F --> G["resolve path inside docroot (reject '..')"]
+  G --> H["read file, build HTTP response"]
+  H --> I["write response, close connection"]`} />
+
+The request handling is identical across all three; only the **line that
+achieves concurrency** differs. That is the whole experiment.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs — fixed thread pool"
+/// Runs the server: `n_workers` threads pull connections from a channel and
+/// serve them. This is the Rust Book's final-project shape, built on this
+/// Part's lessons.
+pub fn serve(listener: TcpListener, docroot: PathBuf, n_workers: usize) {
+    assert!(n_workers > 0, "need at least one worker");
+    let (tx, rx) = mpsc::channel::<TcpStream>();
+    let rx = Arc::new(Mutex::new(rx));
+    let docroot = Arc::new(docroot);
+
+    for _ in 0..n_workers {
+        let rx = Arc::clone(&rx);
+        let docroot = Arc::clone(&docroot);
+        thread::spawn(move || {
+            // recv() returns Err when the sender is dropped: clean shutdown.
+            while let Ok(stream) = { rx.lock().unwrap().recv() } {
+                handle_connection(stream, &docroot);
+            }
+        });
+    }
+
+    for stream in listener.incoming().flatten() {
+        if tx.send(stream).is_err() {
+            break;
+        }
+    }
+}
+```
+
+The channel (lesson 2) distributes work; the `Arc<Mutex<Receiver>>` (lesson 1)
+lets N workers share the single mpsc consumer. Concurrency is **bounded** by
+`n_workers` — a deliberate capacity dial.
+</TabItem>
+<TabItem label="Go">
+```go title="main.go — goroutine per connection"
+// serve accepts connections forever, one goroutine each.
+func serve(ln net.Listener, docroot string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go handleConnection(conn, docroot)
+	}
+}
+```
+
+One line — `go handleConnection(conn, docroot)`. The netpoller (lesson 3)
+turns each goroutine's blocking reads into epoll waits; the runtime schedules
+thousands of them across cores. Concurrency is **unbounded** by default, which
+is Go's idiomatic posture and a real trade-off we will measure.
+</TabItem>
+<TabItem label="Python">
+```python title="mininginx.py — coroutine per connection"
+async def start_server(docroot: Path, port: int = 0) -> tuple[asyncio.Server, int]:
+    """Start the server; return it and the port actually bound."""
+
+    async def handler(reader, writer) -> None:
+        await handle_connection(reader, writer, docroot)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", port)
+    bound_port = server.sockets[0].getsockname()[1]
+    return server, bound_port
+```
+
+`asyncio.start_server` schedules one coroutine per connection on a
+single-threaded event loop (lesson 3). Each `await` inside the handler is a
+suspension point where other connections run. One thread, no locks needed.
+</TabItem>
+</Tabs>
+
+## The shared request handler
+
+Everything below the concurrency line is the same logic, ported faithfully.
+The interesting part is **security**: mapping a URL to a file is where static
+servers get owned. Our `resolve` is purely lexical and rejects any `..`
+component *before touching the filesystem* — the request never gets a chance
+to escape the document root.
+
+<Tabs syncKey="lang">
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+/// Maps a URL path to a file inside `docroot`, or `None` if the path tries
+/// to escape it. Purely lexical: any `..` component is rejected outright.
+pub fn resolve(docroot: &Path, url_path: &str) -> Option<PathBuf> {
+    let path = if url_path == "/" { "/index.html" } else { url_path };
+    let mut resolved = docroot.to_path_buf();
+    for component in path.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => return None, // traversal attempt: never leaves docroot
+            c if c.contains('\0') => return None,
+            c => resolved.push(c),
+        }
+    }
+    Some(resolved)
+}
+```
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+// resolve maps a URL path to a file inside docroot, or returns ok=false if
+// the path tries to escape it. Purely lexical: any ".." is rejected.
+func resolve(docroot, urlPath string) (string, bool) {
+	if urlPath == "/" {
+		urlPath = "/index.html"
+	}
+	resolved := docroot
+	for _, component := range strings.Split(urlPath, "/") {
+		switch {
+		case component == "" || component == ".":
+			continue
+		case component == "..":
+			return "", false // traversal attempt: never leaves docroot
+		case strings.ContainsRune(component, 0):
+			return "", false
+		default:
+			resolved = filepath.Join(resolved, component)
+		}
+	}
+	return resolved, true
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="mininginx.py"
+def resolve(docroot: Path, url_path: str) -> Path | None:
+    """Map a URL path to a file inside ``docroot``, or ``None`` if the path
+    tries to escape it. Purely lexical: any ``..`` component is rejected.
+
+    >>> resolve(Path("/srv/www"), "/") == Path("/srv/www/index.html")
+    True
+    >>> resolve(Path("/srv/www"), "/../etc/passwd") is None
+    True
+    """
+    if url_path == "/":
+        url_path = "/index.html"
+    resolved = docroot
+    for component in url_path.split("/"):
+        if component in ("", "."):
+            continue
+        if component == ".." or "\0" in component:
+            return None  # traversal attempt: never leaves docroot
+        resolved = resolved / component
+    return resolved
+```
+</TabItem>
+</Tabs>
+
+Every server has a test that fires `GET /../secret.txt` at a `secret.txt`
+placed *outside* the document root and asserts a `404` with no leaked bytes.
+This is not decoration: directory traversal (CWE-22) is one of the oldest and
+most exploited web bugs, and "reject `..` lexically before any filesystem
+call" is the defence that actually holds.
+
+<Aside type="tip" title="Why lexical, not canonicalization?">
+  A tempting alternative is to canonicalize the resolved path and check it
+  still starts with the docroot. That works too, but it touches the
+  filesystem (following symlinks, which introduce their own escape via a
+  symlinked subdirectory) and is easy to get subtly wrong. Rejecting `..`
+  before resolving is simpler to audit and has no filesystem dependency —
+  fewer moving parts in security-critical code is itself the feature.
+</Aside>
+
+## Proof of identity, then speed
+
+Before any benchmark, the three servers were started on one machine and hit
+with the same four requests; every response compared byte-for-byte with
+`cmp`:
+
+```text
+$ cmp rust.bin go.bin && cmp go.bin py.bin && echo IDENTICAL
+IDENTICAL: /
+IDENTICAL: /style.css
+IDENTICAL: /nope            (404, identical error body)
+IDENTICAL: /../secret.txt   (404, traversal blocked in all three)
+```
+
+Identical status lines, identical headers (`Content-Type`, `Content-Length`,
+`Connection: close`), identical bodies. Now the numbers mean something.
+
+## The load test
+
+A custom load generator (raw TCP, connection-per-request) fired **20,000
+requests** for `/` at two concurrency levels. Same 20-core Linux machine;
+Rust in release mode with an 8-worker pool.
+
+<Benchmark
+  metric="20,000 requests for / — throughput (higher is better)"
+  lowerIsBetter={false}
+  rows={[
+    { label: "Go (goroutine/conn), concurrency 50", value: 71143, unit: "req/s" },
+    { label: "Rust (thread pool 8), concurrency 50", value: 53373, unit: "req/s" },
+    { label: "Go (goroutine/conn), concurrency 200", value: 62935, unit: "req/s" },
+    { label: "Rust (thread pool 8), concurrency 200", value: 43511, unit: "req/s" },
+    { label: "Python (asyncio), concurrency 50", value: 12948, unit: "req/s" },
+    { label: "Python (asyncio), concurrency 200", value: 7676, unit: "req/s" },
+  ]}
+/>
+
+Resident memory after the run — the other half of the story:
+
+<Benchmark
+  metric="Resident memory (RSS) under load (lower is better)"
+  lowerIsBetter={true}
+  rows={[
+    { label: "Rust", value: 2.3, unit: "MB" },
+    { label: "Go", value: 10.5, unit: "MB" },
+    { label: "Python", value: 22.2, unit: "MB" },
+  ]}
+/>
+
+## Reading the results honestly
+
+**Go won on throughput, and its model is why.** Goroutine-per-connection with
+the netpoller is exactly the workload Go's runtime was built for: cheap
+spawning, epoll multiplexing, work-stealing across all 20 cores. It handled
+concurrency 200 nearly as well as 50 — the runtime absorbed the extra load.
+
+**Rust used a fraction of the memory** (2.3 MB vs 10.5 MB vs 22.2 MB) — no
+runtime, no GC, no per-goroutine stacks; just 8 threads and the OS. For a
+sidecar, an edge proxy, or anything memory-constrained, that 4–10× difference
+is often the deciding number, not peak req/s.
+
+**Python was 4–5× slower and degraded under load** (13k → 7.7k as concurrency
+rose), because a single-threaded event loop serializes *all* request handling
+on one core — 19 cores sat idle. asyncio shines when handlers are I/O-bound
+(waiting on a database, an upstream API); serving a tiny cached file is nearly
+pure CPU per request, asyncio's worst case. The fix in production is running N
+event-loop processes behind a load balancer — which is exactly how real Python
+web deployments (gunicorn + uvicorn workers) are shaped.
+
+**The most surprising number is Rust's own thread-pool sweep** — throughput
+*fell* as workers rose from 1:
+
+<Benchmark
+  metric="Rust: throughput vs thread-pool size, 20k requests at concurrency 50"
+  lowerIsBetter={false}
+  rows={[
+    { label: "1 worker", value: 56628, unit: "req/s" },
+    { label: "50 workers", value: 40371, unit: "req/s" },
+    { label: "20 workers", value: 35467, unit: "req/s" },
+    { label: "8 workers", value: 30224, unit: "req/s" },
+  ]}
+/>
+
+These runs are noisy (the ordering of 8/20/50 shuffles between runs), but the
+headline is stable and it is lesson 1 returning with a vengeance: **when the
+work per request is tiny, the shared `Mutex<Receiver>` is the bottleneck.**
+Every worker must lock the same mutex to pull the next connection, so adding
+workers adds *contention* on that lock faster than it adds useful parallelism.
+One worker never contends — it just serves. The moment handlers do real work
+(reading a large file, proxying upstream), the balance flips and more workers
+win. The dial has a right setting, and it depends on the workload — which is
+precisely why nginx makes `worker_processes` a tunable and not a constant.
+
+<Aside type="note" title="What this does NOT prove">
+  These numbers are one workload (tiny static file, loopback, one machine) on
+  one afternoon. They are honest for what they measure and useless as a
+  general ranking. "Rust is slower than Go at serving HTTP" would be the wrong
+  lesson; "concurrency architecture must match workload shape, and you must
+  measure yours" is the right one.
+</Aside>
+
+## Exercises
+
+**1. Give Rust a per-connection thread (Rust).** Replace the thread pool with
+`thread::spawn` per accepted connection (unbounded, like Go). Re-run the load
+test. Does it beat the pool? At what concurrency does spawning cost start to
+show? What breaks at 10,000 simultaneous connections?
+
+<details>
+<summary>Solution sketch</summary>
+
+Per-connection threads often *beat* the contended 8-worker pool on this tiny
+workload (no shared receiver lock), confirming the contention diagnosis. But
+each thread reserves ~8 MB of virtual stack and a kernel scheduler slot, so at
+thousands of simultaneous slow connections it collapses where goroutines
+(few KB each) keep going — the exact reason Go's model scales and the C10K
+motivation from lesson 3.
+
+</details>
+
+**2. Add keep-alive (all three).** Support HTTP/1.1 `Connection: keep-alive`:
+loop on the same connection, reading and answering multiple requests before
+closing. How does this change the concurrency math — and which model benefits
+most?
+
+<details>
+<summary>Solution sketch</summary>
+
+Keep-alive amortizes the accept/spawn cost over many requests, so it helps
+every model, but most the ones where per-connection setup was expensive
+(thread-per-connection). It also raises the stakes on the concurrency bound:
+a keep-alive connection *holds* a worker/goroutine while idle, so the Rust
+pool can be starved by N idle keep-alive clients — introducing the need for
+per-connection timeouts, which is your next exercise.
+
+</details>
+
+**3. Serve this very academy (all three).** Point each server's docroot at the
+Astro `dist/` folder and browse the real site through your mini-NGINX. What
+breaks? (Hint: MIME types you don't handle, and index resolution for
+directory URLs like `/part-4-concurrency/`.) Fix the smallest set of things to
+make the homepage render.
+
+<details>
+<summary>Solution sketch</summary>
+
+You will hit missing content types (`.svg`, `.woff2`, `.xml`) served as
+`application/octet-stream` — the browser refuses to apply CSS/fonts — and
+directory URLs that need to map to `index.html` inside the directory, not just
+at the root. Adding a handful of MIME entries and a "if path is a directory,
+append index.html" rule gets the page rendering. This is the moment the toy
+becomes recognizably a real static server.
+
+</details>
+
+<Quiz
+  question={'All three servers were verified byte-identical with cmp before benchmarking. Why is that step non-negotiable?'}
+  options={[
+    { text: 'Because without it, a throughput difference could just mean one server does less work (smaller responses, skipped headers) — identity proves you are comparing the same job', correct: true, explanation: 'A "faster" server that omits a header or sends a shorter body is not faster, it is wrong. Byte-identity is what makes the benchmark a comparison of concurrency strategy rather than of feature completeness.' },
+    { text: 'Because HTTP requires identical responses across servers', correct: false, explanation: 'HTTP requires no such thing — servers legitimately differ. We enforce identity here purely to make the comparison fair.' },
+    { text: 'Because cmp is faster than reading the responses manually', correct: false, explanation: 'Convenience is not the reason; correctness of the comparison is. cmp is just the tool.' },
+    { text: 'Because it tests the servers for bugs', correct: false, explanation: 'It catches divergence, which may indicate a bug, but the purpose here is benchmark validity — equal work in, so throughput out is comparable.' },
+  ]}
+/>
+
+<Quiz
+  question={'Rust throughput FELL from 57k req/s (1 worker) toward ~30-40k (8+ workers) on this workload. Best explanation?'}
+  options={[
+    { text: 'Workers contend on the shared Mutex<Receiver> to pull each connection; with microscopic per-request work, that lock contention outweighs the parallelism added', correct: true, explanation: 'Exactly the lesson-1 finding: the cost was never the serving, it was serializing on one shared point. One worker never contends. Real work per request would flip this — then workers help.' },
+    { text: 'More threads always means more overhead and less speed', correct: false, explanation: 'Not generally true — for CPU-bound or blocking-I/O work, more workers up to core count help a lot. It is specifically the tiny-work-plus-shared-lock combination that inverts here.' },
+    { text: 'The OS cannot run 8 threads on 20 cores', correct: false, explanation: 'It easily can; core count is not the limit here. The shared receiver lock is.' },
+    { text: 'Rust threads are slower than Go goroutines', correct: false, explanation: 'This compares Rust to Rust across pool sizes — Go is not involved. The variable is contention, not language.' },
+  ]}
+/>
+
+<Quiz
+  question={'Python asyncio served ~13k req/s and got WORSE at higher concurrency, while Go improved. Why?'}
+  options={[
+    { text: 'asyncio runs one event loop on one core, so all request handling is serialized on a single CPU; Go spreads goroutines across all cores', correct: true, explanation: 'Serving a small file is CPU-bound per request, asyncio\'s weak spot: 19 cores idle while one saturates, and more concurrency just deepens the queue. Production Python scales by running many loop processes behind a balancer.' },
+    { text: 'Python has a data race that corrupts responses under load', correct: false, explanation: 'The single-threaded loop has no data races by construction — responses stayed correct (byte-identical). The issue is throughput, not correctness.' },
+    { text: 'asyncio is buggy at high concurrency', correct: false, explanation: 'It behaved correctly; it was simply CPU-bound on one core. This is an architectural fit problem, not a defect.' },
+    { text: 'The GIL caused lock contention between coroutines', correct: false, explanation: 'Coroutines on one loop never run in parallel, so there is no inter-coroutine lock contention. The single-core ceiling is the cause.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Walk me through defending a static file server against directory traversal.">
+
+The attack is a URL like `/../../etc/passwd` aiming to read outside the
+document root (CWE-22). The defence I trust is lexical and happens before any
+filesystem access: split the path on `/`, and reject the whole request if any
+component is `..` (also reject null bytes, which can truncate paths in some
+syscalls). Because it never resolves the malicious path, there is no filesystem
+behaviour to get wrong. The tempting alternative — canonicalize then check the
+prefix — also works but follows symlinks, which reintroduces escape through a
+symlinked subdirectory, and prefix checks have classic bugs (`/srv/www-evil`
+starts with `/srv/www`). Whatever the choice, it must be tested with an actual
+escaping request against a file placed outside the root — which every version
+of this server does.
+
+</Interview>
+
+<Interview question="Thread pool, goroutine-per-connection, or event loop — how do you choose for a server?">
+
+By workload shape and constraints, and I would measure, not guess. Event loop
+(asyncio, Node) fits I/O-bound handlers with high connection counts —
+thousands of mostly-waiting sockets — on modest cores, but serializes CPU work
+and needs multi-process scaling to use many cores. Goroutine-per-connection
+(Go) is the generalist: cheap concurrency, multi-core by default, blocking
+style; it cost more memory than Rust in our test but won throughput.
+Thread-pool (classic, our Rust) gives bounded resource use — the capacity dial
+matters when downstream systems can be overwhelmed — and minimal memory, at
+the cost of a shared dispatch point that can contend, as we measured. The
+honest answer in an interview is "it depends on whether requests are I/O- or
+CPU-bound, the connection count, the memory budget, and the core count — here
+is how I would benchmark it," and then cite exactly the kind of numbers this
+project produced.
+
+</Interview>
+
+<Interview question="Our Rust server got slower as we added worker threads. How would you diagnose and fix that in production?">
+
+That symptom — negative scaling with added workers — almost always means
+contention on a shared resource, and I would confirm with a profiler
+(`perf`, or a lock-contention profile) showing time spent waiting on a mutex.
+In our case it is the single `Mutex<Receiver>` every worker locks to dequeue a
+connection; with trivial per-request work the lock is the hot path. Fixes, in
+order: reduce time in the critical section (already minimal here); shard the
+work source so workers do not share one lock (multiple queues, or a lock-free
+MPMC channel like crossbeam); or, if the per-request work is genuinely tiny,
+question whether you need a pool at all versus accept-and-spawn. The
+meta-point: more parallelism is not free, and a shared coordination point can
+turn added workers into added contention — measure the scaling curve, do not
+assume it is monotonic.
+
+</Interview>
+
+## Challenge
+
+Take the winner of your keep-alive exercise and put it behind a real
+benchmark: install `wrk` or `oha`, serve a mix of file sizes (1 KB, 100 KB,
+1 MB), and plot throughput and latency percentiles (p50/p99) for each server
+across concurrency 1 → 1000. Then add one production feature that changes the
+picture — a per-connection timeout, a small response cache, or gzip — and
+measure its cost. You will leave with a latency-percentile intuition that no
+amount of reading provides, and a server you genuinely understand from the
+`accept()` up. That is the whole point of Part 4: concurrency stops being
+vocabulary and becomes a set of measured, deliberate engineering choices.
+
+## References & further reading
+
+- Rust Book ch. 21 — [Building a Multithreaded Web Server](https://doc.rust-lang.org/book/ch21-00-final-project-a-web-server.html) (the thread-pool project this extends)
+- Go — [`net` package](https://pkg.go.dev/net) · [Eli Bendersky — Go server concurrency models](https://eli.thegreenplace.net/2019/on-concurrency-in-go-http-servers/)
+- Python docs — [`asyncio` streams](https://docs.python.org/3/library/asyncio-stream.html) · [uvicorn deployment](https://www.uvicorn.org/deployment/) (multi-process scaling)
+- OWASP — [Path Traversal](https://owasp.org/www-community/attacks/Path_Traversal) · CWE-22
+- nginx — [worker_processes tuning](https://nginx.org/en/docs/ngx_core_module.html#worker_processes)
+
+<Progress />

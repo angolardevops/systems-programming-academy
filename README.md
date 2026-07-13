@@ -26,7 +26,8 @@ bar over time.
 | Part 1 → **Python foundations track** (5 lessons, EN + PT) | ✅ Complete & tested (unittest + doctests) |
 | **Part 2 → Real-World Engineering** (7 lessons, EN + PT) | ✅ Planned arc complete & tested |
 | **Part 3 → DevOps Automation** (4 projects × 3 languages, EN + PT) | ✅ Complete, tested & benchmarked |
-| Remaining Parts 4–5 + Capstone | 🚧 Planned |
+| **Part 4 → Concurrency & Parallelism** (3 lessons + mini-NGINX, 3 languages) | ✅ Complete, tested & benchmarked |
+| Remaining Part 5 + Capstone | 🚧 Planned |
 
 **Part 1 · Foundations is complete across all three languages — 20 lessons.**
 

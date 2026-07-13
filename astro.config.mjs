@@ -280,6 +280,12 @@ export default defineConfig({
               slug: 'part-4-concurrency/async-io',
               badge: { text: 'Complete', variant: 'success' },
             },
+            {
+              label: 'Project: mini-NGINX',
+              translations: { 'pt-BR': 'Projeto: mini-NGINX' },
+              slug: 'part-4-concurrency/mini-nginx',
+              badge: { text: 'Capstone', variant: 'tip' },
+            },
           ],
         },
       ],
