@@ -1,0 +1,16 @@
+[package]
+name = "part6-ping-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the ICMP packet, the internet checksum, and the RTT
+# statistics are pure std. The raw-socket sender in main.rs calls the socket
+# syscalls directly through FFI (the technique from the Part 1 Unsafe & FFI
+# lesson) — no external crates.
+
+[[bin]]
+name = "ping"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

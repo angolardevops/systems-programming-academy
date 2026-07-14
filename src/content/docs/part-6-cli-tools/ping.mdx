@@ -1,0 +1,595 @@
+---
+title: "Project: ping — ICMP Echo & Round-Trip Time"
+description: "Build ping in Rust, Go, and Python — the ICMP echo packet, the RFC 1071 internet checksum, reply parsing, and round-trip statistics, all tested and byte-identical. The raw socket that sends it is the one piece that needs root, shown in full and handled gracefully."
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+`ping` is the first command anyone types when the network feels wrong. It sends
+an ICMP *echo request* and times the *echo reply* — "are you there, and how far?"
+This project builds it, and in doing so builds a packet by hand, byte by byte,
+including the checksum that every IP device on Earth agrees on. It is also the
+first tool in this book that needs **root** — and that boundary is the lesson.
+
+<Aside type="caution" title="One privileged line, everything else free">
+  Sending an ICMP packet needs a **raw socket**, and raw sockets need root (or
+  the `CAP_NET_RAW` capability) because a raw socket can forge *any* packet —
+  spoof a source address, craft a malformed header, impersonate a router. The
+  kernel guards that power. So we follow the rule from the port scanner, made
+  sharper: **test the logic, isolate the privilege.** The packet, the checksum,
+  the reply parser, and the statistics are pure functions — fully tested, no
+  privileges. Exactly one function opens the raw socket, and it degrades with a
+  clear message when run without root. You learn all of ICMP; you need `sudo` for
+  only the last inch.
+</Aside>
+
+Code:
+[`examples/part6-ping-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 tests each, the echo packet and the statistics block
+**byte-identical across all three languages**.
+
+## An ICMP echo request, byte by byte
+
+There is no library here — an ICMP echo request is just eight bytes of header
+plus a payload, and we lay them out ourselves:
+
+<Mermaid title="The ICMP echo-request header: 8 bytes, then the echoed payload" code={`flowchart LR
+  T["Type=8<br/>(1 byte)"] --> C["Code=0<br/>(1 byte)"]
+  C --> K["Checksum<br/>(2 bytes)"]
+  K --> I["Identifier<br/>(2 bytes)"]
+  I --> S["Sequence<br/>(2 bytes)"]
+  S --> P["Payload<br/>(echoed back verbatim)"]`} />
+
+Type `8` means echo request (the reply comes back as type `0`). The
+**identifier** lets a process recognize its own replies when several pings share
+a host; the **sequence** number counts the packets so you can tell which one came
+back and which was lost. The payload is arbitrary — the responder echoes it back
+unchanged, which is how `ping` measures a true round trip.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ping.py"
+def build_echo_request(id: int, seq: int, payload: bytes) -> bytes:
+    header = bytes([8, 0, 0, 0]) + id.to_bytes(2, "big") + seq.to_bytes(2, "big")
+    packet = header + payload
+    ck = checksum(packet)
+    return packet[:2] + ck.to_bytes(2, "big") + packet[4:]
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ping.go"
+func BuildEchoRequest(id, seq uint16, payload []byte) []byte {
+	pkt := make([]byte, 8+len(payload))
+	pkt[0] = 8 // type: echo request
+	pkt[1] = 0 // code
+	binary.BigEndian.PutUint16(pkt[4:], id)
+	binary.BigEndian.PutUint16(pkt[6:], seq)
+	copy(pkt[8:], payload)
+	binary.BigEndian.PutUint16(pkt[2:], Checksum(pkt))
+	return pkt
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn build_echo_request(id: u16, seq: u16, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(8 + payload.len());
+    pkt.push(8); // type: echo request
+    pkt.push(0); // code
+    pkt.extend_from_slice(&[0, 0]); // checksum placeholder
+    pkt.extend_from_slice(&id.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(payload);
+    let ck = checksum(&pkt);
+    pkt[2..4].copy_from_slice(&ck.to_be_bytes());
+    pkt
+}
+```
+</TabItem>
+</Tabs>
+
+Note the two-step dance with the checksum field: it must be **zero while you
+compute the checksum**, then overwritten with the result. Everything is
+**big-endian** (network byte order) — the `to_be_bytes` / `BigEndian.PutUint16`
+/ `to_bytes(2, "big")` are not decoration; a little-endian id would arrive
+byte-swapped and the reply would never match.
+
+## The internet checksum (RFC 1071)
+
+This one algorithm verifies IP, ICMP, TCP, and UDP headers — every packet you
+have ever sent. It is the **one's-complement sum of the data as 16-bit words**:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ping.py"
+def checksum(data: bytes) -> int:
+    total = 0
+    for i in range(0, len(data) - 1, 2):
+        total += (data[i] << 8) | data[i + 1]
+    if len(data) % 2 == 1:            # odd trailing byte, pad with zero low byte
+        total += data[-1] << 8
+    while total >> 16:                # fold the carries back in
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ping.go"
+func Checksum(data []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(data); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i:]))
+	}
+	if len(data)%2 == 1 { // odd trailing byte padded with a zero low byte
+		sum += uint32(uint16(data[len(data)-1]) << 8)
+	}
+	for sum>>16 != 0 { // fold the carries back in
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut chunks = data.chunks_exact(2);
+    for c in &mut chunks {
+        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    }
+    if let [last] = chunks.remainder() {   // odd trailing byte, pad with zero
+        sum += u16::from_be_bytes([*last, 0]) as u32;
+    }
+    while sum >> 16 != 0 {                  // fold the carries back in
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+```
+</TabItem>
+</Tabs>
+
+Two subtleties define it. **Carry folding**: a 16-bit sum overflows, so the
+carry bits (the high half of the 32-bit accumulator) are added back into the low
+half until none remain — that is what makes it *one's-complement* arithmetic.
+And the beautiful property that makes it a checksum at all: because the result is
+the complement of the sum, **a valid packet sums back to zero**. A receiver
+doesn't re-derive the checksum and compare; it just sums the whole packet,
+stored checksum included, and checks for zero:
+
+```text
+checksum(packet_with_valid_checksum) == 0
+```
+
+The test pins both directions — that `build_echo_request(1, 1, &[])` produces the
+exact bytes `08 00 f7 fd 00 01 00 01`, and that feeding those bytes back through
+`checksum` yields `0`.
+
+## Parsing the reply
+
+The reply is the same shape with type `0`. Parsing means: check it's really an
+echo reply, verify the checksum, and pull out the id and seq so we can match it
+to the request we sent.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ping.py"
+def parse_echo_reply(data: bytes) -> EchoReply | None:
+    if len(data) < 8 or data[0] != 0 or data[1] != 0:
+        return None
+    if checksum(data) != 0:               # checksum did not verify
+        return None
+    return EchoReply(
+        id=int.from_bytes(data[4:6], "big"),
+        seq=int.from_bytes(data[6:8], "big"),
+    )
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ping.go"
+func ParseEchoReply(data []byte) (EchoReply, bool) {
+	if len(data) < 8 || data[0] != 0 || data[1] != 0 {
+		return EchoReply{}, false
+	}
+	if Checksum(data) != 0 {
+		return EchoReply{}, false
+	}
+	return EchoReply{
+		ID:  binary.BigEndian.Uint16(data[4:]),
+		Seq: binary.BigEndian.Uint16(data[6:]),
+	}, true
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_echo_reply(data: &[u8]) -> Option<EchoReply> {
+    if data.len() < 8 || data[0] != 0 || data[1] != 0 {
+        return None;
+    }
+    if checksum(data) != 0 {              // checksum did not verify
+        return None;
+    }
+    Some(EchoReply {
+        id: u16::from_be_bytes([data[4], data[5]]),
+        seq: u16::from_be_bytes([data[6], data[7]]),
+    })
+}
+```
+</TabItem>
+</Tabs>
+
+The test corrupts one byte of a valid reply and confirms it is rejected — the
+checksum earning its keep — and confirms that an echo *request* (type 8) is not
+mistaken for a reply.
+
+## The statistics
+
+After the run, `ping` prints the summary everyone knows. `rtts` is the list of
+successful round-trip times; the block reports loss and the min/avg/max plus
+**mdev** (mean deviation — really the standard deviation of the samples, the
+kernel's own formula `sqrt(mean(rtt²) − mean(rtt)²)`):
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ping.py"
+def summarize(host: str, transmitted: int, rtts: list[float]) -> str:
+    received = len(rtts)
+    lost = transmitted - received
+    loss_pct = 0 if transmitted == 0 else math.floor(lost / transmitted * 100 + 0.5)
+    out = (
+        f"--- {host} ping statistics ---\n"
+        f"{transmitted} packets transmitted, {received} received, {loss_pct}% packet loss"
+    )
+    if received > 0:
+        n = received
+        rtt_min, rtt_max = min(rtts), max(rtts)
+        avg = sum(rtts) / n
+        mdev = math.sqrt(max(sum(r * r for r in rtts) / n - avg * avg, 0.0))
+        out += f"\nrtt min/avg/max/mdev = {rtt_min:.3f}/{avg:.3f}/{rtt_max:.3f}/{mdev:.3f} ms"
+    return out
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ping.go"
+func Summarize(host string, transmitted int, rtts []float64) string {
+	received := len(rtts)
+	lost := transmitted - received
+	lossPct := 0
+	if transmitted > 0 {
+		lossPct = int(math.Floor(float64(lost)/float64(transmitted)*100 + 0.5))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- %s ping statistics ---\n", host)
+	fmt.Fprintf(&b, "%d packets transmitted, %d received, %d%% packet loss", transmitted, received, lossPct)
+	if received > 0 {
+		n := float64(received)
+		min, max, sum, sq := rtts[0], rtts[0], 0.0, 0.0
+		for _, r := range rtts {
+			if r < min { min = r }
+			if r > max { max = r }
+			sum += r
+			sq += r * r
+		}
+		avg := sum / n
+		mdev := math.Sqrt(math.Max(sq/n-avg*avg, 0))
+		fmt.Fprintf(&b, "\nrtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms", min, avg, max, mdev)
+	}
+	return b.String()
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn summarize(host: &str, transmitted: usize, rtts: &[f64]) -> String {
+    let received = rtts.len();
+    let lost = transmitted - received;
+    let loss_pct = if transmitted == 0 {
+        0
+    } else {
+        (lost as f64 / transmitted as f64 * 100.0 + 0.5).floor() as u64
+    };
+    let mut out = format!(
+        "--- {host} ping statistics ---\n\
+         {transmitted} packets transmitted, {received} received, {loss_pct}% packet loss"
+    );
+    if received > 0 {
+        let n = received as f64;
+        let min = rtts.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = rtts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let avg = rtts.iter().sum::<f64>() / n;
+        let sq = rtts.iter().map(|r| r * r).sum::<f64>() / n;
+        let mdev = (sq - avg * avg).max(0.0).sqrt();
+        out.push_str(&format!(
+            "\nrtt min/avg/max/mdev = {min:.3}/{avg:.3}/{max:.3}/{mdev:.3} ms"
+        ));
+    }
+    out
+}
+```
+</TabItem>
+</Tabs>
+
+All three produce this, byte-for-byte (verified by hash across the languages):
+
+```text
+--- example.com ping statistics ---
+4 packets transmitted, 3 received, 25% packet loss
+rtt min/avg/max/mdev = 10.000/20.000/30.000/8.165 ms
+```
+
+<Aside type="note" title="The rounding gotcha, again">
+  As in the performance dashboard, identical arithmetic is not automatic across
+  languages. The loss percentage uses an explicit `floor(x + 0.5)` in all three
+  rather than each language's `round()` (Python rounds half-to-even, others do
+  not) so `25%` is `25%` everywhere. The `min/avg/max/mdev` values format cleanly
+  because the IEEE-754 doubles are computed in the same order and `%.3f` /
+  `{:.3}` round identically — but choose fixture values that don't sit on a
+  rounding boundary and the byte-for-byte check stays honest.
+</Aside>
+
+## The one privileged inch: the raw socket
+
+Everything above is tested without privileges. The actual send needs a raw
+socket, and here is that function in each language — the send/receive loop that
+uses the tested pieces. It opens `SOCK_RAW`, and if that fails with a permission
+error it prints how to fix it and exits, rather than crashing:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ping.py (__main__)"
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+except PermissionError:
+    print("ping: raw sockets need root. Try `sudo python3 ping.py <host>` ...",
+          file=sys.stderr)
+    raise SystemExit(1) from None
+
+sock.settimeout(1.0)
+ident = os.getpid() & 0xFFFF
+for seq in range(1, count + 1):
+    packet = build_echo_request(ident, seq, b"\x42" * 56)
+    sent = time.perf_counter()
+    sock.sendto(packet, (ip, 0))
+    try:
+        datagram, _ = sock.recvfrom(1500)
+    except socket.timeout:
+        print(f"Request timeout for icmp_seq {seq}")
+        continue
+    elapsed = (time.perf_counter() - sent) * 1000.0
+    ihl = (datagram[0] & 0x0F) * 4          # skip the IP header
+    reply = parse_echo_reply(datagram[ihl:])
+    if reply is not None and reply.id == ident:
+        print(f"64 bytes from {ip}: icmp_seq={reply.seq} time={elapsed:.3f} ms")
+```
+Python's `socket` speaks `SOCK_RAW` directly — no FFI needed.
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_ICMP)
+if err != nil {
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		fmt.Fprintln(os.Stderr, "ping: raw sockets need root. Try `sudo ...`")
+	}
+	return err
+}
+defer syscall.Close(fd)
+tv := syscall.Timeval{Sec: 1, Usec: 0}
+syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+dest := &syscall.SockaddrInet4{Addr: [4]byte(ip4)}
+// ... sent := time.Now(); syscall.Sendto(fd, packet, 0, dest)
+n, _, err := syscall.Recvfrom(fd, buf, 0)   // then skip IP header, ParseEchoReply
+```
+Go's `syscall` package exposes the raw socket calls in the standard library —
+no dependency, no FFI.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/main.rs"
+extern "C" {
+    fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+    fn sendto(fd: i32, buf: *const u8, len: usize, flags: i32, addr: *const u8, alen: u32) -> isize;
+    fn recvfrom(fd: i32, buf: *mut u8, len: usize, flags: i32, addr: *mut u8, alen: *mut u32) -> isize;
+    // ...
+}
+let fd = unsafe { socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) };
+if fd < 0 {
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        eprintln!("ping: raw sockets need root. Try `sudo ping <host>` ...");
+    }
+    return Err(err);
+}
+```
+Rust's standard library has no raw socket, so — as in the async lesson — we
+declare the C socket calls with `extern "C"` and call them through FFI. Still
+dependency-free.
+</TabItem>
+</Tabs>
+
+Notice the identical shape in all three: **open the socket, and on
+permission-denied explain and bail.** Run without privileges and you get a
+helpful line, not a stack trace:
+
+```text
+$ python3 ping.py 127.0.0.1
+ping: raw sockets need root. Try `sudo python3 ping.py 127.0.0.1`, or grant
+the capability once with `sudo setcap cap_net_raw+ep <python3>`.
+```
+
+With `sudo`, the same binary prints the familiar:
+
+```text
+$ sudo ./ping 1.1.1.1 3
+PING 1.1.1.1 (1.1.1.1): 56 data bytes
+64 bytes from 1.1.1.1: icmp_seq=1 time=11.842 ms
+64 bytes from 1.1.1.1: icmp_seq=2 time=11.503 ms
+64 bytes from 1.1.1.1: icmp_seq=3 time=11.671 ms
+
+--- 1.1.1.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss
+rtt min/avg/max/mdev = 11.503/11.672/11.842/0.139 ms
+```
+
+<Aside type="tip" title="setcap: privilege without sudo">
+  Running a whole tool as root to open one socket is a big hammer. Linux
+  **capabilities** split root's powers into pieces; `cap_net_raw` is exactly "may
+  open raw sockets." Grant just that to the binary once —
+  `sudo setcap cap_net_raw+ep ./ping` — and any user can run it, with none of
+  root's other powers. It is how the real `/bin/ping` ships. Least privilege in
+  one command.
+</Aside>
+
+## Exercises
+
+**1. Add a timeout/DNS distinction (all three).** Right now a lost reply prints
+"Request timeout". Separate two failures: the host didn't *resolve* (DNS) versus
+it resolved but didn't *answer* (timeout). Which belongs before the socket loop,
+and which inside it?
+
+<details>
+<summary>Solution sketch</summary>
+
+Resolution failure is a one-time, up-front error — if the name doesn't resolve,
+there is nothing to ping, so it belongs before the loop and should exit
+immediately with a distinct message. A timeout is per-packet and expected
+(that's what packet loss *is*), so it belongs inside the loop, counted toward
+loss, and the loop continues. Conflating them would report a typo'd hostname as
+"100% packet loss", which misdiagnoses the problem.
+
+</details>
+
+**2. Verify the payload round-trips (any language).** A real `ping` fills the
+payload with a known pattern and checks the reply echoes it back unchanged.
+Add that check. Why is it a stronger guarantee than matching the id and seq
+alone?
+
+<details>
+<summary>Solution sketch</summary>
+
+Matching id and seq proves the *right packet* came back; verifying the payload
+proves the data was carried *intact* — it catches corruption in the body that a
+correct header would hide. Because the echo responder must return the payload
+verbatim, any mismatch means the bytes were mangled in transit (or the reply is
+forged). It's the difference between "the reply is for me" and "the reply is for
+me and undamaged."
+
+</details>
+
+**3. Implement `setcap` and confirm least privilege (research + run).** Build the
+binary, grant `cap_net_raw`, and run it as a non-root user. Then check what
+happens if you try to also bind a low port or read another user's file from the
+same process — confirm the capability granted *only* raw sockets. Write up why
+this is safer than the setuid-root alternative.
+
+<details>
+<summary>Solution sketch</summary>
+
+`sudo setcap cap_net_raw+ep ./ping` lets a normal user run it; the process can
+open raw sockets but has none of root's other powers — it cannot bind port 80,
+read `/etc/shadow`, or write outside its own permissions. A setuid-root binary,
+by contrast, runs as *full* root, so any bug in it is a full-system compromise.
+Capabilities are least privilege made concrete: grant the one power the tool
+needs and nothing else, shrinking the blast radius of a vulnerability to just
+"can send raw packets."
+
+</details>
+
+<Quiz
+  question={'Why does the receiver verify an ICMP packet by checking that checksum(whole_packet) == 0, instead of recomputing the checksum and comparing it to the stored field?'}
+  options={[
+    { text: "The checksum is the one's-complement of the sum, so a packet carrying a valid checksum sums back to zero — summing the whole packet (checksum field included) and checking for zero is the same test, done in one pass", correct: true, explanation: "That is the defining property of the internet checksum: value = ~sum, so sum + value = all-ones = 0 in one's complement. Summing everything including the stored checksum yields zero exactly when the packet is intact — a single, simple verification with no need to zero-out and recompute." },
+    { text: 'Recomputing the checksum is impossible on the receiver because it lacks the original data', correct: false, explanation: 'The receiver has the whole packet, so it could recompute. The point is that summing-to-zero is a cheaper, equivalent check thanks to the checksum being the complement of the sum — not that recomputation is impossible.' },
+    { text: 'The zero check is faster because it skips the carry-folding step', correct: false, explanation: 'The zero check still folds carries — it runs the same checksum routine. The advantage is that it needs no separate "zero the field, recompute, compare" dance, not that it skips folding.' },
+    { text: 'A checksum of zero means the packet is empty', correct: false, explanation: 'A summed result of zero means the packet is valid, not empty. An empty or all-zero packet is unrelated; the zero result is the intended outcome of running the checksum over a correctly-checksummed packet.' },
+  ]}
+/>
+
+<Quiz
+  question={'The tool tests the packet building, checksum, reply parsing, and statistics thoroughly, but the function that opens the raw socket is not unit-tested. Why is that the right call?'}
+  options={[
+    { text: 'Opening a raw socket needs root and touches the kernel/network — non-deterministic and privileged — while the pure functions hold all the real logic and can be tested exhaustively without privileges; isolating the one privileged inch keeps everything else fast and testable', correct: true, explanation: "This is the deliberate design: push all the interesting, checkable logic into pure functions (tested to the byte) and confine the unavoidable privilege to a single thin function. That function has almost no logic — open, send, recv, skip the IP header, delegate to the tested parser — so little is lost by not unit-testing it, and much is gained in test speed and determinism." },
+    { text: 'Raw sockets always work, so there is nothing to test', correct: false, explanation: 'Raw sockets frequently fail — most importantly without root — which is exactly why the code handles PermissionError. The reason it is not unit-tested is that it is privileged and non-deterministic, not that it cannot fail.' },
+    { text: 'The socket function is too simple to contain bugs', correct: false, explanation: 'Simplicity is not the reason — it is precisely kept simple *so that* leaving it untested is low-risk. The driving reason is that testing it would require root and real network behavior, which is non-deterministic; the logic worth testing was deliberately moved out of it.' },
+    { text: 'Testing it would require rewriting it in a different language', correct: false, explanation: 'Language has nothing to do with it. The barrier is privilege and non-determinism (needs root, touches the network), which is why the testable logic lives in pure functions instead.' },
+  ]}
+/>
+
+<Quiz
+  question={'What does granting cap_net_raw to the ping binary (setcap cap_net_raw+ep) achieve compared to making it setuid-root?'}
+  options={[
+    { text: 'It grants only the single power to open raw sockets, so a bug in the tool cannot do anything else — whereas setuid-root would run the whole program as full root, turning any bug into a full-system compromise', correct: true, explanation: "Capabilities decompose root into individual powers; cap_net_raw is exactly \"may open raw sockets\" and nothing more. That is least privilege: the tool gets the one thing it needs, so the blast radius of any vulnerability is limited to raw-socket abuse rather than total control. Setuid-root grants everything, which is why capabilities are preferred." },
+    { text: 'It makes the binary run faster by skipping permission checks', correct: false, explanation: 'It is about which permissions are granted, not speed. The kernel still checks capabilities; the win is a smaller set of granted powers, not fewer checks or faster execution.' },
+    { text: 'It encrypts the raw socket traffic', correct: false, explanation: 'Capabilities are an access-control mechanism, not encryption. cap_net_raw controls whether the process may open raw sockets; it does nothing to the packet contents.' },
+    { text: 'It lets the binary run on systems without a network', correct: false, explanation: 'The capability is meaningless without a network — it governs raw-socket access. It has nothing to do with running on networkless systems.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Walk me through what happens, end to end, when you run `ping example.com`.">
+
+First a DNS lookup resolves the name to an IP — a failure here is distinct from a
+ping failure and should be reported as such. Then the tool opens a raw ICMP
+socket, which requires root or `CAP_NET_RAW` because raw sockets can craft
+arbitrary packets. For each probe it builds an ICMP echo-request packet: type 8,
+a process identifier so it recognizes its own replies, an incrementing sequence
+number, and a payload — then computes the RFC 1071 internet checksum over the
+whole packet with the checksum field zeroed, and writes it in. It records a
+timestamp, sends the packet, and waits (with a timeout) for a reply. The kernel
+delivers the whole IP datagram, so the tool skips the IP header (its length is in
+the low nibble of the first byte, times four), parses the ICMP echo reply,
+verifies the checksum sums to zero, and matches the id and seq to its request.
+The round-trip time is now minus then. After all probes it prints packets
+transmitted/received, the loss percentage, and min/avg/max/mdev. A lost packet is
+just a timeout counted toward loss — the loop continues.
+
+</Interview>
+
+<Interview question="Why does ping need elevated privileges, and how would you ship it so ordinary users can run it safely?">
+
+`ping` needs a *raw* socket because ICMP has no port abstraction — you're not
+connecting to a service, you're emitting a bare IP-layer packet and reading raw
+replies. Raw sockets let a process forge any packet (spoofed sources, malformed
+headers), so the kernel restricts them to root or the `CAP_NET_RAW` capability.
+Running the whole program as root just to open one socket is far too much
+privilege — any bug becomes a root exploit. The right way to ship it is Linux
+file capabilities: `setcap cap_net_raw+ep ./ping` grants the binary exactly the
+raw-socket power and nothing else, so any user can run it while a vulnerability is
+contained to raw-socket abuse rather than full-system compromise. That is how the
+system `/bin/ping` is actually installed. The general principle is least
+privilege: isolate the one operation that needs elevation, grant the narrowest
+capability that permits it, and keep everything else unprivileged — which is also
+why the packet logic here is testable without any privilege at all.
+
+</Interview>
+
+## Challenge
+
+Grow this into a fuller diagnostic. Add a configurable interval and payload size;
+compute jitter (variation between consecutive RTTs, not just overall mdev); add
+IPv6 support (ICMPv6, a different protocol number and a pseudo-header in the
+checksum); and — the natural sequel — use the same raw socket with a stepped IP
+**TTL** to build `traceroute`, reading the ICMP *time-exceeded* replies each hop
+sends back. You already have the checksum, the parser, and the privilege
+handling; the next tool is mostly a new loop around them.
+
+## References & further reading
+
+- [RFC 792](https://www.rfc-editor.org/rfc/rfc792) — the ICMP specification: echo request/reply, message format
+- [RFC 1071](https://www.rfc-editor.org/rfc/rfc1071) — computing the internet checksum, with the reasoning behind carry folding
+- [`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.html) — the full list of Linux capabilities, including `CAP_NET_RAW`
+- iputils [`ping`](https://github.com/iputils/iputils) — the real implementation; compare its statistics math with `summarize`
+- The [port scanner](/systems-programming-academy/part-6-cli-tools/port-scanner/) — the previous tool, where the probe needed *no* privilege
+
+<Progress />

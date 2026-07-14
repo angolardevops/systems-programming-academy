@@ -360,6 +360,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Projeto: Scanner de Portas' },
               slug: 'part-6-cli-tools/port-scanner',
             },
+            {
+              label: 'Project: ping (ICMP)',
+              translations: { 'pt-BR': 'Projeto: ping (ICMP)' },
+              slug: 'part-6-cli-tools/ping',
+            },
           ],
         },
         {
