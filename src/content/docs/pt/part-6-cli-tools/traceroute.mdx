@@ -1,0 +1,489 @@
+---
+title: "Projeto: traceroute — Mapear o Caminho, Hop a Hop"
+description: "Constrói o traceroute em Rust, Go e Python escalonando o TTL do IP e lendo as respostas ICMP time-exceeded que cada router devolve. A sonda, o checksum, o classificador ICMP e o relatório são puros e byte-idênticos; o raw socket que define o TTL é a única peça privilegiada."
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+O `ping` diz-te *se* um host é alcançável. O `traceroute` diz-te *como* — a
+sequência de routers que um pacote atravessa para lá chegar. É um dos truques mais
+elegantes das redes, e é construído quase inteiramente a partir da [lição de
+ping](/systems-programming-academy/pt/part-6-cli-tools/ping/) que acabaste de
+escrever: o mesmo echo request, o mesmo checksum, o mesmo raw socket. A única ideia
+nova é **abusar do campo IP time-to-live de propósito**.
+
+<Aside type="note" title="O truque do TTL">
+  Todo o pacote IP carrega um **TTL** (time-to-live): um contador que cada router
+  decrementa em um. Existe para matar pacotes presos em loops de routing — quando
+  o TTL chega a zero, o router descarta o pacote e devolve um ICMP *time-exceeded*
+  (type 11) à origem. O traceroute usa esse erro como arma. Envia uma sonda com
+  **TTL 1**, e o *primeiro* router descarta-a e revela-se. Envia **TTL 2**, e o
+  *segundo* router fá-lo. Escalona o TTL de 1 para cima e cada router do caminho é
+  forçado, um de cada vez, a anunciar o seu endereço — até o TTL ser finalmente
+  grande o suficiente para chegar ao destino, que responde com um echo *reply* em
+  vez disso. É esse o algoritmo todo.
+</Aside>
+
+<Mermaid title="Escalonar o TTL: cada ronda força o próximo router a revelar-se" code={`flowchart LR
+  S["Origem"] -->|"TTL=1"| R1["Router 1<br/>descarta → time-exceeded"]
+  S -->|"TTL=2"| R2["Router 2<br/>descarta → time-exceeded"]
+  S -->|"TTL=3"| D["Destino<br/>alcançado → echo reply"]`} />
+
+Código:
+[`examples/part6-traceroute-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6 testes cada, o relatório **byte-idêntico nas três
+linguagens**. Reusa o `checksum` e o `build_echo_request` do ping tal e qual; o
+trabalho novo é classificar a resposta e renderizar os hops.
+
+## Classificar a resposta: o pacote citado
+
+A cada ronda, uma sonda volta como uma de duas coisas: um **time-exceeded** de um
+router (continua) ou um **echo reply** do destino (para). Distingui-los, e casar
+cada um à sonda que enviámos, é o coração puro da ferramenta.
+
+O echo reply é fácil — carrega o nosso id e seq diretamente, tal como no ping. O
+time-exceeded é a parte engenhosa. Pela [RFC 792](https://www.rfc-editor.org/rfc/rfc792),
+uma mensagem de erro ICMP **cita o pacote que a causou**: o seu corpo contém o
+cabeçalho IP original *e os primeiros 8 bytes* do datagrama original. Esses 8 bytes
+são exatamente o cabeçalho do nosso echo request — type, code, checksum, **id e
+seq**. Então para casar um time-exceeded à sua sonda, alcançamos para lá do
+cabeçalho ICMP exterior e do cabeçalho IP embutido e lemos o id e o seq de volta:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="traceroute.py"
+def classify(data: bytes) -> Reply | None:
+    if len(data) < 8 or checksum(data) != 0:
+        return None
+    if data[0] == 0 and data[1] == 0:                 # echo reply: destino
+        return Reply(Kind.ECHO_REPLY,
+                     int.from_bytes(data[4:6], "big"),
+                     int.from_bytes(data[6:8], "big"))
+    if data[0] == 11:                                 # time-exceeded: um router
+        embedded = data[8:]                           # o pacote citado
+        ihl = (embedded[0] & 0x0F) * 4                # salta o seu cabeçalho IP
+        inner = embedded[ihl:]
+        if len(inner) < 8:
+            return None
+        return Reply(Kind.TIME_EXCEEDED,
+                     int.from_bytes(inner[4:6], "big"),
+                     int.from_bytes(inner[6:8], "big"))
+    return None
+```
+</TabItem>
+<TabItem label="Go">
+```go title="traceroute.go"
+func Classify(data []byte) (Reply, bool) {
+	if len(data) < 8 || Checksum(data) != 0 {
+		return Reply{}, false
+	}
+	switch {
+	case data[0] == 0 && data[1] == 0: // echo reply: destino
+		return Reply{EchoReply, binary.BigEndian.Uint16(data[4:]), binary.BigEndian.Uint16(data[6:])}, true
+	case data[0] == 11: // time-exceeded: um router
+		embedded := data[8:] // o pacote citado
+		ihl := int(embedded[0]&0x0f) * 4
+		if len(embedded) < ihl+8 {
+			return Reply{}, false
+		}
+		inner := embedded[ihl:]
+		return Reply{TimeExceeded, binary.BigEndian.Uint16(inner[4:]), binary.BigEndian.Uint16(inner[6:])}, true
+	default:
+		return Reply{}, false
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn classify(data: &[u8]) -> Option<Reply> {
+    if data.len() < 8 || checksum(data) != 0 {
+        return None;
+    }
+    match (data[0], data[1]) {
+        (0, 0) => Some(Reply::EchoReply {                // destino
+            id: u16::from_be_bytes([data[4], data[5]]),
+            seq: u16::from_be_bytes([data[6], data[7]]),
+        }),
+        (11, _) => {                                     // um router
+            let embedded = &data[8..];                   // o pacote citado
+            let ihl = ((embedded.first()? & 0x0f) as usize) * 4;
+            let inner = embedded.get(ihl..)?;
+            if inner.len() < 8 {
+                return None;
+            }
+            Some(Reply::TimeExceeded {
+                id: u16::from_be_bytes([inner[4], inner[5]]),
+                seq: u16::from_be_bytes([inner[6], inner[7]]),
+            })
+        }
+        _ => None,
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+O teste constrói uma mensagem time-exceeded a envolver uma sonda conhecida —
+cabeçalho ICMP exterior, um cabeçalho IP mínimo, e depois o request original — e
+confirma que o `classify` escava o id e o seq certos de volta. Também corrompe um
+byte para confirmar que o checksum a rejeita, e verifica que uma mensagem sem
+relação (destination unreachable, type 3) não é confundida com nenhuma. **Casar o
+id é o que deixa vários traceroutes partilharem uma máquina sem roubar as respostas
+uns dos outros** — exatamente o papel que o id teve no ping.
+
+## Renderizar o relatório
+
+A saída é a lista numerada familiar. Cada hop mostra o router que respondeu e os
+seus round-trip times por sonda, com `*` para uma sonda que expirou — e uma linha
+só de `*` quando um router fica em silêncio (alguns descartam o erro, ou
+limitam-lhe a taxa):
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="traceroute.py"
+def render_hop(ttl: int, addr: str | None, rtts: list[float | None]) -> str:
+    line = f"{ttl:2d}  "
+    if addr is None:
+        return line + " ".join("*" for _ in rtts)
+    line += addr
+    for ms in rtts:
+        line += "  *" if ms is None else f"  {ms:.3f} ms"
+    return line
+```
+</TabItem>
+<TabItem label="Go">
+```go title="traceroute.go"
+func RenderHop(ttl int, addr string, probes []Probe) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%2d  ", ttl)
+	if addr == "" {
+		stars := make([]string, len(probes))
+		for i := range stars {
+			stars[i] = "*"
+		}
+		b.WriteString(strings.Join(stars, " "))
+		return b.String()
+	}
+	b.WriteString(addr)
+	for _, p := range probes {
+		if p.OK {
+			fmt.Fprintf(&b, "  %.3f ms", p.RTT)
+		} else {
+			b.WriteString("  *")
+		}
+	}
+	return b.String()
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn render_hop(ttl: usize, addr: Option<&str>, rtts: &[Option<f64>]) -> String {
+    let mut line = format!("{ttl:2}  ");
+    match addr {
+        None => {
+            let stars: Vec<&str> = rtts.iter().map(|_| "*").collect();
+            line.push_str(&stars.join(" "));
+        }
+        Some(a) => {
+            line.push_str(a);
+            for r in rtts {
+                match r {
+                    Some(ms) => line.push_str(&format!("  {ms:.3} ms")),
+                    None => line.push_str("  *"),
+                }
+            }
+        }
+    }
+    line
+}
+```
+</TabItem>
+</Tabs>
+
+As três renderizam isto de forma idêntica (verificado por hash), os três casos
+lado a lado — um hop completo, um hop que perdeu uma sonda, e um hop silencioso:
+
+```text
+traceroute to example.com (93.184.216.34), 30 hops max
+ 1  192.168.1.1  0.512 ms  0.489 ms  0.501 ms
+ 2  10.0.0.1  4.123 ms  4.200 ms  *
+ 3  * * *
+```
+
+## O loop privilegiado
+
+Com as peças puras na mão, o driver é curto — e precisa do raw socket agora para
+exatamente duas coisas: definir o TTL antes de cada ronda, e ler as respostas.
+Definir o TTL é uma única opção de socket; tudo o resto já construíste para o ping:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="traceroute.py (__main__)"
+for ttl in range(1, max_hops + 1):
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)   # a única linha nova
+    addr, rtts, reached = None, [], False
+    for probe in range(probes_per_hop):
+        seq = ttl * probes_per_hop + probe
+        sock.sendto(build_echo_request(ident, seq, b"\x42" * 32), (ip, 0))
+        sent = time.perf_counter()
+        try:
+            datagram, src = sock.recvfrom(1500)
+        except socket.timeout:
+            rtts.append(None)                                # '*'
+            continue
+        elapsed = (time.perf_counter() - sent) * 1000.0
+        ihl = (datagram[0] & 0x0F) * 4                       # salta o cabeçalho IP
+        reply = classify(datagram[ihl:])
+        if reply is None or reply.id != ident:
+            rtts.append(None)
+            continue
+        addr = addr or src[0]
+        rtts.append(elapsed)
+        reached = reply.kind is Kind.ECHO_REPLY
+    print(render_hop(ttl, addr, rtts))
+    if reached:
+        break
+```
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+for ttl := 1; ttl <= maxHops; ttl++ {
+	syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, ttl) // a única linha nova
+	addr, reached := "", false
+	probes := make([]Probe, 0, probesPerHop)
+	for p := 0; p < probesPerHop; p++ {
+		seq := uint16(ttl*probesPerHop + p)
+		sent := time.Now()
+		syscall.Sendto(fd, BuildEchoRequest(id, seq, payload), 0, dest)
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
+		if err != nil {
+			probes = append(probes, Probe{OK: false}) // '*'
+			continue
+		}
+		elapsed := float64(time.Since(sent).Nanoseconds()) / 1e6
+		ihl := int(buf[0]&0x0f) * 4
+		reply, ok := Classify(buf[ihl:n])
+		if !ok || reply.ID != id {
+			probes = append(probes, Probe{OK: false})
+			continue
+		}
+		if sa, ok := from.(*syscall.SockaddrInet4); ok && addr == "" {
+			addr = net.IP(sa.Addr[:]).String()
+		}
+		probes = append(probes, Probe{RTT: elapsed, OK: true})
+		reached = reply.Kind == EchoReply
+	}
+	fmt.Println(RenderHop(ttl, addr, probes))
+	if reached { break }
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/main.rs"
+for ttl in 1..=max_hops {
+    let ttl_val = (ttl as u32).to_ne_bytes();
+    unsafe { setsockopt(fd, IPPROTO_IP, IP_TTL, ttl_val.as_ptr(), 4) }; // a única linha nova
+    let mut addr = None;
+    let mut rtts = Vec::new();
+    let mut reached = false;
+    for probe in 0..PROBES_PER_HOP {
+        let seq = (ttl * PROBES_PER_HOP + probe) as u16;
+        let packet = build_echo_request(id, seq, &[0x42; 32]);
+        let sent = Instant::now();
+        unsafe { sendto(fd, packet.as_ptr(), packet.len(), 0, dest.as_ptr(), dest.len() as u32) };
+        // recvfrom para buf + src; em timeout empurra None, senão classifica:
+        match classify(&datagram[ihl..]) {
+            Some(Reply::EchoReply { id: rid, .. }) if rid == id => { /* reached = true */ }
+            Some(Reply::TimeExceeded { id: rid, .. }) if rid == id => { /* um hop */ }
+            _ => rtts.push(None),
+        }
+    }
+    println!("{}", render_hop(ttl, addr.as_deref(), &rtts));
+    if reached { break; }
+}
+```
+</TabItem>
+</Tabs>
+
+Repara na única chamada de socket nova em cada — `setsockopt(IP_TTL)` — mesmo onde
+o ping não tinha nada. **O traceroute é mesmo o ping mais uma linha e um parser de
+resposta mais esperto.** Como no ping, a coisa toda precisa de root para o raw
+socket e degrada com a mesma mensagem clara quando corrida sem ele; o CI compila
+este código mas nunca o corre.
+
+<Aside type="tip" title="Porque alguns hops mostram só estrelas">
+  Uma linha `* * *` raramente significa que o pacote desapareceu. Mais
+  frequentemente um router está configurado para **não** enviar ICMP time-exceeded
+  (ou para lhe limitar a taxa) — comum em redes conscientes de segurança — então o
+  hop fica anónimo enquanto o trace continua alegremente para lá dele. Outras
+  razões clássicas: o round trip simplesmente excedeu o timeout de um segundo, ou
+  uma firewall descartou a sonda. O silêncio também é dado: diz-te que um hop
+  existe (a numeração continua) mesmo quando ele não se nomeia.
+</Aside>
+
+## Exercícios
+
+**1. Usa sondas UDP em vez de ICMP (pesquisa + uma linguagem).** O traceroute Unix
+clássico envia pacotes **UDP** para portos altos não usados em vez de echo requests
+ICMP — o destino responde com ICMP *port-unreachable* em vez de um echo reply, que
+é como o loop sabe que chegou. Esboça o que muda: a sonda que envias, o socket em
+que a envias, e o tipo de resposta que significa "feito". Porque poderiam sondas
+UDP passar por um filtro que bloqueia echo ICMP?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Envias um datagrama UDP (um `SOCK_DGRAM` normal, com `IP_TTL` definido) para um
+porto de destino improvável, enquanto ainda *recebes* num raw socket ICMP. Os hops
+intermédios ainda respondem com time-exceeded exatamente como antes — essa parte é
+inalterada. A condição de fim inverte-se: em vez de um echo reply, o destino
+devolve ICMP *destination-unreachable / port-unreachable* (type 3, code 3) porque
+nada escuta nesse porto. Sondas UDP podem atravessar filtros que descartam echo
+ICMP porque muitas firewalls bloqueiam `ping` (echo) especificamente enquanto
+permitem UDP de saída, então os dois tipos de sonda mapeiam caminhos diferentes por
+uma rede defendida.
+
+</details>
+
+**2. Adiciona resolução de hostname (nas três).** Agora cada hop imprime só um IP.
+O traceroute real mostra `hostname (ip)` fazendo um lookup DNS *reverso* de cada
+endereço de router. Adiciona-o — e torna-o opcional (uma flag `-n` para o saltar).
+Porque é saltar a resolução muitas vezes o default certo para um diagnóstico?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Resolve reversamente cada endereço que respondeu com um lookup PTR e imprime
+`nome (ip)`, caindo para o IP nu quando não há registo PTR. Torna-o saltável porque
+cada lookup adiciona latência e pode ele próprio bloquear ou falhar — quando estás
+a diagnosticar uma rede *avariada*, o DNS pode ser exatamente o que está avariado,
+e esperar por lookups reversos abrandaria ou travaria a própria ferramenta que
+usas para achar o problema. É por isso que o traceroute real oferece `-n`: saída
+só-numérica é mais rápida e não depende da coisa que podes estar a depurar.
+
+</details>
+
+**3. Computa estatísticas por hop (qualquer linguagem).** Estende o relatório para
+que cada hop mostre também melhor/médio/pior entre as suas sondas, reutilizando a
+matemática de RTT do `summarize` da lição de ping. Para onde aponta um salto súbito
+de RTT entre hops consecutivos, e para onde aponta um RTT *alto mas estável* que
+persiste até ao destino?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Reutiliza a lógica min/avg/max por hop. Um salto súbito entre o hop N e o N+1 que
+*persiste* até ao fim aponta geralmente para um link genuinamente longo nesse passo
+(uma perna transcontinental ou de satélite) — a latência é adicionada ali e
+carregada para a frente. Um pico de um só hop que *não* persiste muitas vezes só
+significa que esse router em particular despriorizou responder à tua sonda (a
+geração de ICMP é de baixa prioridade), não um caminho lento — o RTT mais baixo do
+hop seguinte prova que o caminho em si é rápido. Ler a *tendência* entre hops, não
+qualquer número único, é como localizas onde a latência é de facto introduzida.
+
+</details>
+
+<Quiz
+  question={'Como é que o traceroute aprende o endereço de cada router ao longo do caminho?'}
+  options={[
+    { text: 'Envia sondas com o TTL do IP a 1, depois 2, depois 3…; cada router que decrementa o TTL a zero descarta o pacote e devolve um ICMP time-exceeded revelando o seu próprio endereço, então escalonar o TTL percorre o caminho um hop de cada vez', correct: true, explanation: 'É esse o truque central. O TTL é um contador de prevenção de loops que cada router decrementa; quando chega a zero o router tem de descartar o pacote e enviar de volta um time-exceeded à origem. Começando em TTL 1 e aumentando, o traceroute força cada router sucessivo a expor-se, até o TTL ser grande o suficiente para chegar ao destino (que responde de forma diferente).' },
+    { text: 'Pergunta a cada router diretamente pela lista dos próximos routers', correct: false, explanation: 'Não há protocolo para um router entregar o caminho todo — routers não enumeram os vizinhos a pedido. O traceroute infere o caminho indiretamente ao fazer cada hop descartar um pacote e reportar o erro resultante.' },
+    { text: 'Lê as tabelas de routing dos routers por SNMP', correct: false, explanation: 'O traceroute não precisa de acesso aos routers nem de protocolo de gestão. Usa só o comportamento padrão do TTL do IP e os erros ICMP time-exceeded que qualquer router já envia — sem SNMP, sem credenciais, sem acesso a tabelas de routing.' },
+    { text: 'Faz broadcast de um pacote de descoberta que todos os routers do caminho respondem de uma vez', correct: false, explanation: 'Não há broadcast por todo o caminho; routers não respondem coletivamente a um único pacote. Cada hop é revelado separadamente, um valor de TTL de cada vez, pelo erro time-exceeded que esse hop gera.' },
+  ]}
+/>
+
+<Quiz
+  question={'Quando um router devolve um ICMP time-exceeded, como é que o traceroute o casa com a sonda específica que enviou?'}
+  options={[
+    { text: 'Um erro ICMP cita o pacote que o causou — o seu corpo contém o cabeçalho IP original mais os primeiros 8 bytes da sonda, que incluem o id e o seq do echo request; o traceroute lê-os de volta para identificar a sonda', correct: true, explanation: 'Pela RFC 792, um erro ICMP embute o cabeçalho IP do pacote ofensor e os seus primeiros 8 bytes. Para um echo request esses 8 bytes contêm type, code, checksum, id e seq — então a origem pode escavar para lá do cabeçalho ICMP exterior e do cabeçalho IP citado para recuperar o id e o seq e casar a resposta exatamente à sonda que enviou.' },
+    { text: 'O router copia o id da sonda para o campo id da própria mensagem time-exceeded', correct: false, explanation: 'Uma mensagem time-exceeded não tem id/seq estilo echo próprios para carregar a identidade da sonda; essa identidade vive no pacote original *citado* embutido no corpo do erro, não num campo de topo que o router preenche.' },
+    { text: 'Casa puramente pelo IP de origem da resposta', correct: false, explanation: 'O IP de origem identifica o router, não qual de várias sondas pendentes disparou o erro. Para desambiguar sondas (e separar traceroutes concorrentes) precisas do id e do seq recuperados do pacote citado.' },
+    { text: 'Assume que as respostas chegam na ordem exata em que as sondas foram enviadas', correct: false, explanation: 'A ordem não é garantida — respostas podem chegar fora de ordem ou ser descartadas. O casamento apoia-se no id e no seq citados dentro do erro, o que é robusto independentemente da ordem de chegada.' },
+  ]}
+/>
+
+<Quiz
+  question={'Um traceroute mostra " 7  * * *" para um hop mas os hops nomeados continuam em 8, 9, e chegam ao destino. Qual é a explicação mais provável?'}
+  options={[
+    { text: 'O router no hop 7 está configurado para não enviar (ou para limitar a taxa de) ICMP time-exceeded, então fica anónimo enquanto ainda encaminha tráfego — o trace continua para lá dele normalmente', correct: true, explanation: 'Uma linha de estrelas geralmente significa que o hop não *respondeu*, não que não existe ou que o caminho está partido. Muitos routers suprimem ou limitam deliberadamente erros ICMP por segurança ou carga; ainda encaminham pacotes bem, então hops seguintes respondem e o destino é alcançado. A numeração continua porque o hop ainda lá está — só silencioso.' },
+    { text: 'O caminho está partido no hop 7 e os pacotes nunca chegaram mais longe', correct: false, explanation: 'Se o caminho estivesse partido no hop 7, os hops 8 e 9 não poderiam responder e o destino seria inalcançável. Como o trace continua e completa, o hop 7 está a encaminhar bem — simplesmente escolheu não responder.' },
+    { text: 'O hop 7 não existe e a numeração saltou-o', correct: false, explanation: 'A numeração é o valor do TTL, que incrementa independentemente de um hop responder — uma linha de estrelas significa que um hop a essa distância existe mas ficou silencioso, não que um número foi saltado sobre um hop ausente.' },
+    { text: 'As tuas sondas para o hop 7 foram enviadas com um checksum corrompido', correct: false, explanation: 'Um bug de checksum local afetaria cada hop de forma idêntica, não só o hop 7, e impediria respostas por todo o lado. Um único hop silencioso no meio de vizinhos que respondem aponta para esse router a suprimir ICMP, não para uma sonda malformada.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="Explica como o traceroute funciona, e que papel o ICMP tem nele.">
+
+O traceroute mapeia os routers entre ti e um destino explorando o campo IP
+time-to-live. O TTL é um contador que cada router decrementa; o seu propósito real
+é impedir pacotes de circularem para sempre num loop de routing — quando chega a
+zero, o router descarta o pacote e envia um ICMP *time-exceeded* (type 11) de volta
+à origem. O traceroute transforma isso num mecanismo de descoberta: envia uma sonda
+com TTL 1, então o primeiro router descarta-a e revela o seu endereço; depois TTL 2
+para o segundo router; e assim por diante, escalonando o TTL até o pacote finalmente
+chegar ao destino, que responde de forma diferente — um echo reply ICMP (ou, para
+traceroute UDP, um port-unreachable) — a sinalizar a chegada. O ICMP faz dois
+trabalhos distintos: os erros *time-exceeded* dos routers intermédios expõem o
+caminho, e a resposta do destino termina-o. Crucialmente, cada erro ICMP cita os
+primeiros 8 bytes do pacote que o disparou, que carregam o id e a sequência da
+sonda, então o traceroute pode casar cada resposta à sonda exata que enviou mesmo
+com várias em voo. Hops silenciosos (`* * *`) são normais — muitos routers limitam
+a taxa ou suprimem ICMP — e não significam que o caminho está partido.
+
+</Interview>
+
+<Interview question="Já construíste o ping. Quanto disso passa para o traceroute, e o que é genuinamente novo?">
+
+Quase tudo passa — é esse o ponto. O pacote de echo request, o checksum RFC 1071,
+o raw socket ICMP, o receive-com-timeout, saltar o cabeçalho IP na receção, casar
+respostas por id, e o tratamento de privilégio são todos idênticos ao ping. Duas
+coisas são genuinamente novas. Primeiro, uma opção de socket:
+`setsockopt(IP_TTL, n)` antes de cada ronda, para controlar quão longe a sonda
+viaja — essa única linha é o que transforma uma verificação de alcançabilidade num
+tracer de caminho. Segundo, um classificador de resposta mais rico: o ping só se
+importava com echo replies, mas o traceroute tem também de reconhecer ICMP
+*time-exceeded* e, para o casar a uma sonda, fazer parsing do pacote original
+*citado dentro* do erro — alcançando para lá do cabeçalho ICMP exterior e do
+cabeçalho IP embutido para recuperar o id e o seq. Tudo o resto é composição:
+percorre o TTL de 1 para cima, envia algumas sondas por hop, renderiza uma linha, e
+para quando o echo reply do destino chega. É um exemplo vívido de como uma pequena
+primitiva (echo ICMP sobre um raw socket) compõe numa ferramenta muito diferente
+com código novo mínimo.
+
+</Interview>
+
+## Desafio
+
+Combina isto com tudo na Parte 6. Constrói uma única CLI de diagnóstico de rede que
+corre `ping`, `traceroute`, e o [port scanner](/systems-programming-academy/pt/part-6-cli-tools/port-scanner/)
+sob um comando com uma saída de tabela partilhada e elegante; adiciona as variantes
+de sonda-UDP e DNS-reverso dos exercícios; e renderiza os hops ao vivo com as
+técnicas ANSI do [dashboard de performance](/systems-programming-academy/pt/part-6-cli-tools/performance-dashboard/),
+atualizando cada linha no sítio à medida que as sondas voltam. Tens agora o toolkit
+completo a que um engenheiro de redes recorre — construído a partir de raw sockets
+e de primeiros princípios, em três linguagens, cada peça pura testada ao byte.
+
+## Referências & leitura adicional
+
+- [RFC 792](https://www.rfc-editor.org/rfc/rfc792) — ICMP, incluindo time-exceeded e a regra de que erros citam o pacote original
+- [RFC 1393](https://www.rfc-editor.org/rfc/rfc1393) — contexto do traceroute e a técnica do TTL
+- O [traceroute](https://man7.org/linux/man-pages/man8/traceroute.8.html) de Van Jacobson — a ferramenta original e os seus muitos modos de sonda
+- [`ip(7)`](https://man7.org/linux/man-pages/man7/ip.7.html) — a opção de socket `IP_TTL` e a interface de socket IPv4
+- A [lição de ping](/systems-programming-academy/pt/part-6-cli-tools/ping/) — o checksum, o echo request e o raw socket que isto reusa por inteiro
+
+<Progress />

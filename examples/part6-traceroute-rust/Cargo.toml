@@ -1,0 +1,15 @@
+[package]
+name = "part6-traceroute-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the ICMP probe, the internet checksum, and the time-exceeded
+# parser are pure std. The raw-socket sender in main.rs sets the IP TTL and
+# reads replies through the socket syscalls directly via FFI — no crates.
+
+[[bin]]
+name = "traceroute"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

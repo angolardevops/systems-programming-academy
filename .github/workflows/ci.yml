@@ -57,6 +57,7 @@ jobs:
           - part6-sysmon-rust
           - part6-portscan-rust
           - part6-ping-rust
+          - part6-traceroute-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -107,6 +108,7 @@ jobs:
           - part6-sysmon-go
           - part6-portscan-go
           - part6-ping-go
+          - part6-traceroute-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -156,6 +158,7 @@ jobs:
           - part6-sysmon-py
           - part6-portscan-py
           - part6-ping-py
+          - part6-traceroute-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

@@ -365,6 +365,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Projeto: ping (ICMP)' },
               slug: 'part-6-cli-tools/ping',
             },
+            {
+              label: 'Project: traceroute',
+              translations: { 'pt-BR': 'Projeto: traceroute' },
+              slug: 'part-6-cli-tools/traceroute',
+            },
           ],
         },
         {
