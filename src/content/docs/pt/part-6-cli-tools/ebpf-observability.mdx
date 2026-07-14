@@ -1,0 +1,448 @@
+---
+title: "Projeto: Observabilidade com eBPF — Um Histograma de Latência"
+description: "Constrói a metade userspace de uma ferramenta de latência eBPF em Rust, Go e Python — o bucketing log2 e o clássico histograma de potências de dois, testado e byte-idêntico. O programa eBPF do lado do kernel que o alimenta, e a syscall bpf() que o carrega, são mostrados por inteiro e explicados."
+difficulty: advanced
+estimatedMinutes: 40
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={40} languages={["python", "go", "rust"]} />
+
+As ferramentas até agora na Parte 6 observaram o sistema de *fora* — lendo
+`/proc`, abrindo sockets, enviando pacotes. O **eBPF** deixa-te observar de
+*dentro do próprio kernel*: correr um pequeno programa em sandbox num evento do
+kernel — uma syscall, um I/O de disco, a entrada de uma função — com overhead
+quase nulo e sem módulos de kernel. É a tecnologia por trás da observabilidade
+moderna: `bpftrace`, `bcc`, Cilium, Falco, Pixie. Este projeto final constrói um
+**histograma de latência de syscalls** — a icónica saída de
+`biolatency`/`funclatency` — e ao fazê-lo mostra exatamente onde a metade do
+kernel acaba e a metade userspace começa.
+
+<Aside type="note" title="O que o eBPF de facto é">
+  eBPF (extended Berkeley Packet Filter) corre o teu bytecode *no kernel*, com
+  segurança. Escreves um pequeno programa, o **verificador** do kernel prova que
+  não pode rebentar nem entrar em loop infinito nem ler memória arbitrária, depois
+  é compilado JIT para código nativo e ligado a um evento. Comunica com o userspace
+  através de **maps** — tabelas key/value partilhadas. O padrão é sempre o mesmo: o
+  programa do kernel *recolhe* (para um map), e um programa userspace *lê e
+  apresenta*. Carregar um programa precisa de privilégio (`CAP_BPF` +
+  `CAP_PERFMON`, ou root) porque código de kernel é poderoso. Essa divisão —
+  recolha privilegiada, apresentação sem privilégios — é a mesma fronteira "testa a
+  lógica, isola o privilégio" da lição de ping, agora traçada através do kernel.
+</Aside>
+
+<Mermaid title="Fluxo de dados eBPF: o kernel recolhe para um map, o userspace renderiza" code={`flowchart LR
+  E["syscall enter/exit<br/>(tracepoint)"] --> P["programa eBPF<br/>(no kernel, verificado)"]
+  P -->|"hist[log2(dt)]++"| M["BPF map<br/>(histograma)"]
+  M -->|"lê"| U["ferramenta userspace<br/>(esta biblioteca)"]
+  U --> R["histograma renderizado"]`} />
+
+Código:
+[`examples/part6-ebpf-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6 testes cada, o histograma **byte-idêntico nas três
+linguagens** (verificado passando as mesmas amostras pelos três binários).
+
+## A metade do kernel: o programa eBPF
+
+Aqui está o programa eBPF real, na linguagem de alto nível `bpftrace` — a
+ferramenta de latência inteira em cinco linhas. Engancha os tracepoints de
+*enter* e *exit* da syscall `read`, guarda um timestamp por thread na entrada, e
+na saída regista os microssegundos decorridos num histograma:
+
+```c title="read-latency.bt (bpftrace)"
+tracepoint:syscalls:sys_enter_read {
+    @start[tid] = nsecs;                       // timestamp, indexado por thread id
+}
+tracepoint:syscalls:sys_exit_read /@start[tid]/ {
+    @usecs = hist((nsecs - @start[tid]) / 1000);   // histograma de potências de dois
+    delete(@start[tid]);
+}
+```
+
+`@start` e `@usecs` são **BPF maps**. `hist()` é o built-in que agrupa cada valor
+por `log2` e incrementa — *exatamente* o histograma que a nossa biblioteca
+userspace constrói e renderiza. Corre-o com root e o `bpftrace` imprime o mesmo
+histograma de potências de dois que este projeto produz. Por baixo, o `bpftrace`
+compila essas linhas para bytecode eBPF, o verificador verifica-o, e é ligado aos
+dois tracepoints.
+
+<Aside type="caution" title="Porque o verificador diz não (muito)">
+  O verificador eBPF é estrito de propósito: isto é código de *kernel*. Rejeita
+  loops não-limitados (todo o loop tem de terminar comprovadamente), aritmética de
+  ponteiros que não consegue provar estar dentro dos limites, leitura de memória
+  não-inicializada, e programas acima de um orçamento de tamanho/complexidade. É
+  por isso que os programas eBPF parecem constrangidos — sem `malloc`, sem loops
+  arbitrários, maps de tamanho fixo. A recompensa por viver dentro dessas regras é
+  código que *não pode* rebentar o kernel, a correr à velocidade do kernel. Lutar
+  com o verificador é o rito de passagem do eBPF, tal como lutar com o borrow
+  checker é o do Rust.
+</Aside>
+
+## A metade userspace: bucketing e o histograma
+
+O kernel preenche um map de histograma; o userspace lê-o e desenha-o. Essa metade
+userspace — **que é agnóstica à linguagem e não precisa de privilégio** — é o que
+construímos e testamos. Três funções puras.
+
+Primeiro, o **bucket**: em que slot de potência de dois cai uma duração. É o mesmo
+`log2` que o `hist()` do kernel computa — simples o suficiente para testar
+isoladamente mesmo correndo em-kernel em produção:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ebpf.py"
+def bucket(v: int) -> int:
+    return 0 if v <= 1 else v.bit_length() - 1  # floor(log2(v))
+
+
+def bucket_range(k: int) -> tuple[int, int]:
+    if k == 0:
+        return (0, 1)
+    return (1 << k, (1 << (k + 1)) - 1)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ebpf.go"
+func Bucket(v uint64) int {
+	if v <= 1 {
+		return 0
+	}
+	return bits.Len64(v) - 1 // floor(log2(v))
+}
+
+func BucketRange(k int) (uint64, uint64) {
+	if k == 0 {
+		return 0, 1
+	}
+	return 1 << k, (1 << (k + 1)) - 1
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn bucket(v: u64) -> usize {
+    if v <= 1 {
+        0
+    } else {
+        63 - v.leading_zeros() as usize // floor(log2(v))
+    }
+}
+
+pub fn bucket_range(k: usize) -> (u64, u64) {
+    if k == 0 {
+        (0, 1)
+    } else {
+        (1 << k, (1 << (k + 1)) - 1)
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+O bucket 0 guarda as durações 0 e 1; o bucket `k` guarda `2^k` até `2^(k+1)−1`.
+Então um read de 5 µs cai no bucket 2 (`4 → 7`), um read de 300 µs no bucket 8
+(`256 → 511`). Cada linguagem computa `floor(log2(v))` à sua maneira idiomática —
+o `bit_length` do Python, o `bits.Len64` do Go, o `leading_zeros` do Rust — e o
+teste fixa-os todos aos mesmos valores.
+
+Depois `tally` (o que o map do kernel acumula, feito aqui para ser testável) e
+`render_histogram` — a parte elegante:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="ebpf.py"
+def render_histogram(counts: list[int], unit: str) -> str:
+    out = f"{unit:>18} : count    distribution"
+    last = -1
+    for i, c in enumerate(counts):
+        if c > 0:
+            last = i
+    if last < 0:
+        return out                       # sem amostras: só cabeçalho
+    top = max(counts[: last + 1])
+    for k in range(last + 1):
+        low, high = bucket_range(k)
+        rng = f"{low} -> {high}"
+        filled = 0 if top == 0 else math.floor(counts[k] / top * BAR_WIDTH + 0.5)
+        bar = "*" * filled + " " * (BAR_WIDTH - filled)
+        out += f"\n{rng:>18} : {counts[k]:<8} |{bar}|"
+    return out
+```
+</TabItem>
+<TabItem label="Go">
+```go title="ebpf.go"
+func RenderHistogram(counts []uint64, unit string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%18s : count    distribution", unit)
+	last, max := -1, uint64(0)
+	for i, c := range counts {
+		if c > 0 {
+			last = i
+			if c > max {
+				max = c
+			}
+		}
+	}
+	if last < 0 {
+		return b.String() // sem amostras: só cabeçalho
+	}
+	for k := 0; k <= last; k++ {
+		low, high := BucketRange(k)
+		rng := fmt.Sprintf("%d -> %d", low, high)
+		filled := 0
+		if max > 0 {
+			filled = int(math.Floor(float64(counts[k])/float64(max)*barWidth + 0.5))
+		}
+		bar := strings.Repeat("*", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(&b, "\n%18s : %-8d |%s|", rng, counts[k], bar)
+	}
+	return b.String()
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn render_histogram(counts: &[u64], unit: &str) -> String {
+    let mut out = format!("{unit:>18} : count    distribution");
+    let last = match counts.iter().rposition(|&c| c > 0) {
+        Some(i) => i,
+        None => return out,              // sem amostras: só cabeçalho
+    };
+    let max = *counts[..=last].iter().max().unwrap_or(&0);
+    for (k, &count) in counts[..=last].iter().enumerate() {
+        let (low, high) = bucket_range(k);
+        let range = format!("{low} -> {high}");
+        let filled = if max == 0 {
+            0
+        } else {
+            ((count as f64 / max as f64) * BAR_WIDTH as f64 + 0.5).floor() as u64
+        };
+        let bar = "*".repeat(filled as usize) + &" ".repeat((BAR_WIDTH - filled) as usize);
+        out.push_str(&format!("\n{range:>18} : {count:<8} |{bar}|"));
+    }
+    out
+}
+```
+</TabItem>
+</Tabs>
+
+Passar as mesmas amostras pelos três binários produz isto, byte a byte
+(sha256-idêntico):
+
+```text
+             usecs : count    distribution
+            0 -> 1 : 1        |*************                           |
+            2 -> 3 : 2        |***************************             |
+            4 -> 7 : 3        |****************************************|
+           8 -> 15 : 3        |****************************************|
+          16 -> 31 : 0        |                                        |
+          64 -> 127 : 1       |*************                           |
+        128 -> 255 : 3        |****************************************|
+```
+
+<Aside type="note" title="A armadilha do arredondamento, uma última vez">
+  O comprimento da barra é `count / max × 40`, arredondado — e arredondado com um
+  `floor(x + 0.5)` explícito nas três linguagens, não com o `round()` nativo de
+  cada uma (o do Python arredonda half-to-even; os outros diferem). É a mesma
+  disciplina do dashboard de performance, e é por isso que os três histogramas são
+  bit-idênticos e não meramente parecidos.
+</Aside>
+
+## Ligá-lo ao kernel
+
+Em produção o array `counts` não é construído a partir de uma lista Python — é
+**lido do map de histograma BPF** que o programa do kernel preencheu. O carregar e
+o ler é a metade privilegiada; cada linguagem tem uma biblioteca madura para isso:
+
+- **Python** — o [`bcc`](https://github.com/iovisor/bcc) compila o programa C em
+  runtime e expõe os maps como objetos Python: `b["dist"].items()` dá-te pares
+  `(slot, count)` para alimentar diretamente ao `render_histogram`.
+- **Go** — o [`cilium/ebpf`](https://github.com/cilium/ebpf) carrega um objeto eBPF
+  pré-compilado e lê o map com `hist.Lookup(&key, &value)`.
+- **Rust** — o [`libbpf-rs`](https://github.com/libbpf/libbpf-rs) ou o
+  [`aya`](https://github.com/aya-rs/aya) carregam e ligam o programa, depois iteram
+  o map.
+
+Cada um precisa de `CAP_BPF`+`CAP_PERFMON` (ou root) para chamar `bpf()`. O nosso
+binário é a *metade userspace sem o loader*: lê durações do stdin — para que o
+possas alimentar de qualquer fonte e ver a saída exata que uma ferramenta eBPF
+produz — enquanto a lição acima mostra o programa do kernel que o alimenta em
+produção. É a decisão "testa a lógica, documenta o resto privilegiado" aplicada ao
+seu caso mais difícil: a lógica está 100% testada e idêntica entre linguagens; a
+única coisa que precisa de root — falar com o kernel — é mostrada por inteiro e
+deixada à biblioteca BPF da plataforma.
+
+```text
+$ printf '1 2 3 5 5 6 9 10 12 100 200 250\n' | latencytop usecs
+# ...o mesmo histograma, alimentado do stdin em vez do kernel
+```
+
+## Exercícios
+
+**1. Adiciona percentis (nas três).** Um histograma esconde o p50/p99 exato. A
+partir do array `counts`, computa um percentil aproximado (em que bucket cai a
+N-ésima amostra) e imprime linhas `p50` e `p99` sob o histograma. Porque é que o
+percentil de um histograma de potências de dois é necessariamente *aproximado*, e
+quando é que isso importa?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Soma os counts para obter o total, depois percorre os buckets acumulando até
+passares `0.50 × total` (p50) ou `0.99 × total` (p99); reporta o range desse
+bucket. É aproximado porque tudo o que sabes é *em que bucket de potência de dois*
+cada amostra caiu, não o seu valor exato — um p99 de "256 → 511 µs" podia estar em
+qualquer ponto desse range de 2×. Essa grosseria serve para detetar problemas de
+ordem de grandeza (o p99 é microssegundos ou milissegundos?) mas é grosseira
+demais para trabalho de SLO apertado, onde quererias um histograma de resolução
+mais alta (mais buckets por potência de dois) ou amostras exatas.
+
+</details>
+
+**2. Segue uma segunda syscall e compara (pesquisa + uma linguagem).** Estende o
+programa bpftrace para histogramar a latência de `write` ao lado do `read`, num
+segundo map. Renderiza os dois histogramas lado a lado. O que é que uma cauda
+consistentemente mais alta numa syscall do que na outra te diz?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Adiciona um par `sys_enter_write`/`sys_exit_write` a escrever para um segundo map
+(`@usecs_write`), e lê ambos os maps no userspace. Uma cauda consistentemente mais
+pesada em, digamos, `write` do que em `read` aponta para onde o processo de facto
+bloqueia — talvez os writes atinjam storage lento ou fsync enquanto os reads são
+servidos de cache. Comparar as *formas* localiza a latência a uma operação
+específica, que é o objetivo todo da observabilidade por-evento: não estás a
+adivinhar qual syscall é lenta, estás a medir cada uma.
+
+</details>
+
+**3. Explica uma rejeição do verificador (pesquisa).** Pega no programa bpftrace e
+imagina reescrevê-lo em C com um `while` não-limitado sobre uma contagem variável.
+O verificador rejeita-o. Explica precisamente porquê, e como o código eBPF real
+trata os casos onde normalmente farias um loop (como iterar uma string ou um
+buffer).
+
+<details>
+<summary>Esboço da solução</summary>
+
+O verificador tem de provar que o programa *termina* e fica dentro de um orçamento
+de instruções limitado antes de o deixar correr no kernel — um loop não-limitado
+não pode ser provado como parando, então é rejeitado imediatamente. O eBPF trata
+os "loops" com construções limitadas: um loop `#pragma unroll` limitado em
+tempo-de-compilação, o helper mais recente `bpf_loop()` com um máximo fixo de
+iterações, ou helpers limitados como `bpf_probe_read_str` para strings. A
+restrição existe porque código de kernel que pudesse girar para sempre travaria a
+máquina; os limites fixos são o preço de correr código não-confiável em ring 0 com
+segurança.
+
+</details>
+
+<Quiz
+  question={'Qual é a divisão fundamental de trabalho numa ferramenta de observabilidade eBPF?'}
+  options={[
+    { text: 'Um programa verificado corre no kernel e recolhe dados para um BPF map com overhead mínimo; um programa userspace lê o map e apresenta os resultados — recolha privilegiada, apresentação sem privilégios', correct: true, explanation: 'Essa divisão é a essência das ferramentas eBPF. O programa em-kernel é minúsculo, verificado e rápido, e só acumula para maps partilhados; toda a formatação, agregação e display acontecem num processo userspace comum a ler esses maps. Também espelha a fronteira de segurança: só carregar o programa do kernel precisa de privilégio.' },
+    { text: 'A ferramenta inteira corre no kernel, incluindo a renderização', correct: false, explanation: 'A renderização e a apresentação acontecem no userspace, não no kernel. O programa do kernel é deliberadamente mínimo — o verificador rejeitaria a complexidade da lógica de formatação, e não há razão para o fazer em espaço de kernel. O kernel recolhe; o userspace apresenta.' },
+    { text: 'A ferramenta corre inteiramente no userspace e faz polling do /proc pelos dados', correct: false, explanation: 'Isso descreve as ferramentas anteriores da Parte 6, não o eBPF. O objetivo todo do eBPF é que a recolha corre *no kernel* no evento, dando dados (como latência por-syscall) que o /proc não pode fornecer, com muito menos overhead que polling.' },
+    { text: 'As metades do kernel e do userspace têm de ser escritas na mesma linguagem', correct: false, explanation: 'Quase nunca são a mesma linguagem: a metade do kernel é C restrito (ou uma DSL como bpftrace) compilado para bytecode eBPF, enquanto a metade userspace é qualquer linguagem com uma biblioteca BPF. Comunicam através de maps, não de uma linguagem partilhada.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que o verificador eBPF rejeita programas com loops não-limitados?'}
+  options={[
+    { text: 'Tem de provar que o programa termina e cabe num orçamento de instruções limitado antes de o deixar correr no kernel — um loop não-limitado não pode ser provado como parando, e código de kernel que gira para sempre travaria a máquina', correct: true, explanation: 'O eBPF corre em espaço de kernel, onde um loop infinito não tem rede de segurança — travaria o CPU. Então o verificador prova estaticamente a terminação e limita o total de instruções. Loops só são permitidos quando a sua contagem de iterações é comprovadamente limitada (unrolling em tempo-de-compilação, bpf_loop com um máximo fixo). A estritez é o que torna seguro correr código não-confiável no kernel.' },
+    { text: 'Loops são lentos demais para correr no kernel', correct: false, explanation: 'A velocidade não é o problema — loops limitados correm bem e depressa. O verificador rejeita loops *não-limitados* especificamente porque não pode provar que terminam, o que é um requisito de segurança para código de kernel, não de performance.' },
+    { text: 'O bytecode eBPF não tem instruções de salto', correct: false, explanation: 'O eBPF tem saltos — é assim que loops limitados e ramos funcionam. A restrição não é a ausência de saltos mas o requisito de que qualquer loop seja comprovadamente limitado para que o programa seja garantidamente terminante.' },
+    { text: 'O kernel não suporta loops de todo em nenhuma forma', correct: false, explanation: 'Loops limitados são suportados — via unrolling em tempo-de-compilação e o helper bpf_loop() com um máximo fixo. São só os loops cujo limite não pode ser provado que são rejeitados.' },
+  ]}
+/>
+
+<Quiz
+  question={'O histograma agrupa latências em buckets de potências de dois (0→1, 2→3, 4→7, 8→15…). Qual é o principal trade-off desta representação?'}
+  options={[
+    { text: 'É extremamente compacto e barato de manter no kernel (um contador por potência de dois, incrementado com um log2), ao custo de resolução — ficas a saber a ordem de grandeza de cada latência, não o seu valor exato', correct: true, explanation: 'Um histograma de potências de dois precisa de apenas ~64 contadores para cobrir a gama inteira de um valor de 64 bits, e o bucketing é um único log2 — barato o suficiente para fazer em cada evento no kernel. O preço é a precisão: uma latência no bucket "256 → 511" podia estar em qualquer ponto desse intervalo de 2×. Esse é geralmente o trade certo para detetar problemas ao nível de grandeza com overhead negligível.' },
+    { text: 'Guarda cada amostra individual, usando memória não-limitada', correct: false, explanation: 'O oposto é verdade — o histograma guarda só os counts por bucket, um número fixo pequeno de contadores, não amostras individuais. Memória limitada é precisamente a sua vantagem; o custo é a precisão por-amostra perdida.' },
+    { text: 'Dá percentis exatos mas é lento a computar', correct: false, explanation: 'Dá percentis *aproximados* (resolvidos só a um bucket de potência de dois) e é muito rápido a computar. Ambas as metades desta opção estão ao contrário.' },
+    { text: 'Só pode representar valores até 40 porque a barra tem 40 caracteres de largura', correct: false, explanation: 'A barra de 40 caracteres é só a largura de display para a distribuição; não tem nada a ver com a gama de valores. Os buckets cobrem a gama inteira de uma duração de 64 bits via potências de dois.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="O que é o eBPF, e porque é tão importante para observabilidade?">
+
+O eBPF deixa-te correr pequenos programas em sandbox dentro do kernel Linux,
+ligados a eventos — syscalls, entradas/saídas de funções, pacotes de rede,
+tracepoints — sem escrever um módulo de kernel nem reiniciar. Compilas C restrito
+(ou uma DSL como bpftrace) para bytecode eBPF; o verificador do kernel prova
+estaticamente que é seguro (termina, fica dentro dos limites, não toca em memória
+arbitrária); depois é compilado JIT para código nativo e enganchado ao evento. É
+importante porque dá visibilidade de grau-de-produção que antes era impossível ou
+cara: latência por-syscall, tracing por-request, rede ao nível de pacote,
+monitorização de segurança — medidos *na fonte, no kernel*, com overhead baixo o
+suficiente para correr continuamente em produção. Antes do eBPF escolhias entre
+ferramentas grosseiras (polling do `/proc`) ou invasivas (módulos de kernel,
+debuggers que param o mundo); o eBPF é seguro, dinâmico e barato. A arquitetura é
+sempre a mesma: um programa de kernel minúsculo recolhe para um map, e um programa
+userspace lê e apresenta — que é porque as ferramentas construídas sobre ele (bcc,
+bpftrace, Cilium, Falco, Pixie) partilham todas essa forma.
+
+</Interview>
+
+<Interview question="Se construísses uma ferramenta de latência sobre eBPF, o que porias no kernel e o que no userspace, e porquê?">
+
+No kernel poria o mínimo absoluto: dois handlers de tracepoint (enter e exit da
+operação), um hash map para guardar o timestamp de início indexado por thread id, e
+um map de histograma que incremento com um bucket log2 do tempo decorrido na saída.
+Nada mais — sem formatação, sem agregação entre buckets, sem I/O — porque código de
+kernel é verificado, constrangido, e corre em cada evento, então tem de ser
+minúsculo e rápido, e o verificador rejeitaria qualquer coisa complexa de qualquer
+forma. No userspace poria tudo o resto: carregar e ligar o programa, depois ler
+periodicamente o map de histograma e renderizá-lo — a matemática de bucket-para-
+range, o escalar das barras, percentis, comparação entre syscalls, formatação da
+saída. Essa divisão é deliberada: a metade do kernel é a parte que tem de ser
+privilegiada e ultrarrápida, então faz o menos possível; a metade userspace guarda
+toda a lógica que vale a pena testar e pode ser escrita e iterada como qualquer
+programa normal. É o mesmo princípio de isolar a única chamada de raw-socket no
+ping — empurra o trabalho privilegiado e não-determinístico para a superfície mais
+pequena possível e mantém a lógica real pura e testável.
+
+</Interview>
+
+## Desafio — e o fim da Parte 6
+
+Tens agora as peças de uma verdadeira suite de observabilidade. Combina-as: carrega
+o programa de latência bpftrace (ou uma versão `bcc`/`cilium-ebpf`/`libbpf-rs`), lê
+o histograma vivo do kernel, e renderiza-o com as técnicas de redraw ANSI do
+[dashboard de performance](/systems-programming-academy/pt/part-6-cli-tools/performance-dashboard/)
+para que atualize no sítio, uma vez por segundo, como um `biolatency` real.
+Adiciona os percentis e a comparação multi-syscall dos exercícios. Depois recua e
+olha para o que a Parte 6 construiu — um
+[dashboard de performance](/systems-programming-academy/pt/part-6-cli-tools/performance-dashboard/),
+um [port scanner](/systems-programming-academy/pt/part-6-cli-tools/port-scanner/),
+o [ping](/systems-programming-academy/pt/part-6-cli-tools/ping/),
+o [traceroute](/systems-programming-academy/pt/part-6-cli-tools/traceroute/), e um
+profiler eBPF — cada um uma ferramenta de linha de comandos elegante construída a
+partir do `/proc`, de raw sockets, e do próprio kernel, de primeiros princípios,
+em três linguagens, com cada computação pura testada ao byte. É esse o ofício da
+programação de sistemas: não recorrer a uma biblioteca, mas entender a máquina bem
+o suficiente para construir a biblioteca.
+
+## Referências & leitura adicional
+
+- [ebpf.io](https://ebpf.io/) — a introdução canónica ao eBPF e ao seu ecossistema
+- [Referência do bpftrace](https://github.com/bpftrace/bpftrace/blob/master/man/adoc/bpftrace.adoc) — a linguagem de tracing de alto nível, incluindo `hist()`
+- [BPF Performance Tools](https://www.brendangregg.com/bpf-performance-tools-book.html) de Brendan Gregg — o livro definitivo; `biolatency`/`funclatency` são as ferramentas que isto espelha
+- [bcc](https://github.com/iovisor/bcc) · [cilium/ebpf](https://github.com/cilium/ebpf) · [libbpf-rs](https://github.com/libbpf/libbpf-rs) — os loaders para Python, Go e Rust
+- [`bpf(2)`](https://man7.org/linux/man-pages/man2/bpf.2.html) — a syscall que carrega programas e cria maps, e as capabilities de que precisa
+- A [lição de ping](/systems-programming-academy/pt/part-6-cli-tools/ping/) — a mesma fronteira "isola o privilégio, testa a lógica", traçada através da stack de rede em vez do kernel
+
+<Progress />

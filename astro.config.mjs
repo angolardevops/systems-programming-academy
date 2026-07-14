@@ -370,6 +370,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Projeto: traceroute' },
               slug: 'part-6-cli-tools/traceroute',
             },
+            {
+              label: 'Project: eBPF Observability',
+              translations: { 'pt-BR': 'Projeto: Observabilidade eBPF' },
+              slug: 'part-6-cli-tools/ebpf-observability',
+            },
           ],
         },
         {

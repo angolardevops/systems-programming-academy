@@ -1,0 +1,16 @@
+[package]
+name = "part6-ebpf-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the userspace half of an eBPF tool — the log2 bucketing, the
+# histogram tally, and the classic power-of-two rendering — is pure std and
+# fully tested. Loading the eBPF program into the kernel needs root and a BPF
+# library; that half is documented in the lesson, not built here.
+
+[[bin]]
+name = "latencytop"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

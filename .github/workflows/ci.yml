@@ -58,6 +58,7 @@ jobs:
           - part6-portscan-rust
           - part6-ping-rust
           - part6-traceroute-rust
+          - part6-ebpf-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -109,6 +110,7 @@ jobs:
           - part6-portscan-go
           - part6-ping-go
           - part6-traceroute-go
+          - part6-ebpf-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -159,6 +161,7 @@ jobs:
           - part6-portscan-py
           - part6-ping-py
           - part6-traceroute-py
+          - part6-ebpf-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:
