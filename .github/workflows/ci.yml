@@ -54,6 +54,7 @@ jobs:
           - part5-template-rust
           - part5-json-rust
           - part5-testkit-rust
+          - part6-sysmon-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -101,6 +102,7 @@ jobs:
           - part5-template-go
           - part5-json-go
           - part5-testkit-go
+          - part6-sysmon-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -147,6 +149,7 @@ jobs:
           - part5-template-py
           - part5-json-py
           - part5-testkit-py
+          - part6-sysmon-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

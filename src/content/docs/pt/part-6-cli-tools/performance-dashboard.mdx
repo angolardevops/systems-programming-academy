@@ -1,0 +1,419 @@
+---
+title: "Projeto: Um Dashboard de Performance (CPU · MEM · I/O · Rede)"
+description: "Constrói um dashboard de terminal ao vivo que lê o /proc do Linux e renderiza CPU, memória, disco e rede como barras de calor coloridas — em Rust, Go e Python. Parsing puro e renderização ANSI, testado com fixtures, frames byte-idênticos nas três, e um monitor real ao vivo."
+difficulty: advanced
+estimatedMinutes: 34
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Benchmark from '../../../../components/Benchmark.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={34} languages={["python", "go", "rust"]} />
+
+Esta parte constrói as ferramentas que fazem a linha de comandos *parecer*
+poderosa — as que têm cor, atualização ao vivo e dashboards. Abrimos com a
+peça-âncora: um **monitor de sistema ao vivo**, um `htop` em miniatura, que lê as
+métricas vivas do kernel e as pinta como **barras de calor** coloridas — verde
+quando calmo, amarelo quando quente, vermelho quando ao rubro. Ensina duas
+competências que toda a CLI elegante precisa: ler o estado do próprio sistema, e
+renderizar uma UI de terminal a partir de nada além de strings e códigos de escape
+ANSI.
+
+<Aside type="note" title="Sem magia, sem privilégios, sem dependências">
+  Tudo aqui lê o **`/proc`** do Linux — um sistema de ficheiros virtual onde o
+  kernel expõe estatísticas vivas como ficheiros de texto simples, legíveis por
+  qualquer um. Sem root, sem biblioteca de monitorização, sem bindings de C. O
+  monitor inteiro é parsing de texto mais formatação de strings, que é exatamente
+  por isso que se mantém testável e portável.
+</Aside>
+
+Código:
+[`examples/part6-sysmon-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6 testes cada, e o frame renderizado é **byte-idêntico nas três
+linguagens** (verificado por `sha256`).
+
+## O design que mantém uma TUI testável
+
+Um dashboard ao vivo soa a impossível de testar — muda a cada segundo e pinta o
+ecrã. O truque é dividi-lo em três peças puras e só a mais exterior tocar no
+terminal:
+
+<Mermaid title="Parse (de texto) -> computar (deltas) -> renderizar (string ANSI); so o main itera sobre /proc vivo" code={`flowchart LR
+  P["ficheiros /proc (texto simples)"] --> PA["parse: texto -> numeros"]
+  PA --> C["computar: deltas -> CPU%, taxas"]
+  C --> R["renderizar: numeros -> string de frame ANSI"]
+  R --> M["loop main: ler /proc, imprimir frame, dormir, repetir"]
+  M -.->|a cada segundo| P`} />
+
+O parsing recebe uma *string*, por isso os testes alimentam um snapshot fixo de
+`/proc` em vez do kernel vivo. O computar é aritmética pura sobre dois snapshots.
+A renderização devolve uma *string* (com códigos ANSI e tudo), verificada byte a
+byte. Só o `main` lê o `/proc` real num loop e imprime — a única parte que não é
+função pura, e a única que não testamos em unidade. É a mesma disciplina de
+testabilidade do
+[mini-NGINX](/systems-programming-academy/pt/part-4-concurrency/mini-nginx/) e do
+[guestbook](/systems-programming-academy/pt/capstone/guestbook/): empurra o I/O
+para a borda, mantém o núcleo puro.
+
+## Ler o kernel: `/proc`
+
+Cada métrica vem de um ficheiro de texto. A utilização de CPU, por exemplo, é um
+*delta*: a linha `cpu` do `/proc/stat` conta jiffies gastos em cada estado desde o
+arranque, por isso amostras duas vezes e divides o aumento de tempo ocupado pelo
+aumento total.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="sysmon.py"
+def parse_cpu(stat: str) -> CpuTimes:
+    """Parse da linha `cpu` agregada de /proc/stat.
+    Busy = tudo exceto idle e iowait."""
+    line = "cpu 0 0 0 0 0 0 0 0"
+    for l in stat.splitlines():
+        if l.startswith("cpu "):
+            line = l
+            break
+    vals = [int(x) for x in line.split()[1:] if x.isdigit()]
+    idle = _at(vals, 3) + _at(vals, 4)   # idle + iowait
+    busy = sum(vals) - idle
+    return CpuTimes(busy=busy, total=busy + idle)
+
+
+def cpu_percent(prev: CpuTimes, cur: CpuTimes) -> float:
+    total_delta = max(0, cur.total - prev.total)
+    if total_delta == 0:
+        return 0.0
+    return max(0, cur.busy - prev.busy) * 100.0 / total_delta
+```
+</TabItem>
+<TabItem label="Go">
+```go title="sysmon.go"
+func ParseCPU(stat string) CpuTimes {
+	line := "cpu 0 0 0 0 0 0 0 0"
+	for _, l := range strings.Split(stat, "\n") {
+		if strings.HasPrefix(l, "cpu ") {
+			line = l
+			break
+		}
+	}
+	fields := strings.Fields(line)[1:]
+	var vals []uint64
+	for _, f := range fields {
+		if n, err := strconv.ParseUint(f, 10, 64); err == nil {
+			vals = append(vals, n)
+		}
+	}
+	idle := at(vals, 3) + at(vals, 4) // idle + iowait
+	var sum uint64
+	for _, v := range vals {
+		sum += v
+	}
+	busy := sum - idle
+	return CpuTimes{Busy: busy, Total: busy + idle}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_cpu(stat: &str) -> CpuTimes {
+    let line = stat.lines().find(|l| l.starts_with("cpu "))
+        .unwrap_or("cpu 0 0 0 0 0 0 0 0");
+    let v: Vec<u64> = line.split_whitespace().skip(1)
+        .filter_map(|n| n.parse().ok()).collect();
+    let idle = v.get(3).copied().unwrap_or(0) + v.get(4).copied().unwrap_or(0);
+    let busy: u64 = v.iter().sum::<u64>() - idle;
+    CpuTimes { busy, total: busy + idle }
+}
+```
+</TabItem>
+</Tabs>
+
+A memória é um único snapshot (`MemTotal` e `MemAvailable` do `/proc/meminfo`); a
+rede (`/proc/net/dev`) e o disco (`/proc/diskstats`) são contadores de
+bytes/setores que transformas em *taxas* da mesma forma que o CPU — amostra duas
+vezes, divide a diferença pelo intervalo. Os testes fixam cada parser contra um
+snapshot fixo: duas amostras de CPU dão exatamente 50%, o fixture de memória dá
+exatamente 70%, o fixture de rede dá exatamente 25 MB/s.
+
+## Renderizar barras de calor com ANSI
+
+O aspeto do dashboard vem inteiramente de **códigos de escape ANSI** — as
+sequências `\x1b[...m` que os terminais interpretam como cor e estilo. Uma barra de
+calor é uma sequência de caracteres de bloco cheios (`█`) numa cor escolhida pelo
+valor, preenchida com blocos ténues (`░`):
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="sysmon.py"
+def _heat_color(percent: float) -> int:
+    if percent < 50.0:
+        return 32   # verde
+    if percent < 80.0:
+        return 33   # amarelo
+    return 31       # vermelho
+
+
+def render_bar(percent: float, width: int) -> str:
+    pct = min(100.0, max(0.0, percent))
+    filled = min(width, _round_half_up(pct / 100.0 * width))
+    color = _heat_color(pct)
+    return f"\x1b[{color}m{'█' * filled}{'░' * (width - filled)}\x1b[0m"
+```
+</TabItem>
+<TabItem label="Go">
+```go title="sysmon.go"
+func heatColor(percent float64) int {
+	switch {
+	case percent < 50.0:
+		return 32 // verde
+	case percent < 80.0:
+		return 33 // amarelo
+	default:
+		return 31 // vermelho
+	}
+}
+
+func RenderBar(percent float64, width int) string {
+	pct := clamp(percent, 0, 100)
+	filled := roundHalfUp(pct / 100.0 * float64(width))
+	color := heatColor(pct)
+	return fmt.Sprintf("\x1b[%dm%s%s\x1b[0m",
+		color, strings.Repeat("█", filled), strings.Repeat("░", width-filled))
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn heat_color(percent: f64) -> u8 {
+    if percent < 50.0 { 32 }        // verde
+    else if percent < 80.0 { 33 }   // amarelo
+    else { 31 }                     // vermelho
+}
+
+pub fn render_bar(percent: f64, width: usize) -> String {
+    let pct = percent.clamp(0.0, 100.0);
+    let filled = round_half_up(pct / 100.0 * width as f64).min(width);
+    let color = heat_color(pct);
+    format!("\x1b[{color}m{}{}\x1b[0m",
+        "█".repeat(filled), "░".repeat(width - filled))
+}
+```
+</TabItem>
+</Tabs>
+
+O `\x1b[33m` começa texto amarelo, o `\x1b[0m` faz reset — tudo entre eles fica
+colorido. `32`/`33`/`31` são verde/amarelo/vermelho. O *preenchimento* da barra é o
+valor escalado à largura da barra, e torná-lo byte-idêntico nas três linguagens
+exigiu uma correção subtil: **o arredondamento.** O `round()` do Rust, o
+`math.Round` do Go e o `round()` do Python não desempatam todos da mesma forma (o
+Python usa banker's rounding), por isso o código usa um `floor(x + 0.5)` explícito
+em todo o lado — o mesmo arredondamento nas três, para `50%` de uma barra de 20
+células serem sempre exatamente 10 células cheias.
+
+<Aside type="tip" title="A armadilha do arredondamento é real">
+  Um dashboard que renderiza uma célula de forma diferente em Python e em Rust
+  seria um bug misterioso nascido inteiramente do `round()` default de cada
+  linguagem. Sempre que precisas de output numérico idêntico entre linguagens,
+  fixa o arredondamento explicitamente — é a lição de formatação de floats do
+  projeto de [serialization](/systems-programming-academy/pt/part-5-frameworks/serialization/),
+  a atacar outra vez.
+</Aside>
+
+## O frame, byte-idêntico
+
+O `render_dashboard` compõe quatro barras etiquetadas num frame. Alimentado com as
+mesmas métricas, as três linguagens emitem os bytes idênticos — verificado por
+hash:
+
+```text
+$ sha256sum rust.frame go.frame py.frame
+0907b071…  rust.frame
+0907b071…  go.frame     ← idêntico
+0907b071…  py.frame     ← idêntico
+```
+
+Renderizado (os códigos de escape tornam-se cor num terminal real):
+
+```text
+ CPU  ██████████░░░░░░░░░░  50.0%      (amarelo)
+ MEM  ██████████████░░░░░░  70.0%      (amarelo)
+ NET  ████░░░░░░░░░░░░░░░░  25.0 MB/s  (verde)
+ DISK ██░░░░░░░░░░░░░░░░░░  12.8 MB/s  (verde)
+```
+
+## Torná-lo ao vivo
+
+A única parte impura é o `main`: ler `/proc`, imprimir o frame, dormir, repetir —
+e dois códigos de escape transformam um programa que faz scroll num dashboard
+estável. O `\x1b[2J` limpa o ecrã uma vez; o `\x1b[H` move o cursor para **casa**
+(canto superior esquerdo) antes de cada redesenho, para cada frame sobrescrever o
+anterior em vez de fazer scroll:
+
+```rust title="src/main.rs — o loop ao vivo"
+print!("\x1b[2J");                 // limpar uma vez
+loop {
+    sleep(Duration::from_secs_f64(1.0));
+    // ... ler /proc, computar cpu/mem/net/disk ...
+    print!("\x1b[H");              // cursor para casa — redesenhar no sítio
+    println!("{}", render_dashboard(cpu, mem, net, disk_bps));
+    // ... levar as leituras atuais como "prev" ...
+}
+```
+
+Corre-o (`cargo run --release`, `go run .`, ou `python3 sysmon.py`) e tens um
+monitor real ao vivo — a ler a tua máquina de verdade, sem privilégios:
+
+```text
+ CPU  ██░░░░░░░░░░░░░░░░░░  9.5%       (verde)
+ MEM  ███████████░░░░░░░░░  57.0%      (amarelo)
+ NET  ░░░░░░░░░░░░░░░░░░░░  0 B/s
+ DISK ░░░░░░░░░░░░░░░░░░░░  0 B/s
+```
+
+É um dashboard de terminal genuíno em ~200 linhas, construído a partir de texto do
+`/proc` e códigos ANSI — a fundação de que toda a TUI mais rica (barras de
+progresso, tabelas, spinners) é feita.
+
+## Exercícios
+
+**1. Acrescenta um histórico sparkline (nas três).** Guarda as últimas N leituras
+de CPU e renderiza-as como uma linha de caracteres de bloco de altura variável
+(`▁▂▃▄▅▆▇█`) — um gráfico inline minúsculo. O que tem de sair do `render_bar` para
+estado partilhado, e porque é que o renderer se mantém uma função pura desse
+estado?
+
+<details>
+<summary>Esboço de solução</summary>
+
+O histórico (um ring buffer das últimas N percentagens) torna-se estado que o loop
+`main` possui e passa a um novo `render_sparkline(history)` — que continua a ser
+uma função pura: mesmo histórico à entrada, mesma string à saída. O caractere de
+altura de bloco é `floor(pct/100 * 7)` indexado em `▁…█`. Manter o renderer puro
+deixa-te testá-lo contra um histórico fixo, exatamente como testaste as barras. O
+estado vive no loop; a renderização mantém-se uma função dele.
+
+</details>
+
+**2. Auto-escala a barra de rede (qualquer linguagem).** A referência fixa de 1
+Gbit faz um link de 100 Mbit ocupado parecer vazio. Segue a taxa máxima vista e
+escala a barra contra ela, para a barra usar sempre a largura toda. Qual é o
+trade-off face a uma escala fixa, para ler o dashboard de relance?
+
+<details>
+<summary>Esboço de solução</summary>
+
+A auto-escala (barra = atual / máximo-visto) enche sempre a largura, mostrando bem
+a atividade *relativa*, mas o significado absoluto muda à medida que o máximo
+cresce — uma barra cheia significa "o mais ocupado que esteve", não "saturado".
+Uma escala fixa mostra a carga *absoluta* consistentemente mas desperdiça largura
+em links lentos. Os monitores reais mostram muitas vezes ambos: uma cor de
+referência fixa e uma barra auto-escalada. A escolha é tendência-relativa vs
+nível-absoluto, e saber qual o teu leitor precisa é a decisão de design.
+
+</details>
+
+**3. Acrescenta CPU por-core (Rust ou Go).** O `/proc/stat` tem também linhas
+`cpu0`, `cpu1`, … Faz parse e renderiza uma barra por core. O que muda no parser, e
+como manténs o frame determinista quando o número de cores varia por máquina?
+
+<details>
+<summary>Esboço de solução</summary>
+
+O parser devolve uma lista de `CpuTimes` (agregado mais por-core), e o renderer
+emite uma barra por core. O determinismo-entre-máquinas é uma preocupação de
+teste: testa o render contra um conjunto *fixo* de amostras de core (para o frame
+ser estável no CI), enquanto o binário ao vivo se adapta ao número real de cores. É
+a mesma divisão de todo o projeto — fixtures para o núcleo testado, dados vivos
+para a ferramenta a correr.
+
+</details>
+
+<Quiz
+  question={'A utilização de CPU é computada de duas amostras do /proc/stat em vez de uma. Porque é que uma única leitura não dá a percentagem?'}
+  options={[
+    { text: 'O /proc/stat reporta tempo cumulativo desde o arranque em cada estado, por isso uma percentagem só existe como delta entre dois momentos — aumento de tempo ocupado sobre aumento total', correct: true, explanation: 'Os contadores só crescem (jiffies desde o arranque). Uma leitura diz-te os totais desde o boot, não "quão ocupado agora". A utilização é uma taxa: (busy₂−busy₁)/(total₂−total₁) sobre o intervalo de amostragem. O mesmo vale para o débito de rede e disco — todos são deltas.' },
+    { text: 'Uma única leitura está disponível mas o kernel arredonda-a, por isso amostras duas vezes para tirar a média do erro', correct: false, explanation: 'Não há percentagem de leitura-única para arredondar — o /proc/stat expõe contadores cumulativos, não uma percentagem instantânea. Duas amostras são precisas para definir uma taxa, não para reduzir erro.' },
+    { text: 'A primeira leitura é sempre lixo e tem de ser descartada', correct: false, explanation: 'A primeira leitura é um snapshot válido de contadores cumulativos; só não é uma percentagem por si só. Precisas de uma segunda para formar um delta. Nada é descartado como lixo.' },
+    { text: 'Porque o /proc/stat só pode ser aberto uma vez por segundo', correct: false, explanation: 'Não há tal limite — podes ler o /proc/stat as vezes que quiseres. O requisito de duas amostras é matemático (uma taxa precisa de dois pontos no tempo), não uma restrição de acesso.' },
+  ]}
+/>
+
+<Quiz
+  question={'O dashboard renderiza byte-idêntico em Rust, Go e Python. Que subtileza mais ameaçou isso, e como foi resolvida?'}
+  options={[
+    { text: 'Arredondamento: o round() default das linguagens desempata de forma diferente (o Python usa banker\'s rounding), por isso o preenchimento da barra usou um floor(x + 0.5) explícito em todo o lado', correct: true, explanation: 'Uma barra de 50%-de-20 tem de ser exatamente 10 células cheias nas três. O arredondamento default difere (o Python arredonda 0.5 para par; Rust/Go arredondam meio para longe de zero), o que renderizaria uma célula diferente. Fixar a fórmula de arredondamento torna a contagem de preenchimento — e logo o frame — idêntica.' },
+    { text: 'Os códigos de escape ANSI diferem entre linguagens', correct: false, explanation: 'Os códigos de escape são só bytes (\\x1b[33m…); cada linguagem emite a mesma string literal. Não são fonte de divergência — o arredondamento numérico do preenchimento da barra é.' },
+    { text: 'As linguagens usam caracteres de bloco diferentes para a barra', correct: false, explanation: 'As três usam os mesmos caracteres de bloco Unicode (█ e ░). A escolha do caractere está sob controlo do autor e é idêntica; o arredondamento de quantos desenhar foi o risco real.' },
+    { text: 'Overflow de inteiros nos contadores de jiffies', correct: false, explanation: 'Os contadores cabem em u64/uint64/int e os fixtures são pequenos; o overflow não é a questão. O arredondamento determinista da conversão float-para-células foi a subtileza que importou.' },
+  ]}
+/>
+
+<Quiz
+  question={'Um dashboard de terminal ao vivo parece inerentemente impossível de testar. Que design o torna testável na mesma?'}
+  options={[
+    { text: 'Dividi-lo em funções puras de parse/computar/renderizar sobre strings, e confinar as leituras vivas de /proc e a impressão no ecrã a um loop main fino que não é testado em unidade', correct: true, explanation: 'O parsing recebe uma string (dá um fixture), o computar é aritmética (dá dois fixtures), o renderizar devolve uma string (verifica-a byte a byte). Só o main toca no kernel vivo e no terminal — a borda impura. É o padrão empurra-o-I/O-para-a-borda que a academia inteira usa.' },
+    { text: 'Fazer mock do sistema de ficheiros /proc inteiro e do driver do terminal', correct: false, explanation: 'Mocking pesado é desnecessário aqui: como o parsing recebe uma string simples, um snapshot de fixture É o input do teste — sem mock de filesystem. Mock a mais testaria o mock, não a lógica.' },
+    { text: 'Não o consegues testar; verificas um dashboard ao vivo vendo-o correr', correct: false, explanation: 'A lógica central é totalmente testável uma vez separada do I/O — os parsers, a matemática dos deltas, e a renderização do frame são todos funções puras com outputs deterministas. Só o loop fica para olhar.' },
+    { text: 'Corrê-lo sob um timer e comparar screenshots', correct: false, explanation: 'Comparação de screenshots é frágil e desnecessária. O frame renderizado é uma string determinista que verificas diretamente; não há captura visual envolvida.' },
+  ]}
+/>
+
+## Cantinho da entrevista
+
+<Interview question="Como é que uma ferramenta como o top ou o htop obtém CPU, memória e I/O sem privilégios especiais?">
+
+No Linux, a partir do sistema de ficheiros virtual `/proc` — uma árvore de
+ficheiros de texto simples apoiada pelo kernel e legível por todos, expondo o
+estado vivo do sistema. O CPU vem do `/proc/stat` (jiffies cumulativos por estado;
+a utilização é o delta entre duas leituras), a memória do `/proc/meminfo` (um
+snapshot de totais e disponível), a rede do `/proc/net/dev` (contadores de bytes
+por interface, transformados em taxas por amostragem), o disco do `/proc/diskstats`
+(contadores de setores, igual). Sem syscalls além de `open`/`read`, sem root, sem
+biblioteca — que é por isso que um monitor é portável e fácil de construir. O
+padrão recorrente é que a maioria destes são *contadores desde o arranque*, por
+isso todo o número "atual" é na verdade uma taxa: amostra duas vezes, divide pelo
+intervalo. (Estatísticas por-processo vivem sob `/proc/<pid>/`, mesma ideia.)
+
+</Interview>
+
+<Interview question="Como constróis uma UI de terminal que atualiza no sítio em vez de fazer scroll?">
+
+Com sequências de escape ANSI — códigos de controlo que o terminal interpreta em
+vez de imprimir. Os essenciais são `\x1b[2J` para limpar o ecrã e `\x1b[H` para
+mover o cursor para casa (canto superior esquerdo); imprimindo `\x1b[H` antes de
+cada redesenho, cada frame sobrescreve o anterior no sítio, produzindo um dashboard
+estável em vez de um scroll. A cor vem de códigos SGR (`\x1b[32m` verde, `\x1b[0m`
+reset). Para UIs mais ricas acrescentas save/restore do cursor, limpeza de linha
+(`\x1b[K`), e o modo de ecrã alternativo (`\x1b[?1049h`, para sair restaurar a
+shell). Bibliotecas como o ncurses, o crossterm, ou o bubbletea embrulham tudo
+isto, mas são só bytes no stdout — construir um monitor à mão, como aqui,
+desmistifica toda a TUI que alguma vez usarás. A disciplina é manter a
+*renderização* uma função pura que devolve o frame como string, e deixar só o loop
+emitir os códigos de controlo.
+
+</Interview>
+
+## Desafio
+
+Faz disto um `htop`-lite a sério: acrescenta barras de CPU por-core, uma tabela de
+processos (lê `/proc/<pid>/stat` e `/proc/<pid>/comm` para os maiores consumidores),
+input de teclado para ordenar ou sair (modo raw do terminal), e o buffer de ecrã
+alternativo para sair restaurar a tua shell. Mantém a disciplina que tornou isto
+testável — parsers sobre strings, um renderer puro que devolve o frame, I/O só no
+loop — e terás uma ferramenta genuinamente útil que compreendes do byte do `/proc`
+para cima, mais a fundação de TUI sobre a qual o resto desta parte é construído.
+
+## Referências & leitura adicional
+
+- [`man 5 proc`](https://man7.org/linux/man-pages/man5/proc.5.html) — a referência definitiva de cada ficheiro `/proc`
+- [Códigos de escape ANSI](https://en.wikipedia.org/wiki/ANSI_escape_code) · [Sequências de controlo do XTerm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)
+- Bibliotecas TUI para comparar: [ratatui](https://ratatui.rs/) (Rust) · [bubbletea](https://github.com/charmbracelet/bubbletea) (Go) · [Textual](https://textual.textualize.io/) (Python)
+- Ferramentas reais para ler: [htop](https://github.com/htop-dev/htop) · [bottom](https://github.com/ClementTsang/bottom) (um monitor de sistema em Rust)
+
+<Progress />

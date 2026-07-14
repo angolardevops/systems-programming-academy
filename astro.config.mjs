@@ -347,6 +347,17 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Part 6 · Command-Line Tools & Dashboards',
+          translations: { 'pt-BR': 'Parte 6 · Ferramentas CLI & Dashboards' },
+          items: [
+            {
+              label: 'Project: Performance Dashboard',
+              translations: { 'pt-BR': 'Projeto: Dashboard de Performance' },
+              slug: 'part-6-cli-tools/performance-dashboard',
+            },
+          ],
+        },
+        {
           label: 'Capstone',
           translations: { 'pt-BR': 'Capstone' },
           items: [
