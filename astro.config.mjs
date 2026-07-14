@@ -355,6 +355,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Projeto: Dashboard de Performance' },
               slug: 'part-6-cli-tools/performance-dashboard',
             },
+            {
+              label: 'Project: Port Scanner',
+              translations: { 'pt-BR': 'Projeto: Scanner de Portas' },
+              slug: 'part-6-cli-tools/port-scanner',
+            },
           ],
         },
         {

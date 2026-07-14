@@ -1,0 +1,466 @@
+---
+title: "Project: A Concurrent Port Scanner (nmap-lite)"
+description: "Build a concurrent TCP connect scanner in Rust, Go, and Python — parse a port spec, probe hundreds of ports in parallel, and print an elegant results table. Tested against real loopback sockets, byte-identical output, no privileges."
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+Every network engineer reaches for `nmap`. This project builds a small one — a
+**concurrent TCP connect scanner** — that takes a host and a port spec, probes
+hundreds of ports in parallel, and prints which are open in an elegant table. It
+is the [Part 3 health-check agent](/systems-programming-academy/part-3-devops/health-check/)
+grown up: the same fan-out/fan-in concurrency, now aimed at ports instead of
+hosts, with a real command-line feel.
+
+<Aside type="note" title="Connect scan vs SYN scan — and why this needs no root">
+  This is a **TCP connect scan**: it calls `connect()` like any ordinary client
+  and reads the outcome. Connection succeeds → the port is **open**; the OS
+  returns *connection refused* → **closed**; nothing answers before the timeout →
+  **filtered** (a firewall silently dropping the packet). Because it uses normal
+  sockets, it needs **no privileges**. A real `nmap`'s default is a stealthier
+  **SYN scan** — a half-open probe that sends a SYN and never completes the
+  handshake — which requires *raw sockets* and root. The connect scan trades
+  stealth for portability; it is the right tool to build and understand first.
+</Aside>
+
+Code:
+[`examples/part6-portscan-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 tests each, the scan tested against **real loopback sockets**,
+and the results table **byte-identical across all three languages**.
+
+## Parsing a port spec
+
+A scanner takes ports the way `nmap` does: `22,80,443` or ranges like `1-1024`,
+mixed freely. The parser normalizes any spec into a sorted, de-duplicated list —
+a pure function tested directly, no network involved:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="portscan.py"
+def parse_ports(spec: str) -> list[int]:
+    ports: set[int] = set()
+    for item in spec.split(","):
+        item = item.strip()
+        if "-" in item:
+            lo, _, hi = item.partition("-")
+            try:
+                a, b = int(lo.strip()), int(hi.strip())
+            except ValueError:
+                continue
+            if _valid(a) and _valid(b):
+                for p in range(min(a, b), max(a, b) + 1):
+                    ports.add(p)
+        else:
+            try:
+                p = int(item)
+            except ValueError:
+                continue
+            if _valid(p):
+                ports.add(p)
+    return sorted(ports)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="portscan.go"
+func ParsePorts(spec string) []int {
+	set := map[int]bool{}
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		if lo, hi, ok := strings.Cut(item, "-"); ok {
+			a, errA := strconv.Atoi(strings.TrimSpace(lo))
+			b, errB := strconv.Atoi(strings.TrimSpace(hi))
+			if errA == nil && errB == nil && valid(a) && valid(b) {
+				if a > b {
+					a, b = b, a
+				}
+				for p := a; p <= b; p++ {
+					set[p] = true
+				}
+			}
+		} else if p, err := strconv.Atoi(item); err == nil && valid(p) {
+			set[p] = true
+		}
+	}
+	out := make([]int, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_ports(spec: &str) -> Vec<u16> {
+    let mut ports = std::collections::BTreeSet::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if let Some((lo, hi)) = item.split_once('-') {
+            if let (Ok(a), Ok(b)) = (lo.trim().parse::<u16>(), hi.trim().parse::<u16>()) {
+                for p in a.min(b)..=a.max(b) {
+                    ports.insert(p);
+                }
+            }
+        } else if let Ok(p) = item.parse::<u16>() {
+            ports.insert(p);
+        }
+    }
+    ports.into_iter().collect()
+}
+```
+</TabItem>
+</Tabs>
+
+The test pins the tricky cases in one line each: `"3-1, 2, 80"` normalizes to
+`[1, 2, 3, 80]` (reversed range, out-of-order, all sorted and deduped), and
+`"22, oops, 90000, 443"` skips the garbage and the out-of-range `90000`, giving
+`[22, 443]`. Note Rust gets the range check *for free* — `u16` cannot hold
+`90000`, so the parse simply fails; Go and Python check `0..=65535` explicitly.
+
+## Probing one port
+
+The heart of the scan is one function: connect with a timeout, and translate the
+outcome into a state.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="portscan.py"
+def scan_port(host: str, port: int, timeout: float) -> State:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return State.OPEN
+    except ConnectionRefusedError:
+        return State.CLOSED
+    except OSError:
+        return State.FILTERED   # timeout / unreachable
+    finally:
+        sock.close()
+```
+</TabItem>
+<TabItem label="Go">
+```go title="portscan.go"
+func ScanPort(host string, port int, timeout time.Duration) State {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err == nil {
+		conn.Close()
+		return Open
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return Closed
+	}
+	return Filtered
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn scan_port(addr: SocketAddr, timeout: Duration) -> State {
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => State::Open,
+        Err(e) if e.kind() == ErrorKind::ConnectionRefused => State::Closed,
+        Err(_) => State::Filtered,
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+The three outcomes carry real meaning. **Open** means a service accepted the
+connection. **Closed** (connection refused) means the host is reachable but
+*nothing* listens there — the OS actively said no. **Filtered** (timeout) means
+the probe vanished: a firewall dropped it silently, so you can't even tell if
+the port is open. Distinguishing *refused* from *timeout* is exactly what tells a
+security engineer "there's a firewall here" versus "this port is simply empty."
+
+<Aside type="tip" title="Testing a scanner without a network">
+  How do you unit-test port states deterministically? With **real loopback
+  sockets**, the technique from the health-check agent: bind a listener on
+  `127.0.0.1:0` and it is a guaranteed-**open** port; bind then immediately close
+  one and connecting to it is a guaranteed-**refused** (closed) port. Both are
+  instant, need no privileges, and use no fixed port numbers — so the tests never
+  flake and never collide.
+</Aside>
+
+## Fan out: scan hundreds of ports at once
+
+Scanning 1024 ports one at a time, each waiting up to a timeout, would take
+minutes. Concurrency makes it seconds: a pool of workers pulls ports from a queue
+and probes them in parallel — the Part 4 worker-pool pattern exactly.
+
+<Mermaid title="A pool of workers pulls ports from a queue and probes them concurrently" code={`flowchart LR
+  Q["ports queue: 1..1024"] --> W1["worker 1: connect(port)"]
+  Q --> W2["worker 2: connect(port)"]
+  Q --> W3["worker N: connect(port)"]
+  W1 --> R["results: (port, state)"]
+  W2 --> R
+  W3 --> R
+  R --> S["sort by port -> table"]`} />
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="portscan.py"
+def scan_all(host, ports, timeout, workers):
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        states = pool.map(lambda p: (p, scan_port(host, p, timeout)), ports)
+    return sorted(states, key=lambda r: r[0])
+```
+Python's `ThreadPoolExecutor` shines here: port scanning is **I/O-bound** (each
+worker mostly waits on the network), so the GIL is released during the blocking
+`connect` and threads genuinely overlap — the good case for Python threads from
+the [Threads lesson](/systems-programming-academy/part-4-concurrency/threads-shared-state/).
+</TabItem>
+<TabItem label="Go">
+```go title="portscan.go"
+func ScanAll(host string, ports []int, timeout time.Duration, workers int) []Result {
+	jobs := make(chan int)
+	results := make(chan Result)
+	for range workers {
+		go func() {
+			for port := range jobs {
+				results <- Result{Port: port, State: ScanPort(host, port, timeout)}
+			}
+		}()
+	}
+	go func() {
+		for _, p := range ports {
+			jobs <- p
+		}
+		close(jobs)
+	}()
+	out := make([]Result, 0, len(ports))
+	for range ports {
+		out = append(out, <-results)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
+	return out
+}
+```
+The channels-and-goroutines worker pool from the
+[Message Passing lesson](/systems-programming-academy/part-4-concurrency/message-passing/), verbatim.
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn scan_all(host: &str, ports: &[u16], timeout: Duration, workers: usize) -> Vec<(u16, State)> {
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let next = Arc::new(AtomicUsize::new(0));
+    thread::scope(|s| {
+        for _ in 0..workers.max(1) {
+            let (results, next) = (Arc::clone(&results), Arc::clone(&next));
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= ports.len() { break; }
+                let addr = (host, ports[i]).to_socket_addrs().ok().and_then(|mut a| a.next());
+                let state = addr.map_or(State::Filtered, |a| scan_port(a, timeout));
+                results.lock().unwrap().push((ports[i], state));
+            });
+        }
+    });
+    let mut out = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+    out.sort_by_key(|(p, _)| *p);
+    out
+}
+```
+An atomic index hands each worker the next port from the slice — a lock-free
+work queue, the atomics from the [Threads lesson](/systems-programming-academy/part-4-concurrency/threads-shared-state/).
+</TabItem>
+</Tabs>
+
+The `scan_all` test is the real proof: bind two live listeners and note a third,
+closed port, scan all three, and assert exactly the two live ports come back
+`open` and the third comes back `closed` — against actual sockets, concurrently.
+
+## The results table
+
+The output is the elegant part — an aligned table of open ports with their
+guessed service, byte-identical across the three languages:
+
+```text
+PORT      STATE     SERVICE
+22/tcp    open      ssh
+80/tcp    open      http
+443/tcp   open      https
+```
+
+`render_table` is a pure function of the rows (fixed-width columns via
+`{:<10}` / `%-10s` / `f"{...:<10}"`), and `service_name` is a small map of
+well-known ports (22→ssh, 443→https, 6379→redis, …). Verified identical by hash:
+
+```text
+$ sha256sum r.tbl g.tbl p.tbl
+44f90a66…  r.tbl
+44f90a66…  g.tbl    ← identical
+44f90a66…  p.tbl    ← identical
+```
+
+Run it against real ports and it just works — here scanning two ports bound live
+plus one closed:
+
+```text
+$ portscan 127.0.0.1 <two live ports + one closed>
+PORT        STATE     SERVICE
+22427/tcp   open      unknown
+61129/tcp   open      unknown
+```
+
+## Exercises
+
+**1. Add a service banner grab (all three).** For each open port, read the first
+line the service sends (many announce themselves, e.g. SSH's `SSH-2.0-OpenSSH`).
+Add a `BANNER` column. What timeout discipline do you need so a silent service
+doesn't stall the whole scan?
+
+<details>
+<summary>Solution sketch</summary>
+
+After connecting, set a short read timeout and read once; if nothing arrives,
+leave the banner blank rather than blocking. The key is that the *read* needs its
+own deadline separate from the *connect* — a service can accept the connection
+(open) yet never speak, and a naive blocking read would hang that worker forever.
+This is the same "every network call carries its own timeout" rule from the
+health-check agent, applied to the read as well as the connect.
+
+</details>
+
+**2. Rate-limit the scan (any language).** Scanning 65535 ports with 1000 workers
+can look like an attack and trip intrusion detection. Add a `--rate` cap
+(ports/second). Where does the throttle go so it limits the whole scan, not each
+worker independently?
+
+<details>
+<summary>Solution sketch</summary>
+
+The throttle belongs at the *source* of work — the code feeding ports into the
+queue — not inside each worker, so it caps the aggregate rate regardless of
+worker count. A token-bucket or a simple sleep between dequeues gives a global
+ports/second ceiling. Putting it per-worker would multiply by the worker count
+and miss the target. This is the backpressure idea from the
+[channels lesson](/systems-programming-academy/part-6-cli-tools/), applied to be
+a considerate network citizen.
+
+</details>
+
+**3. Understand the SYN scan (research + Rust or Go).** Read how a raw-socket SYN
+scan works (send SYN, read SYN-ACK, never send the final ACK). Sketch — you can't
+run it without root — why it's stealthier and faster than the connect scan, and
+what capability (`CAP_NET_RAW`) it needs. When would the connect scan actually be
+preferable?
+
+<details>
+<summary>Solution sketch</summary>
+
+A SYN scan never completes the handshake, so the target application never sees a
+connection (stealthier, and no connection to log), and it skips the OS's connect
+state machine (marginally faster at scale). It needs raw sockets — `CAP_NET_RAW`
+or root — because it crafts TCP packets by hand. The connect scan is preferable
+when you *lack* privileges (a normal user account), when you want the scan to be
+honest/logged, or when raw sockets are blocked — which is often, making the
+humble connect scan the more broadly usable tool.
+
+</details>
+
+<Quiz
+  question={'The scanner distinguishes "closed" (connection refused) from "filtered" (timeout). Why does that distinction matter to a security engineer?'}
+  options={[
+    { text: 'Refused means the host is reachable but nothing listens there; a timeout means a firewall silently dropped the probe — so "filtered" reveals a firewall where "closed" reveals an empty port', correct: true, explanation: 'An active refusal (RST from the OS) proves the host is up and the port simply has no service. Silence until timeout means the packet was swallowed — the signature of a firewall dropping traffic. Telling them apart maps the network\'s defenses, not just its services.' },
+    { text: 'There is no real difference; both mean the port is unusable', correct: false, explanation: 'They mean different things. Refused is a definitive "no service here" from a reachable host; filtered is "I got no answer at all", which usually indicates filtering. Conflating them loses the most interesting signal.' },
+    { text: 'Filtered ports are open and closed ports are not', correct: false, explanation: 'Filtered does not mean open — it means the probe got no response, so the state is unknown (could be open behind a drop rule, or nonexistent). Open is only when the connection actually succeeds.' },
+    { text: 'The distinction only affects the display color, not the meaning', correct: false, explanation: 'It is a semantic difference, not cosmetic: refused vs no-answer tells you whether a firewall is present. That is often the whole point of a scan.' },
+  ]}
+/>
+
+<Quiz
+  question={'Port scanning uses a thread pool in Python and the GIL does not cripple it, unlike the CPU-bound counter from Part 4. Why?'}
+  options={[
+    { text: 'Scanning is I/O-bound: each worker mostly waits on the network, and Python releases the GIL during the blocking connect, so the waits genuinely overlap', correct: true, explanation: 'The GIL only serializes Python bytecode execution. A blocking connect() spends its time in the OS, with the GIL released, so other threads run. Waiting on 1000 sockets overlaps beautifully — the exact case where Python threads earn their keep, as the Threads lesson showed.' },
+    { text: 'Port scanning does not use the GIL at all because it uses sockets', correct: false, explanation: 'The GIL is always present in CPython; the point is that it is *released* during blocking I/O. Using sockets does not bypass the GIL — waiting on them does release it.' },
+    { text: 'The thread pool converts the work to be CPU-bound', correct: false, explanation: 'A thread pool does not change the nature of the work. Scanning is inherently I/O-bound (waiting on the network), which is precisely why threads help here and did not for the CPU-bound counter.' },
+    { text: 'Python threads are always faster than Go goroutines for this', correct: false, explanation: 'This is not a Python-beats-Go claim. All three overlap the I/O well; the point is only that Python threads are *effective* for I/O-bound work, unlike CPU-bound work where the GIL serializes them.' },
+  ]}
+/>
+
+<Quiz
+  question={'How are the port-state tests made deterministic without depending on real services or fixed ports?'}
+  options={[
+    { text: 'Bind a listener on 127.0.0.1:0 for a guaranteed-open port; bind then immediately close one for a guaranteed-refused (closed) port — both instant, privilege-free, and collision-free', correct: true, explanation: 'The OS assigns a free ephemeral port to a :0 bind, so a live listener is definitively open and a bound-then-closed socket is definitively refused. No hard-coded ports (no collisions), no external services (no flakiness), no root — the same technique the health-check agent used.' },
+    { text: 'Hard-code well-known ports like 80 and 22 and assume their usual services are running', correct: false, explanation: 'Assuming port 80 is open is exactly the flaky, machine-dependent testing to avoid — it may be free, taken, or firewalled. Binding your own sockets makes the outcome deterministic regardless of the machine.' },
+    { text: 'Mock the socket library entirely', correct: false, explanation: 'Mocking would test the mock, not the real connect/refuse behavior. Real loopback sockets exercise the actual OS path deterministically, which is stronger and needs no mock.' },
+    { text: 'Scan a public server like scanme.nmap.org in the test', correct: false, explanation: 'Depending on an external host makes tests slow, flaky, and network-dependent — and hammers someone else\'s server. Loopback sockets are instant and self-contained.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Explain the difference between a TCP connect scan and a SYN scan.">
+
+A connect scan performs the full TCP three-way handshake via the OS's normal
+`connect()` — SYN, SYN-ACK, ACK — and an established connection means the port is
+open. It needs no special privileges because it uses ordinary sockets, but the
+target application sees and can log the completed connection. A SYN scan (nmap's
+default) is a *half-open* scan: it sends a raw SYN packet and inspects the reply —
+SYN-ACK means open, RST means closed — but never sends the final ACK, so the
+handshake never completes and the application layer never registers a connection.
+That makes it stealthier and marginally faster, but it requires crafting raw
+packets, which needs `CAP_NET_RAW` or root. In both cases, *refused* (RST) means
+closed while *no response* means filtered — a firewall is dropping the probe. The
+practical trade-off is privilege and stealth (SYN) versus portability and running
+as any user (connect).
+
+</Interview>
+
+<Interview question="You need to scan 65535 ports quickly and responsibly. What concurrency and safeguards do you build in?">
+
+Concurrency first: scanning is I/O-bound, so a pool of workers (threads,
+goroutines, or async tasks) probing in parallel turns a minutes-long serial scan
+into seconds — each worker mostly waits on the network, so hundreds overlap
+cheaply. Then the safeguards, because an unthrottled full-range scan looks like
+an attack: a per-connect timeout so filtered ports don't stall a worker; an
+aggregate rate limit (ports/second) applied at the work source, not per worker,
+so the total stays under detection thresholds and is polite to the target; bounded
+concurrency (a fixed worker count) so you don't exhaust local file descriptors or
+the remote's connection table; and only scanning hosts you're authorized to. The
+architecture is the worker pool from concurrency fundamentals plus the timeout and
+backpressure disciplines — the same building blocks as a health-check agent or a
+web server, pointed at ports.
+
+</Interview>
+
+## Challenge
+
+Grow this toward a real recon tool: add UDP scanning (which needs different logic —
+UDP is connectionless, so you infer state from ICMP unreachable replies or
+silence), service/version detection via banner grabbing, output as JSON (reuse the
+[serialization](/systems-programming-academy/part-5-frameworks/serialization/)
+encoder) so results feed other tools, and the rate limiting above. Then — only
+against hosts you own or the public `scanme.nmap.org` — compare your connect scan's
+timing and results with real `nmap`. You will understand exactly what a scanner
+does and why, having built the core yourself, socket by socket.
+
+<Aside type="caution" title="Scan only what you're allowed to">
+  Port-scanning hosts you don't own or have explicit permission to test can be
+  illegal and is always impolite. Practice on `127.0.0.1`, your own machines, or
+  `scanme.nmap.org` (which nmap provides expressly for this). A tool is neutral;
+  using it responsibly is on you.
+</Aside>
+
+## References & further reading
+
+- [nmap documentation](https://nmap.org/book/man.html) — the reference scanner; read its scan-type chapter
+- [RFC 793](https://www.rfc-editor.org/rfc/rfc793) — TCP, including the handshake and RST behavior a scan relies on
+- Rust — [`TcpStream::connect_timeout`](https://doc.rust-lang.org/std/net/struct.TcpStream.html#method.connect_timeout) · Go — [`net.DialTimeout`](https://pkg.go.dev/net#DialTimeout) · Python — [`socket`](https://docs.python.org/3/library/socket.html)
+- The [health-check agent](/systems-programming-academy/part-3-devops/health-check/) — the same concurrent-probe pattern this extends
+
+<Progress />
