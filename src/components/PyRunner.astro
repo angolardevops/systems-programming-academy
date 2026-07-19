@@ -59,8 +59,11 @@ const { code, label } = Astro.props;
       try {
         const pyodide = await loadPyodideOnce();
         let buf = '';
+        // Pyodide's `batched` stdout fires once per line WITHOUT the trailing
+        // newline, so re-add it — otherwise multi-line output (e.g. a histogram)
+        // collapses onto one line.
         const write = (s: string) => {
-          buf += s;
+          buf += s + '\n';
           out.textContent = buf;
         };
         pyodide.setStdout({ batched: write });
@@ -134,7 +137,10 @@ const { code, label } = Astro.props;
     background: var(--sl-color-black);
     color: var(--sl-color-gray-1);
     font-size: var(--sl-text-code);
-    white-space: pre-wrap;
+    line-height: 1.5;
+    /* Do NOT wrap: wide, aligned output (e.g. an ASCII histogram) must keep its
+       columns and scroll sideways instead of breaking across lines. */
+    white-space: pre;
     overflow-x: auto;
   }
 </style>

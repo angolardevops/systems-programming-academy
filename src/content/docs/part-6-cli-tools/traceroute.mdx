@@ -40,7 +40,7 @@ to **abuse the IP time-to-live field on purpose**.
   S -->|"TTL=3"| D["Destination<br/>reached → echo reply"]`} />
 
 Code:
-[`examples/part6-traceroute-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+[Rust](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part6-traceroute-rust) · [Go](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part6-traceroute-go) · [Python](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part6-traceroute-py)
 — fmt/lint clean, 6 tests each, the report **byte-identical across all three
 languages**. It reuses ping's `checksum` and `build_echo_request` verbatim; the
 new work is classifying the reply and rendering the hops.
