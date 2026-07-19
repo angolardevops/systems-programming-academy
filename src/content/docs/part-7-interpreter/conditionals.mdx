@@ -1,0 +1,572 @@
+---
+title: "Build Your Own Interpreter — Conditionals & Recursion"
+description: "Add comparisons and a lazy if/then/else to your language in Rust, Go, and Python — the one construct that lets recursion terminate and makes the language Turing-complete. Only the taken branch runs; built, tested, and byte-identical three ways."
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+import PyRunner from '../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+<Badge text="Build Your Own X" variant="tip" size="large" />
+
+Your language has [functions and closures](/systems-programming-academy/part-7-interpreter/functions/)
+— but every program still runs straight to the end. It can't *decide*. This lesson
+adds the one construct that changes that, and it is a bigger deal than it looks:
+with comparisons and a conditional, **recursion can finally terminate**, and the
+language crosses the line into **Turing-completeness** — it can now compute anything
+computable.
+
+```text
+fact(n) = if n <= 1 then 1 else n * fact(n - 1)
+fact(5)   # => 120
+```
+
+<Aside type="note" title="Why one branch, evaluated lazily, is the whole trick">
+  The conditional here is an *expression*: `if cond then a else b`. Its defining
+  property is that it evaluates the condition and then **only the taken branch** —
+  never both. That laziness is exactly what lets `fact` stop: when `n <= 1`, the
+  `else` branch (which would recurse again) is never evaluated. An eager `if` that
+  computed both branches would recurse forever. Booleans are just integers here
+  (`1` = true, `0` = false), which keeps every result exact and byte-identical.
+</Aside>
+
+Code:
+[Rust](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-cond-rust) · [Go](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-cond-go) · [Python](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-cond-py)
+— fmt/lint clean, 6 tests each, program output **byte-identical across all three
+languages** — factorial, Fibonacci, and Euclid's GCD included.
+
+## Comparisons: two-character tokens
+
+Comparisons need operators the lexer hasn't seen: `<`, `<=`, `>`, `>=`, `==`, `!=`.
+The new wrinkle is **two-character operators** — when the lexer sees `<`, it must
+peek at the next character to tell `<` from `<=`. And `==` must be distinguished
+from the single `=` of assignment.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="cond.py"
+nxt = src[i + 1] if i + 1 < len(src) else ""
+...
+elif c == "=" and nxt == "=":
+    tokens.append(Token("C", op="=="))   # equality, not assignment
+    i += 2
+elif c == "=":
+    tokens.append(Token("="))            # assignment
+    i += 1
+elif c in "!<>" and nxt == "=":
+    tokens.append(Token("C", op=c + "="))  # !=, <=, >=
+    i += 2
+elif c in "<>":
+    tokens.append(Token("C", op=c))        # <, >
+    i += 1
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cond.go"
+case c == '=' && peek(1) == '=':
+	tokens = append(tokens, Token{Kind: 'C', Op: "=="}) // equality
+	i += 2
+case c == '=':
+	tokens = append(tokens, Token{Kind: '='}) // assignment
+	i++
+case c == '!' && peek(1) == '=':
+	tokens = append(tokens, Token{Kind: 'C', Op: "!="})
+	i += 2
+case c == '<' && peek(1) == '=':
+	tokens = append(tokens, Token{Kind: 'C', Op: "<="})
+	i += 2
+case c == '<':
+	tokens = append(tokens, Token{Kind: 'C', Op: "<"})
+	i++
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+let next = chars.get(i + 1).copied();
+...
+'=' if next == Some('=') => { tokens.push(Token::Cmp("==")); i += 2; }  // equality
+'=' => { tokens.push(Token::Assign); i += 1; }                          // assignment
+'!' if next == Some('=') => { tokens.push(Token::Cmp("!=")); i += 2; }
+'<' if next == Some('=') => { tokens.push(Token::Cmp("<=")); i += 2; }
+'<' => { tokens.push(Token::Cmp("<")); i += 1; }
+```
+</TabItem>
+</Tabs>
+
+**Order matters:** always test the two-character form (`==`, `<=`) *before* the
+one-character form (`=`, `<`), or the lexer would greedily grab `=` and leave a
+stray `=` behind. This "longest match first" rule is universal in real lexers.
+
+## The grammar grows two levels
+
+The parser gains a comparison level (looser than `+`/`-`) and an `if` form at the
+very top. The full precedence ladder is now:
+
+```text
+expr       := 'if' expr 'then' expr 'else' expr | comparison
+comparison := add (('<'|'<='|'>'|'>='|'=='|'!=') add)?   ← loosest
+add        := term (('+' | '-') term)*
+term       := factor (('*' | '/') factor)*
+factor     := Num | Ident '(' args ')' | Ident | '(' expr ')' | '-' factor
+```
+
+Because `comparison` sits below `add`, `n <= 1` parses as `(n) <= (1)` and
+`a + b < c` as `(a + b) < c` — arithmetic binds tighter than comparison, exactly
+as you'd expect. And `if` is the outermost form, so it can wrap any expression,
+including another `if` (that's how `else if` chains work):
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="cond.py"
+def expr(self) -> Expr:  # 'if' expr 'then' expr 'else' expr | comparison
+    if self._is_kw("if"):
+        self.pos += 1
+        cond = self.expr()
+        self._expect_kw("then")
+        then = self.expr()
+        self._expect_kw("else")
+        els = self.expr()
+        return Expr("I", cond=cond, then=then, els=els)
+    return self.comparison()
+
+def comparison(self) -> Expr:            # add (cmpop add)?
+    left = self.add()
+    t = self._peek()
+    if t is not None and t.kind == "C":
+        self.pos += 1
+        return Expr("C", op=t.op, left=left, right=self.add())
+    return left
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cond.go"
+// expr := 'if' expr 'then' expr 'else' expr | comparison
+func (p *parser) expr() (*Expr, error) {
+	if p.isKw("if") {
+		p.pos++
+		cond, _ := p.expr()
+		if err := p.expectKw("then"); err != nil { return nil, err }
+		then, _ := p.expr()
+		if err := p.expectKw("else"); err != nil { return nil, err }
+		els, _ := p.expr()
+		return &Expr{Kind: 'I', Cond: cond, Then: then, Els: els}, nil
+	}
+	return p.comparison()
+}
+
+func (p *parser) comparison() (*Expr, error) {
+	left, err := p.add()
+	if err != nil { return nil, err }
+	if t, ok := p.peek(); ok && t.Kind == 'C' {
+		p.pos++
+		right, err := p.add()
+		if err != nil { return nil, err }
+		return &Expr{Kind: 'C', Op: t.Op, L: left, R: right}, nil
+	}
+	return left, nil
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// expr := 'if' expr 'then' expr 'else' expr | comparison
+fn expr(&mut self) -> Result<Expr, String> {
+    if self.is_kw("if") {
+        self.pos += 1;
+        let cond = self.expr()?;
+        self.expect_kw("then")?;
+        let then = self.expr()?;
+        self.expect_kw("else")?;
+        let els = self.expr()?;
+        return Ok(Expr::If(Box::new(cond), Box::new(then), Box::new(els)));
+    }
+    self.comparison()
+}
+
+fn comparison(&mut self) -> Result<Expr, String> {
+    let left = self.add()?;
+    if let Some(Token::Cmp(op)) = self.peek() {
+        let op = *op;
+        self.pos += 1;
+        return Ok(Expr::Cmp(op, Box::new(left), Box::new(self.add()?)));
+    }
+    Ok(left)
+}
+```
+</TabItem>
+</Tabs>
+
+`if`, `then`, and `else` are ordinary identifiers to the lexer; the parser just
+treats them as keywords by name. It's the simplest possible approach and works
+perfectly for a small language.
+
+## Evaluation: compare, then take one branch
+
+Two new `eval` cases. A comparison computes both sides and returns `1` or `0`. The
+`if` computes the condition and then evaluates **only** the branch it selects —
+the laziness that makes recursion possible:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="cond.py"
+if e.kind == "C":                                  # comparison
+    a, b = _as_int(evaluate(e.left, env)), _as_int(evaluate(e.right, env))
+    return 1 if _CMP[e.op](a, b) else 0            # booleans are integers
+if e.kind == "I":                                  # if / then / else
+    if _as_int(evaluate(e.cond, env)) != 0:
+        return evaluate(e.then, env)               # ONLY the taken branch
+    return evaluate(e.els, env)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="cond.go"
+case 'C': // comparison -> 1 or 0
+	return evalCmp(e, env)
+case 'I': // if / then / else
+	c, _ := Eval(e.Cond, env)
+	n, err := asInt(c)
+	if err != nil { return Value{}, err }
+	if n != 0 {
+		return Eval(e.Then, env) // ONLY the taken branch
+	}
+	return Eval(e.Els, env)
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+Expr::Cmp(op, l, r) => {
+    let a = as_int(eval(l, env)?)?;
+    let b = as_int(eval(r, env)?)?;
+    let t = match *op { "<" => a < b, "<=" => a <= b, ">" => a > b,
+                        ">=" => a >= b, "==" => a == b, "!=" => a != b, _ => unreachable!() };
+    Ok(Value::Int(if t { 1 } else { 0 }))          // booleans are integers
+}
+Expr::If(cond, then, els) => {
+    if as_int(eval(cond, env)?)? != 0 {
+        eval(then, env)                            // ONLY the taken branch
+    } else {
+        eval(els, env)
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Laziness is a correctness property, not an optimization">
+  The test that proves it: `safe(n) = if n == 0 then 0 else 100 / n`. Calling
+  `safe(0)` returns `0` with **no division-by-zero error** — because the `else`
+  branch, `100 / 0`, is never evaluated. If the interpreter eagerly evaluated both
+  branches (as it does for `+`'s operands), `safe(0)` would crash. Conditionals are
+  the first place the language *must not* evaluate everything, and getting that
+  right is what makes them useful.
+</Aside>
+
+## Recursion, now that it can stop
+
+With a conditional, a recursive function has a base case to halt on. All three
+implementations compute these identically:
+
+```text
+fact(n) = if n <= 1 then 1 else n * fact(n - 1)
+fact(6)                                          => 720
+fib(n)  = if n < 2 then n else fib(n - 1) + fib(n - 2)
+fib(15)                                          => 610
+gcd(a, b) = if b == 0 then a else gcd(b, a - a / b * b)   # Euclid's algorithm
+gcd(48, 36)                                      => 12
+```
+
+That last one — Euclid's GCD, written in *your* language — is a quiet milestone: a
+non-trivial algorithm running on an interpreter you built from a character scanner
+up. **Functions plus conditionals is the threshold of Turing-completeness**: your
+four-stage toy can now, in principle, compute anything any computer can.
+
+## Run recursion in your browser
+
+Edit and press **Run** — write your own recursive functions and watch them
+terminate (or, if you drop the base case, watch them not):
+
+<PyRunner code={`CMP = ("<", "<=", ">", ">=", "==", "!=")
+CMPF = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b}
+
+def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]; nx = s[i + 1] if i + 1 < len(s) else ""
+        if c in " \\t": i += 1
+        elif c == "=" and nx == "=": toks.append("=="); i += 2
+        elif c in "!<>" and nx == "=": toks.append(c + "="); i += 2
+        elif c in "<>": toks.append(c); i += 1
+        elif c in "=,+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"): j += 1
+            toks.append(("id", s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(s, t): s.t, s.i = t, 0
+    def peek(s): return s.t[s.i] if s.i < len(s.t) else None
+    def nxt(s):
+        v = s.peek(); s.i += 1; return v
+    def iskw(s, k): return s.peek() == ("id", k)
+    def expr(s):
+        if s.iskw("if"):
+            s.nxt(); cond = s.expr()
+            if not s.iskw("then"): raise ValueError("expected 'then'")
+            s.nxt(); then = s.expr()
+            if not s.iskw("else"): raise ValueError("expected 'else'")
+            s.nxt(); els = s.expr()
+            return ("if", cond, then, els)
+        return s.cmp()
+    def cmp(s):
+        left = s.add()
+        if s.peek() in CMP:
+            op = s.nxt(); return ("cmp", op, left, s.add())
+        return left
+    def add(s):
+        n = s.term()
+        while s.peek() in ("+", "-"):
+            op = s.nxt(); n = (op, n, s.term())
+        return n
+    def term(s):
+        n = s.factor()
+        while s.peek() in ("*", "/"):
+            op = s.nxt(); n = (op, n, s.factor())
+        return n
+    def factor(s):
+        t = s.nxt()
+        if isinstance(t, int): return t
+        if isinstance(t, tuple):
+            if s.peek() == "(":
+                s.nxt(); args = []
+                if s.peek() != ")":
+                    args.append(s.expr())
+                    while s.peek() == ",": s.nxt(); args.append(s.expr())
+                if s.nxt() != ")": raise ValueError("expected ')'")
+                return ("call", t[1], args)
+            return ("var", t[1])
+        if t == "-": return ("neg", s.factor())
+        if t == "(":
+            n = s.expr()
+            if s.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+class Scope:
+    def __init__(s, parent=None): s.v, s.parent = {}, parent
+    def get(s, n):
+        sc = s
+        while sc:
+            if n in sc.v: return sc.v[n]
+            sc = sc.parent
+        return None
+
+def asint(v):
+    if isinstance(v, int): return v
+    raise ValueError("cannot do arithmetic on a function")
+
+def ev(n, env):
+    if isinstance(n, int): return n
+    k = n[0]
+    if k == "var":
+        v = env.get(n[1])
+        if v is None: raise ValueError(f"undefined variable {n[1]!r}")
+        return v
+    if k == "neg": return -asint(ev(n[1], env))
+    if k == "cmp":
+        a, b = asint(ev(n[2], env)), asint(ev(n[3], env))
+        return 1 if CMPF[n[1]](a, b) else 0
+    if k == "if":
+        return ev(n[2], env) if asint(ev(n[1], env)) != 0 else ev(n[3], env)
+    if k == "call":
+        fn = env.get(n[1])
+        if not (isinstance(fn, tuple) and fn[0] == "fn"):
+            raise ValueError(f"{n[1]!r} is not a function")
+        _, params, body, defenv = fn
+        args = [ev(a, env) for a in n[2]]
+        if len(args) != len(params): raise ValueError(f"{n[1]!r} arity mismatch")
+        call = Scope(defenv)
+        for p, a in zip(params, args): call.v[p] = a
+        return ev(body, call)
+    a, b = asint(ev(n[1], env)), asint(ev(n[2], env))
+    if k == "+": return a + b
+    if k == "-": return a - b
+    if k == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def params_of(toks):
+    ps, i = [], 0
+    if toks[i] == ")": return ps, i + 1
+    while True:
+        ps.append(toks[i][1]); i += 1
+        if toks[i] == ",": i += 1; continue
+        if toks[i] == ")": return ps, i + 1
+        raise ValueError("bad parameter list")
+
+def run(program):
+    env = Scope()
+    for line in program.strip().split("\\n"):
+        line = line.strip()
+        if not line: continue
+        try:
+            t = tokenize(line)
+            is_def = len(t) > 2 and isinstance(t[0], tuple) and t[1] == "(" and ")" in t and t[t.index(")") + 1:t.index(")") + 2] == ["="]
+            if is_def:
+                name = t[0][1]
+                ps, after = params_of(t[2:])
+                env.v[name] = ("fn", ps, P(t[2 + after + 1:]).expr(), env)
+                print(f"{line:<48} => <fn>")
+            elif len(t) >= 2 and isinstance(t[0], tuple) and t[1] == "=":
+                env.v[t[0][1]] = ev(P(t[2:]).expr(), env)
+                r = env.v[t[0][1]]
+                print(f"{line:<48} => {r if isinstance(r, int) else '<fn>'}")
+            else:
+                r = ev(P(t).expr(), env)
+                print(f"{line:<48} => {r if isinstance(r, int) else '<fn>'}")
+        except ValueError as e:
+            print(f"{line:<48} -> error: {e}")
+
+# write your own recursion — edit freely:
+run('''
+fact(n) = if n <= 1 then 1 else n * fact(n - 1)
+fact(6)
+fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)
+fib(15)
+gcd(a, b) = if b == 0 then a else gcd(b, a - a / b * b)
+gcd(48, 36)
+''')`} label="Python · a Turing-complete language · runs in your browser" />
+
+## Exercises
+
+**1. Add boolean `and` / `or` with short-circuit evaluation (all three).** `and`
+and `or` must *not* evaluate their right side when the left already decides the
+result (`false and X` is `false` without touching `X`). Why is short-circuiting the
+same kind of laziness as `if`, and where does it belong in the precedence ladder?
+
+<details>
+<summary>Solution sketch</summary>
+
+`and`/`or` are lazy in exactly the way `if` is: evaluate the left operand, and only
+evaluate the right if the left didn't already settle the answer. They sit *below*
+comparison in precedence (so `a < b and c < d` groups the comparisons first), and
+they're implemented not as ordinary binary operators (which eagerly evaluate both
+sides) but with the same branch-skipping the `if` case uses. That shared laziness is
+why `x != 0 and 10 / x > 1` is safe — the division never runs when `x` is 0.
+
+</details>
+
+**2. Make recursion cheaper with tail calls (research + one language).** `fact` as
+written builds a deep call stack. Rewrite it with an accumulator
+(`fact(n, acc) = if n <= 1 then acc else fact(n - 1, n * acc)`) so the recursive
+call is the *last* thing it does. What could an interpreter do with that shape that
+it can't with the original?
+
+<details>
+<summary>Solution sketch</summary>
+
+When the recursive call is in *tail position* — the very last operation, with
+nothing left to do with its result — the interpreter can reuse the current call's
+scope instead of nesting a new one, turning the recursion into a loop that runs in
+constant stack space (tail-call optimization). The accumulator version has that
+shape; the original `n * fact(n-1)` does not, because it still has to multiply after
+the call returns. Recognizing tail calls is how functional languages recurse
+arbitrarily deep without overflowing the stack.
+
+</details>
+
+**3. Add a `while`-style loop and compare it to recursion (any language).** Give the
+language a loop construct, then implement `sum from 1 to n` both with a loop and with
+recursion. With conditionals already present, is a loop adding any *power* to the
+language — or only convenience?
+
+<details>
+<summary>Solution sketch</summary>
+
+A loop adds no computational power: the language became Turing-complete the moment
+it had recursion plus conditionals, and any loop can be rewritten as a recursive
+function (and vice versa). What a loop adds is *convenience and efficiency* — an
+explicit iteration that's easy to read and runs in constant stack space without
+needing tail-call optimization. This is a deep point: many language features are
+expressiveness and ergonomics layered on a small Turing-complete core, not new
+capability. You have already built that core.
+
+</details>
+
+<Quiz
+  question={'Calling safe(0) on safe(n) = if n == 0 then 0 else 100 / n returns 0 with no error, even though 100 / 0 appears in the source. Why?'}
+  options={[
+    { text: 'The if expression is lazy: it evaluates the condition and then ONLY the taken branch. Since n == 0 is true, the then branch (0) runs and the else branch (100 / n) is never evaluated, so the division never happens', correct: true, explanation: 'Laziness of the conditional is the point. Unlike + or *, which evaluate both operands, if evaluates only the branch it selects. With n == 0 true, 100 / 0 is skipped entirely. This is precisely why conditionals let recursion terminate — the recursive branch is not evaluated once the base case is reached.' },
+    { text: 'The interpreter special-cases division by zero to return 0', correct: false, explanation: 'There is no such special case — dividing by zero is a real error in this language (try 100 / 0 directly and it errors). safe(0) works only because the division expression is in a branch that is never evaluated.' },
+    { text: 'Both branches are evaluated but the error from the else branch is silently discarded', correct: false, explanation: 'The else branch is not evaluated at all, so no error is produced to discard. If both branches were evaluated eagerly, safe(0) would indeed crash — which is exactly what the lazy if avoids.' },
+    { text: 'Integer division of 100 by 0 yields 0 in this language', correct: false, explanation: 'It does not — division by zero raises an error here. The reason safe(0) succeeds is that the dividing expression is never reached, not that the division produces 0.' },
+  ]}
+/>
+
+<Quiz
+  question={'Adding conditionals to a language that already has functions is described as crossing into Turing-completeness. What does that mean here?'}
+  options={[
+    { text: 'With recursion (from functions calling themselves) plus a conditional to provide a base case that halts it, the language can express any computation a Turing machine can — it is now, in principle, as powerful as any programming language', correct: true, explanation: 'Turing-completeness means the language can compute anything computable. Recursion gives unbounded repetition; a conditional gives the ability to stop (a base case) and to branch. Together they are sufficient to simulate any algorithm — which is why even a tiny language with functions and if is, formally, as capable as any other.' },
+    { text: 'The interpreter can now run in constant memory regardless of input', correct: false, explanation: 'Turing-completeness is about expressive power, not memory usage — in fact recursion here consumes stack proportional to depth. Constant-memory execution is a separate concern (tail calls, loops), unrelated to being Turing-complete.' },
+    { text: 'The language can now be compiled to machine code', correct: false, explanation: 'Turing-completeness is independent of compilation. This interpreter compiles nothing; it is Turing-complete because of what its programs can express, not because of any code-generation step.' },
+    { text: 'It means every program in the language is guaranteed to terminate', correct: false, explanation: 'The opposite, in a sense: Turing-completeness brings the possibility of non-termination (drop fact\'s base case and it loops forever). Guaranteed termination would make a language LESS powerful, not more.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Why must a conditional evaluate only one branch, and what breaks if it evaluates both?">
+
+A conditional's whole purpose is *choice*, and choice implies not doing the thing
+you didn't choose. Concretely, `if cond then a else b` must evaluate `cond`, then
+evaluate exactly one of `a` or `b` — never both. Two things break if it evaluates
+both. First, correctness: a branch may only be *valid* when it's selected — `if n ==
+0 then 0 else 100 / n` divides by zero if the else branch runs when `n` is 0, so
+eager evaluation would turn a safe program into a crashing one. Second, and more
+fundamentally, termination: recursion relies on the recursive branch *not* running
+once the base case is hit. `fact(n) = if n <= 1 then 1 else n * fact(n-1)` would
+recurse forever if the interpreter evaluated the `else` branch even when `n <= 1`.
+So laziness of the conditional isn't an optimization — it's what makes conditionals
+mean anything at all, and it's the precise reason adding `if` to a language with
+functions unlocks terminating recursion and, with it, Turing-completeness. This is
+also why `and`/`or` short-circuit and why languages distinguish special forms (like
+`if`) from ordinary functions (whose arguments are all evaluated): some constructs
+*must* control what gets evaluated.
+
+</Interview>
+
+## The track ahead
+
+Your language is now Turing-complete: a lexer, a recursive-descent parser, and a
+tree-walking evaluator with variables, closures, and conditionals — everything
+needed, in principle, to compute anything, built and tested three ways,
+byte-identical. What's left is expressiveness and ergonomics, not power:
+short-circuit booleans, `while` and `for` loops, `print` and strings, data
+structures, better error messages with line numbers. Each is a modest addition to
+the same four stages you now know intimately. You set out to demystify how a
+language works — and you have built a real, if small, one from nothing but a
+character scanner and these ideas.
+
+## References & further reading
+
+- [Crafting Interpreters — Control Flow](https://craftinginterpreters.com/control-flow.html) — conditionals, loops, and short-circuit logic in depth
+- [Functions & Closures](/systems-programming-academy/part-7-interpreter/functions/) — lesson 3, which this completes into a Turing-complete language
+- [Turing completeness](https://en.wikipedia.org/wiki/Turing_completeness) — what the milestone actually means
+- [Structured program theorem](https://en.wikipedia.org/wiki/Structured_program_theorem) — why sequence, selection, and iteration suffice for any computation
+
+<Progress />

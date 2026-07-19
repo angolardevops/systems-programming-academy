@@ -63,6 +63,7 @@ jobs:
           - part7-calc-rust
           - part7-vars-rust
           - part7-fns-rust
+          - part7-cond-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -119,6 +120,7 @@ jobs:
           - part7-calc-go
           - part7-vars-go
           - part7-fns-go
+          - part7-cond-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -174,6 +176,7 @@ jobs:
           - part7-calc-py
           - part7-vars-py
           - part7-fns-py
+          - part7-cond-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

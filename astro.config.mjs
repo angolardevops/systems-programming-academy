@@ -482,6 +482,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Funções & Closures' },
               slug: 'part-7-interpreter/functions',
             },
+            {
+              label: 'Conditionals & Recursion',
+              translations: { 'pt-BR': 'Condicionais & Recursão' },
+              slug: 'part-7-interpreter/conditionals',
+            },
           ],
         },
         {

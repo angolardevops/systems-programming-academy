@@ -1,0 +1,15 @@
+[package]
+name = "part7-cond-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the functions-and-closures interpreter gains comparisons and a
+# lazy if/then/else expression. Only the taken branch is evaluated, which lets
+# recursion terminate — so the language is now Turing-complete.
+
+[[bin]]
+name = "cond"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
