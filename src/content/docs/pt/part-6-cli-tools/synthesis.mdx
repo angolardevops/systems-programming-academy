@@ -1,0 +1,128 @@
+---
+title: "Parte 6 em Revisão — Do /proc ao Kernel"
+description: "Um tour reflexivo da Parte 6: como seis ferramentas de linha de comandos traçam um único fio condutor do userspace ao kernel, a disciplina recorrente de testar a lógica e isolar o privilégio, e o que cada ferramenta ensinou."
+difficulty: advanced
+estimatedMinutes: 12
+languages: [python, go, rust]
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={12} languages={["python", "go", "rust"]} />
+
+<Badge text="Síntese" variant="note" size="large" />
+
+A Parte 6 propôs-se construir *ferramentas de linha de comandos elegantes com
+dashboards*. Construiu seis — um dashboard de performance, um port scanner, o
+`ping`, o `traceroute`, um profiler de latência eBPF, e o capstone `netdiag` que as
+une. Vistas uma a uma são um saco de utilitários de rede e de sistemas. Vistas em
+conjunto contam uma única história: **observar um sistema em execução a
+profundidade cada vez maior, e pagar um preço cada vez maior em privilégio para o
+fazer.** Esta página é o recuo.
+
+## O fio condutor: mais fundo na máquina
+
+Alinha as ferramentas por *quão perto do metal chegam* e aparece uma escada:
+
+| Ferramenta | Observa via | Privilégio | O que ensinou |
+| --- | --- | --- | --- |
+| **Dashboard de performance** | ficheiros `/proc` | nenhum | Parsing de texto exportado pelo kernel; redraw ANSI |
+| **Port scanner** | TCP `connect()` | nenhum | Concorrência (fan-out), connect vs SYN |
+| **ping** | raw socket ICMP | **root** | Construir um pacote; o checksum da internet |
+| **traceroute** | raw socket + IP TTL | **root** | O truque do TTL; ICMP a citar o erro |
+| **profiler eBPF** | um programa *no kernel* | **root** | Código em-kernel seguro; o verificador; maps |
+| **netdiag** | compõe as acima | misto | Dispatch de subcomandos; formato de relatório partilhado |
+
+Lê de cima para baixo e cada ferramenta chega uma camada mais fundo. O dashboard lê
+texto que o kernel *entrega* pelo `/proc`. O scanner usa um socket *comum* como
+qualquer cliente faz. O `ping` desce a um socket **raw** para forjar um pacote que o
+kernel normalmente constrói por ti. O `traceroute` manipula o TTL do cabeçalho IP
+para usar como arma as próprias mensagens de erro de um router. E o profiler eBPF
+para de observar de fora completamente e corre o teu código *dentro do próprio
+kernel*. O preço de cada passo para baixo é privilégio: as duas primeiras não
+precisam de nenhum, as restantes precisam de root — porque quanto mais fundo chegas,
+mais dano um bug poderia fazer, então o kernel guarda a porta.
+
+<Aside type="note" title="A escada de privilégio é a verdadeira lição">
+  Repara que as duas ferramentas mais *úteis-de-imediato* — o dashboard e o scanner
+  — não precisam de privilégio nenhum, enquanto a mais *poderosa* — o eBPF — precisa
+  do máximo. Não é coincidência; é como sistemas bem desenhados funcionam. A
+  capacidade é racionada pelo risco. Entender *porque* o `ping` precisa de root
+  quando um port scan não precisa (um forja pacotes, o outro só abre conexões) vale
+  mais que memorizar qualquer uma das ferramentas.
+</Aside>
+
+## A disciplina recorrente: testar a lógica, isolar o privilégio
+
+Toda a ferramenta privilegiada da Parte 6 foi construída da mesma forma, por uma
+regra escolhida no início: **testar a lógica, isolar o privilégio.** A perceção é
+que mesmo uma ferramenta que fundamentalmente precisa de root tem, no seu coração,
+sobretudo *lógica pura* que não precisa:
+
+- o `ping` precisa de um raw socket para *enviar*, mas construir o pacote, computar o checksum RFC 1071, fazer parsing da resposta, e formatar as estatísticas são funções puras — testadas ao byte, sem privilégio.
+- o `traceroute` precisa de um raw socket para definir o TTL, mas classificar uma resposta ICMP (incluindo escavar o id e o seq do pacote *citado* dentro de um erro time-exceeded) e renderizar o relatório de hops são puros — testados.
+- o profiler eBPF precisa de `CAP_BPF` para carregar o seu programa de kernel, mas o bucketing log2 e o render do histograma de potências de dois são puros — testados, e idênticos quer corram no kernel quer num unit test.
+
+Em cada um, exatamente uma função fina toca a superfície privilegiada — abrir o raw
+socket, chamar `bpf()` — e degrada com uma mensagem clara quando corrida sem
+direitos. Tudo o que valia a pena testar foi deliberadamente empurrado *para fora*
+dessa função. O retorno são ferramentas cuja lógica real é rápida de testar,
+determinística, e comprovadamente correta, com o privilégio inevitável confinado à
+superfície mais pequena possível. É o mesmo princípio de isolar o `unsafe` em Rust,
+ou a composition root na arquitetura hexagonal: **empurra a coisa perigosa e
+não-testável para a borda e mantém o núcleo puro.**
+
+## A prova que nunca mudou: byte-idêntico em três linguagens
+
+Toda a ferramenta da Parte 6 — como em cada parte antes dela — foi construída três
+vezes, em Python, Go e Rust, e a sua saída verificada **byte-idêntica** por hash. Os
+frames do dashboard, a tabela do scanner, o bloco de estatísticas do `ping`, os hops
+do `traceroute`, o histograma, o banner do `netdiag` — todos sha256-idênticos nas
+três linguagens. É o método-assinatura da Academia, e a Parte 6 stress-testou-o no
+material mais difícil até agora: bytes crus no fio, estatísticas de vírgula
+flutuante, e box-drawing Unicode.
+
+Também trouxe à superfície as mesmas duas armadilhas vezes sem conta, que é
+exatamente porque a verificação byte-idêntica ganha o seu sustento:
+
+- **O arredondamento diverge por omissão.** O `round()` do Python é banker's rounding; os outros não são. Toda a ferramenta que escalou uma barra ou uma percentagem usou um `floor(x + 0.5)` explícito nas três linguagens para que `25%` seja `25%` em toda a parte.
+- **A largura é code points, não bytes.** As bordas de box-drawing do `netdiag` só alinham porque as três preenchem por contagem de code points — o `len()` do Go conta bytes e teria feito a borda derivar. O hash apanhou-o.
+
+Nenhum dos bugs é visível numa só linguagem. Só os vês quando três implementações
+têm de produzir os *mesmos bytes* — que é o objetivo todo de construir cada
+ferramenta três vezes.
+
+## O que consegues construir agora
+
+Recua e olha para o toolkit. Consegues ler as próprias métricas do kernel e
+desenhá-las ao vivo. Consegues fazer scan das portas de um host concorrentemente.
+Consegues forjar um pacote ICMP, fazer-lhe o checksum à mão, e cronometrar um round
+trip. Consegues mapear cada router até um destino abusando do TTL. Consegues correr
+um programa verificado dentro do kernel Linux e ler um histograma de latência de um
+BPF map. E consegues embrulhar tudo isso num CLI elegante. Nada disto recorreu a uma
+biblioteca de rede — cada ferramenta foi construída a partir do `/proc`, de sockets,
+de raw sockets, e da syscall `bpf()`, de primeiros princípios.
+
+<Aside type="tip" title="O ofício, reafirmado">
+  A mensagem transversal da Parte 6 — e da Academia toda — é esta: **a forma de
+  dominar um sistema é construir as suas ferramentas a partir das primitivas, não
+  importá-las.** Uma biblioteca dá-te o `ping`; construir o `ping` dá-te o ICMP, os
+  checksums, os raw sockets, e o modelo de privilégio. A biblioteca é mais rápida de
+  usar; o entendimento é o que te torna engenheiro. A Parte 6 gastou cinco
+  ferramentas a provar que os utilitários de rede "mágicos" são, por baixo, umas
+  poucas syscalls bem-entendidas e alguma lógica pura que podes testar ao byte.
+</Aside>
+
+## Para onde ir a seguir
+
+- Revisita qualquer ferramenta com olhos frescos agora que vês a escada: o [dashboard de performance](/systems-programming-academy/pt/part-6-cli-tools/performance-dashboard/), o [port scanner](/systems-programming-academy/pt/part-6-cli-tools/port-scanner/), o [ping](/systems-programming-academy/pt/part-6-cli-tools/ping/), o [traceroute](/systems-programming-academy/pt/part-6-cli-tools/traceroute/), o [profiler eBPF](/systems-programming-academy/pt/part-6-cli-tools/ebpf-observability/), ou o [capstone netdiag](/systems-programming-academy/pt/part-6-cli-tools/netdiag/).
+- Aceita os desafios do capstone: liga o ping/trace reais ao `netdiag`, adiciona saída `--json`, ou conduz o histograma eBPF ao vivo com redraw ANSI.
+- Lê a reflexão cross-language de encerramento da Academia, [As Três Linguagens, Comparadas](/systems-programming-academy/pt/capstone/three-languages/), que reúne cada benchmark medido nas seis partes.
+
+A Parte 6 está completa. Não só usaste o toolkit do engenheiro de redes — construíste-o,
+em três linguagens, e entendes cada camada que ele toca, de um ficheiro de texto no
+`/proc` a um programa a correr no kernel.
+
+<Progress />

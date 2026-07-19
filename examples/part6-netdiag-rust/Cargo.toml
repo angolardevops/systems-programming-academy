@@ -1,0 +1,17 @@
+[package]
+name = "part6-netdiag-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: netdiag is the Part 6 capstone — one CLI over the five tools.
+# The new, tested surface is the command layer: subcommand parsing and the shared
+# report renderer (banner + sections). The probes themselves are the earlier
+# lessons; scan runs unprivileged inline, ping/trace delegate to the raw-socket
+# tools (root), as the lesson explains.
+
+[[bin]]
+name = "netdiag"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

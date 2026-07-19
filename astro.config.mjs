@@ -375,6 +375,16 @@ export default defineConfig({
               translations: { 'pt-BR': 'Projeto: Observabilidade eBPF' },
               slug: 'part-6-cli-tools/ebpf-observability',
             },
+            {
+              label: 'Capstone: netdiag',
+              translations: { 'pt-BR': 'Capstone: netdiag' },
+              slug: 'part-6-cli-tools/netdiag',
+            },
+            {
+              label: 'Part 6 in Review',
+              translations: { 'pt-BR': 'Parte 6 em Revisão' },
+              slug: 'part-6-cli-tools/synthesis',
+            },
           ],
         },
         {

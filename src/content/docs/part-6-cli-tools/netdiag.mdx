@@ -1,0 +1,407 @@
+---
+title: "Capstone: netdiag — One CLI Over the Five Tools"
+description: "The Part 6 capstone: unify the performance dashboard, port scanner, ping, and traceroute under one command with subcommand dispatch and a shared, elegant report format — the command layer tested and byte-identical across Rust, Go, and Python."
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+<Badge text="Capstone" variant="success" size="large" />
+
+Part 6 built five tools, each with its own `main`. That's how you *learn* them —
+but it's not how you *ship* them. Real diagnostic suites (`nmap`, `iproute2`,
+BusyBox) put many tools under **one command** with a **consistent interface**:
+`netdiag scan`, `netdiag ping`, `netdiag trace`. This capstone builds that
+unifying layer — and it turns out the genuinely new work isn't the probes (you
+have those) but the **command layer**: parsing subcommands into a typed value,
+and rendering every tool's output through one shared, elegant report format.
+
+<Aside type="note" title="What a capstone adds">
+  Composing tools is its own skill. `netdiag` introduces no new networking — it
+  introduces **subcommand dispatch** (route `argv` to the right tool, validate its
+  arguments, fail with a helpful usage message) and a **shared visual language**
+  (one boxed banner, one section rule, so every subcommand's output looks like it
+  belongs to the same program). Both are pure functions, fully tested and
+  byte-identical across the three languages. The probes themselves are the earlier
+  lessons — `scan` runs inline (it needs no privilege), while `ping` and `trace`
+  delegate to the raw-socket tools, exactly the boundary Part 6 has drawn all along.
+</Aside>
+
+Code:
+[`examples/part6-netdiag-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 tests each, the report format **byte-identical across all
+three languages** (`usage`, `banner`, and `section` verified sha256-identical).
+
+## Parsing a subcommand into a typed value
+
+The first job of any multi-tool CLI: turn `["scan", "example.com", "1-1024"]`
+into something typed and validated, or fail with help. Each subcommand has its own
+required and optional arguments:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="netdiag.py"
+def parse_command(args: list[str]) -> Command:
+    if not args:
+        raise UsageError(usage())
+    sub = args[0]
+    if sub == "scan":
+        if len(args) < 3:
+            raise UsageError(usage())
+        return Command("scan", host=args[1], ports=args[2])
+    if sub == "ping":
+        if len(args) < 2:
+            raise UsageError(usage())
+        return Command("ping", host=args[1], count=_int_arg(args, 2, 4))
+    if sub == "trace":
+        if len(args) < 2:
+            raise UsageError(usage())
+        return Command("trace", host=args[1], max_hops=_int_arg(args, 2, 30))
+    raise UsageError(f"netdiag: unknown command '{sub}'\n\n{usage()}")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="netdiag.go"
+func ParseCommand(args []string) (Command, error) {
+	if len(args) == 0 {
+		return Command{}, fmt.Errorf("%s", Usage())
+	}
+	switch args[0] {
+	case "scan":
+		if len(args) < 3 {
+			return Command{}, fmt.Errorf("%s", Usage())
+		}
+		return Command{Kind: "scan", Host: args[1], Ports: args[2]}, nil
+	case "ping":
+		if len(args) < 2 {
+			return Command{}, fmt.Errorf("%s", Usage())
+		}
+		return Command{Kind: "ping", Host: args[1], Count: intArg(args, 2, 4)}, nil
+	case "trace":
+		if len(args) < 2 {
+			return Command{}, fmt.Errorf("%s", Usage())
+		}
+		return Command{Kind: "trace", Host: args[1], MaxHops: intArg(args, 2, 30)}, nil
+	default:
+		return Command{}, fmt.Errorf("netdiag: unknown command '%s'\n\n%s", args[0], Usage())
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn parse_command(args: &[String]) -> Result<Command, String> {
+    let sub = args.first().ok_or_else(usage)?;
+    match sub.as_str() {
+        "scan" => {
+            let host = args.get(1).ok_or_else(usage)?;
+            let ports = args.get(2).ok_or_else(usage)?;
+            Ok(Command::Scan { host: host.clone(), ports: ports.clone() })
+        }
+        "ping" => {
+            let host = args.get(1).ok_or_else(usage)?;
+            let count = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+            Ok(Command::Ping { host: host.clone(), count })
+        }
+        "trace" => {
+            let host = args.get(1).ok_or_else(usage)?;
+            let max_hops = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+            Ok(Command::Trace { host: host.clone(), max_hops })
+        }
+        other => Err(format!("netdiag: unknown command '{other}'\n\n{}", usage())),
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+Notice how each language models "success or a helpful failure" idiomatically: Rust
+returns `Result<Command, String>`, Go returns `(Command, error)`, Python raises a
+`UsageError` whose message *is* the help text. All three collapse every failure —
+no subcommand, unknown subcommand, missing argument — into the same outcome: the
+user sees usage. The test pins the happy paths (`scan` with host+ports, `ping`/
+`trace` with defaults and overrides) *and* the failures (empty, `bogus`, `scan`
+missing its ports).
+
+## One report format for every tool
+
+The other half of feeling like *one program* is looking like one. A shared
+`banner` and `section` give every subcommand's output the same frame:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="netdiag.py"
+WIDTH = 46
+
+def banner(title: str) -> str:
+    bar = "═" * WIDTH
+    content = f"  netdiag :: {title}"
+    pad = max(0, WIDTH - len(content))
+    return f"╔{bar}╗\n║{content}{' ' * pad}║\n╚{bar}╝"
+
+def section(title: str) -> str:
+    prefix = f"── {title} "
+    fill = max(0, (WIDTH + 2) - len(prefix))
+    return prefix + "─" * fill
+```
+</TabItem>
+<TabItem label="Go">
+```go title="netdiag.go"
+const width = 46
+
+func Banner(title string) string {
+	bar := strings.Repeat("═", width)
+	content := "  netdiag :: " + title
+	pad := width - utf8.RuneCountInString(content)
+	if pad < 0 {
+		pad = 0
+	}
+	return fmt.Sprintf("╔%s╗\n║%s%s║\n╚%s╝", bar, content, strings.Repeat(" ", pad), bar)
+}
+
+func Section(title string) string {
+	prefix := "── " + title + " "
+	fill := (width + 2) - utf8.RuneCountInString(prefix)
+	if fill < 0 {
+		fill = 0
+	}
+	return prefix + strings.Repeat("─", fill)
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+const WIDTH: usize = 46;
+
+pub fn banner(title: &str) -> String {
+    let bar = "═".repeat(WIDTH);
+    let content = format!("  netdiag :: {title}");
+    let pad = WIDTH.saturating_sub(content.chars().count());
+    format!("╔{bar}╗\n║{content}{}║\n╚{bar}╝", " ".repeat(pad))
+}
+
+pub fn section(title: &str) -> String {
+    let prefix = format!("── {title} ");
+    let fill = (WIDTH + 2).saturating_sub(prefix.chars().count());
+    format!("{prefix}{}", "─".repeat(fill))
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Unicode width: count code points, not bytes">
+  The banner pads to a fixed width — but the box-drawing characters (`║`, `═`,
+  `─`) are multi-byte in UTF-8. Padding by *byte* length would misalign the box.
+  All three languages pad by **code-point count** — Python's `len`, Go's
+  `utf8.RuneCountInString`, Rust's `chars().count()` — which is why the border
+  lines up identically in every one. Getting this wrong (Go's `len()` counts
+  bytes!) is a classic terminal-UI bug; the byte-identical test catches it.
+</Aside>
+
+Rendered, every subcommand opens with the same frame:
+
+```text
+╔══════════════════════════════════════════════╗
+║  netdiag :: scan example.com                 ║
+╚══════════════════════════════════════════════╝
+── open ports ──────────────────────────────────
+  22/tcp open
+  80/tcp open
+```
+
+## Dispatch: run the tool
+
+`main` is now thin — parse, then route. The privilege boundary from the whole of
+Part 6 shows up one last time: `scan` is a TCP connect scan, so it runs right here
+with no privilege; `ping` and `trace` need a raw socket, so the capstone reports
+the plan and points at the dedicated tools (in a production build you'd link those
+in as library calls):
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="netdiag.py (__main__)"
+try:
+    cmd = parse_command(sys.argv[1:])
+except UsageError as e:
+    print(e, file=sys.stderr)
+    raise SystemExit(2) from None
+
+if cmd.kind == "scan":
+    print(banner(f"scan {cmd.host}"))
+    print(section("open ports"))
+    # ... a compact TCP connect scan, rendered into the shared report
+elif cmd.kind == "ping":
+    print(banner(f"ping {cmd.host}"))
+    print(section("plan"))
+    print(f"  {cmd.count} ICMP echo probes to {cmd.host}")
+    _delegates_note("ping")   # needs root — see the ping lesson
+```
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+cmd, err := ParseCommand(os.Args[1:])
+if err != nil {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(2)
+}
+switch cmd.Kind {
+case "scan":
+	scan(cmd.Host, cmd.Ports) // compact connect scan, unprivileged
+case "ping":
+	fmt.Println(Banner("ping " + cmd.Host))
+	fmt.Println(Section("plan"))
+	fmt.Printf("  %d ICMP echo probes to %s\n", cmd.Count, cmd.Host)
+	delegatesNote("ping") // needs root — see the ping lesson
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/main.rs"
+match parse_command(&args) {
+    Ok(cmd) => run(cmd),
+    Err(msg) => {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    }
+}
+// run(): Scan => scan(host, ports)  — unprivileged, inline
+//        Ping => banner + plan + delegates_note("ping")  — needs root
+```
+</TabItem>
+</Tabs>
+
+Run the unprivileged path and it works end to end:
+
+```text
+$ netdiag scan scanme.nmap.org 22,80,443
+╔══════════════════════════════════════════════╗
+║  netdiag :: scan scanme.nmap.org             ║
+╚══════════════════════════════════════════════╝
+── open ports ──────────────────────────────────
+  22/tcp open
+  80/tcp open
+```
+
+## Exercises
+
+**1. Add a `--json` output mode (all three).** Give every subcommand a machine
+-readable alternative to the boxed report, reusing the JSON encoder from the
+[serialization lesson](/systems-programming-academy/part-5-frameworks/serialization/).
+Where in the dispatch does the format choice belong so all three subcommands honor
+it uniformly?
+
+<details>
+<summary>Solution sketch</summary>
+
+Parse a global `--json` flag *before* dispatching, and thread the chosen renderer
+(boxed vs JSON) down to each subcommand — or, cleaner, have each subcommand return
+a structured result and let a single output stage render it either way. Putting the
+format decision at the dispatch boundary, not inside each tool, is what keeps it
+uniform: add a fourth subcommand later and it gets both formats for free. It's the
+same "separate what you compute from how you present it" split the eBPF tool drew
+between the kernel and userspace.
+
+</details>
+
+**2. Link the real ping/trace in (research + one language).** Instead of the
+delegation note, wire `ping` and `trace` to the actual libraries from those
+lessons so `netdiag ping` really pings (with `sudo`). What changes about the
+binary's privilege story, and how would you keep `scan` usable without root?
+
+<details>
+<summary>Solution sketch</summary>
+
+Import the ping/traceroute logic as modules and call them from the dispatch. Now
+the whole binary can *want* root — so grant it `cap_net_raw` (not setuid-root) and
+guard the raw-socket calls so that running `netdiag scan` as an ordinary user still
+works, only `ping`/`trace` failing (gracefully) without privilege. The design goal
+is that the *least*-privileged subcommand sets the floor: a user without root can
+still scan, and only the raw-socket subcommands ask for more — least privilege per
+subcommand, not per binary.
+
+</details>
+
+**3. Add shell completion and a `--help` per subcommand (any language).** Generate
+completion for the three subcommands, and make `netdiag scan --help` print just the
+scan usage rather than the whole thing. Why does per-subcommand help scale better
+than one monolithic usage string as a tool grows?
+
+<details>
+<summary>Solution sketch</summary>
+
+Give each subcommand its own short usage and route `--help` (or a missing required
+arg) to *that* one, keeping the top-level usage a brief index of subcommands. It
+scales because a monolithic usage string becomes unreadable once a tool has a dozen
+subcommands each with their own flags — users want the help for the one thing
+they're doing. This is exactly how `git`, `docker`, and `cargo` structure their
+help: a terse top level plus focused per-subcommand pages.
+
+</details>
+
+<Quiz
+  question={'In netdiag, what is the genuinely new engineering compared to the five individual Part 6 tools?'}
+  options={[
+    { text: 'The command layer — dispatching a subcommand to the right tool, validating its arguments, failing with a helpful usage message — and a shared report format so every subcommand looks like one program; the probes themselves are unchanged', correct: true, explanation: 'A capstone that composes existing tools adds composition, not new primitives. netdiag introduces subcommand parsing/dispatch and one consistent visual language (banner + section), both pure and tested. The networking (connect scan, ICMP, TTL) is exactly the earlier lessons, reused.' },
+    { text: 'A faster port scanning algorithm', correct: false, explanation: 'netdiag reuses the same connect-scan logic from the port-scanner lesson — it introduces no new or faster scanning. Its contribution is the CLI/report layer that unifies the tools, not the probes.' },
+    { text: 'A new network protocol', correct: false, explanation: 'No new protocol is involved — netdiag speaks the same TCP/ICMP as before. It is a composition layer over existing tools, so the novelty is in the command dispatch and shared output, not the wire.' },
+    { text: 'Running everything in the kernel via eBPF', correct: false, explanation: 'That was the previous lesson. netdiag is an ordinary userspace CLI that dispatches to the earlier tools; it does not move anything into the kernel.' },
+  ]}
+/>
+
+<Quiz
+  question={'Why does netdiag pad its banner by counting code points rather than bytes?'}
+  options={[
+    { text: 'The box-drawing characters (║ ═ ─) are multi-byte in UTF-8 but one column wide; padding by byte length would overcount them and misalign the box, so all three languages pad by code-point count', correct: true, explanation: "A character like ═ is three bytes but occupies one terminal column. If you pad to a target using byte length, every box-drawing character inflates the count and the right border drifts left. Counting code points (Python len, Go utf8.RuneCountInString, Rust chars().count()) keeps the visual width correct — and the byte-identical test across languages catches the mistake if one uses byte length." },
+    { text: 'Code points are faster to count than bytes', correct: false, explanation: 'Counting code points is generally more work than counting bytes, not less. The reason is correctness of visual alignment for multi-byte characters, not performance.' },
+    { text: 'Bytes cannot be counted in Go', correct: false, explanation: "Go can count bytes trivially with len() — in fact len() on a string returns bytes, which is exactly the trap here. The point is that byte count is the wrong measure for column alignment, not that it's unavailable." },
+    { text: 'It only matters for right-to-left languages', correct: false, explanation: 'It matters for any multi-byte character, including the box-drawing glyphs used here, regardless of text direction. The alignment bug appears with ordinary ASCII-art borders in a left-to-right layout.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="How would you structure a CLI that bundles many subcommands, like git or docker?">
+
+A clear separation between three layers. First, a **parse/dispatch layer** that
+reads `argv`, identifies the subcommand, validates its specific arguments, and
+produces either a typed command value or a helpful usage error — this is the only
+place that knows about `argv` shape, and every failure funnels to the same "show
+usage" outcome. Second, the **subcommand implementations**, each doing one job and
+ideally returning a structured result rather than printing directly, so they're
+testable and format-agnostic. Third, an **output layer** that renders results in a
+consistent house style (and can offer alternates like `--json`) so the whole tool
+feels like one program. Keeping these separate is what lets the tool grow: adding a
+subcommand is a new branch in dispatch plus a new implementation, and it inherits
+the shared parsing conventions and output formats for free. It also keeps the parts
+pure and unit-testable — dispatch and rendering are just functions over values,
+which is why netdiag's command layer is fully tested and byte-identical across three
+languages while the privileged probing stays isolated at the edges.
+
+</Interview>
+
+## The end of Part 6
+
+`netdiag` is where Part 6 comes together: five tools, one command, one look — built
+from `/proc`, sockets, raw sockets, and the kernel, in three languages, with every
+pure computation tested to the byte and every privileged operation isolated to the
+smallest possible surface. For a reflective tour of the whole part — the throughline
+from userspace to kernel, and what each tool taught — read
+[Part 6 in Review](/systems-programming-academy/part-6-cli-tools/synthesis/). Then
+you have not just used the network engineer's toolkit but *built* it, and understand
+every layer it touches.
+
+## References & further reading
+
+- [`git`](https://git-scm.com/docs/git) and [`docker`](https://docs.docker.com/engine/reference/commandline/cli/) — canonical multi-subcommand CLIs; study their dispatch and help structure
+- [clap](https://docs.rs/clap/) (Rust) · [cobra](https://github.com/spf13/cobra) (Go) · [argparse](https://docs.python.org/3/library/argparse.html) (Python) — the standard argument-parsing libraries you'd reach for beyond this hand-rolled layer
+- The [port scanner](/systems-programming-academy/part-6-cli-tools/port-scanner/), [ping](/systems-programming-academy/part-6-cli-tools/ping/), and [traceroute](/systems-programming-academy/part-6-cli-tools/traceroute/) lessons — the tools this composes
+
+<Progress />

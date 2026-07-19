@@ -1,0 +1,124 @@
+---
+title: "Part 6 in Review — From /proc to the Kernel"
+description: "A reflective tour of Part 6: how six command-line tools trace a single throughline from userspace to the kernel, the recurring discipline of testing the logic and isolating the privilege, and what each tool taught."
+difficulty: advanced
+estimatedMinutes: 12
+languages: [python, go, rust]
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={12} languages={["python", "go", "rust"]} />
+
+<Badge text="Synthesis" variant="note" size="large" />
+
+Part 6 set out to build *elegant command-line tools with dashboards*. It built
+six — a performance dashboard, a port scanner, `ping`, `traceroute`, an eBPF
+latency profiler, and the `netdiag` capstone that unites them. Looked at one by
+one they're a grab-bag of network and systems utilities. Looked at together they
+tell a single story: **observing a running system at ever-greater depth, and
+paying an ever-greater price in privilege to do it.** This page is the step back.
+
+## The throughline: deeper into the machine
+
+Line the tools up by *how close to the metal they reach* and a ladder appears:
+
+| Tool | Observes via | Privilege | What it taught |
+| --- | --- | --- | --- |
+| **Performance dashboard** | `/proc` files | none | Parsing kernel-exported text; ANSI redraw |
+| **Port scanner** | TCP `connect()` | none | Concurrency (fan-out), connect vs SYN |
+| **ping** | raw ICMP socket | **root** | Building a packet; the internet checksum |
+| **traceroute** | raw socket + IP TTL | **root** | The TTL trick; ICMP error quoting |
+| **eBPF profiler** | a program *in the kernel* | **root** | Safe in-kernel code; the verifier; maps |
+| **netdiag** | composes the above | mixed | Subcommand dispatch; a shared report format |
+
+Read top to bottom, each tool reaches one layer deeper. The dashboard reads text
+the kernel *hands out* through `/proc`. The scanner uses an *ordinary* socket the
+way any client does. `ping` drops to a **raw** socket to forge a packet the kernel
+normally builds for you. `traceroute` manipulates the IP header's TTL to weaponize
+a router's own error messages. And the eBPF profiler stops observing from outside
+entirely and runs your code *inside the kernel itself*. The price of each step down
+is privilege: the first two need none, the rest need root — because the deeper you
+reach, the more damage a bug could do, so the kernel guards the door.
+
+<Aside type="note" title="The privilege ladder is the real lesson">
+  Notice that the two most *useful-out-of-the-box* tools — the dashboard and the
+  scanner — need no privilege at all, while the most *powerful* — eBPF — needs the
+  most. That's not a coincidence; it's how well-designed systems work. Capability
+  is rationed by risk. Understanding *why* `ping` needs root when a port scan
+  doesn't (one forges packets, the other just opens connections) is worth more than
+  memorizing either tool.
+</Aside>
+
+## The recurring discipline: test the logic, isolate the privilege
+
+Every privileged tool in Part 6 was built the same way, by a rule chosen at the
+start: **test the logic, isolate the privilege.** The insight is that even a tool
+that fundamentally needs root has, at its heart, mostly *pure logic* that doesn't:
+
+- `ping` needs a raw socket to *send*, but building the packet, computing the RFC 1071 checksum, parsing the reply, and formatting the statistics are pure functions — tested to the byte, no privilege.
+- `traceroute` needs a raw socket to set the TTL, but classifying an ICMP reply (including digging the id and seq out of the *quoted* packet inside a time-exceeded error) and rendering the hop report are pure — tested.
+- the eBPF profiler needs `CAP_BPF` to load its kernel program, but the log2 bucketing and the power-of-two histogram render are pure — tested, and identical whether they run in the kernel or a unit test.
+
+In each, exactly one thin function touches the privileged surface — open the raw
+socket, call `bpf()` — and it degrades with a clear message when run without rights.
+Everything worth testing was deliberately pushed *out* of that function. The payoff
+is tools whose real logic is fast to test, deterministic, and provably correct,
+with the unavoidable privilege confined to the smallest possible surface. It's the
+same principle as isolating `unsafe` in Rust, or the composition root in hexagonal
+architecture: **push the dangerous, untestable thing to the edge and keep the core
+pure.**
+
+## The proof that never changed: byte-identical across three languages
+
+Every tool in Part 6 — as in every part before it — was built three times, in
+Python, Go, and Rust, and its output verified **byte-identical** by hash. The
+dashboard's frames, the scanner's table, `ping`'s statistics block, `traceroute`'s
+hops, the histogram, `netdiag`'s banner — all sha256-identical across the three
+languages. This is the Academy's signature method, and Part 6 stress-tested it on
+the hardest material yet: raw bytes on the wire, floating-point statistics, and
+Unicode box-drawing.
+
+It also surfaced the same two gotchas again and again, which is exactly why the
+byte-identical check earns its keep:
+
+- **Rounding diverges by default.** Python's `round()` is banker's rounding; the others aren't. Every tool that scaled a bar or a percentage used an explicit `floor(x + 0.5)` in all three languages so `25%` is `25%` everywhere.
+- **Width is code points, not bytes.** `netdiag`'s box-drawing borders only line up because all three pad by code-point count — Go's `len()` counts bytes and would have drifted the border. The hash caught it.
+
+Neither bug is visible in one language alone. You only see them when three
+implementations must produce the *same bytes* — which is the whole point of building
+each tool three ways.
+
+## What you can build now
+
+Step back and look at the toolkit. You can read the kernel's own metrics and draw
+them live. You can scan a host's ports concurrently. You can forge an ICMP packet,
+checksum it by hand, and time a round trip. You can map every router to a
+destination by abusing the TTL. You can run a verified program inside the Linux
+kernel and read a latency histogram out of a BPF map. And you can wrap all of it in
+one elegant CLI. None of it reached for a networking library — every tool was built
+from `/proc`, sockets, raw sockets, and the `bpf()` syscall, from first principles.
+
+<Aside type="tip" title="The craft, restated">
+  The through-message of Part 6 — and of the whole Academy — is this: **the way to
+  master a system is to build its tools from the primitives, not to import them.**
+  A library gives you `ping`; building `ping` gives you ICMP, checksums, raw
+  sockets, and the privilege model. The library is faster to use; the understanding
+  is what makes you an engineer. Part 6 spent five tools proving that the "magic"
+  networking utilities are, underneath, a few well-understood syscalls and some
+  pure logic you can test to the byte.
+</Aside>
+
+## Where to go next
+
+- Revisit any tool with fresh eyes now that you see the ladder: the [performance dashboard](/systems-programming-academy/part-6-cli-tools/performance-dashboard/), [port scanner](/systems-programming-academy/part-6-cli-tools/port-scanner/), [ping](/systems-programming-academy/part-6-cli-tools/ping/), [traceroute](/systems-programming-academy/part-6-cli-tools/traceroute/), [eBPF profiler](/systems-programming-academy/part-6-cli-tools/ebpf-observability/), or the [netdiag capstone](/systems-programming-academy/part-6-cli-tools/netdiag/).
+- Take on the capstone challenges: link the real ping/trace into `netdiag`, add `--json` output, or drive the eBPF histogram live with ANSI redraw.
+- Read the Academy's closing cross-language reflection, [The Three Languages Compared](/systems-programming-academy/capstone/three-languages/), which gathers every measured benchmark across all six parts.
+
+Part 6 is complete. You didn't just use the network engineer's toolkit — you built
+it, in three languages, and understand every layer it touches, from a text file in
+`/proc` to a program running in the kernel.
+
+<Progress />
