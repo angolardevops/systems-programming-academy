@@ -62,16 +62,35 @@ npm run dev
 npm run build && npm run preview
 ```
 
-### Run a lesson's companion code
+### Run every example with one command
 
-Every lesson ships real, compilable code under `examples/`. For the ownership
-lesson:
+Every lesson ships real, compilable code under `examples/`. Verify the whole
+curriculum — **107 suites, 0 failing** — in one go:
+
+```bash
+scripts/run-all.sh            # every Rust/Go/Python suite (tests only)
+scripts/run-all.sh --full     # also the fmt + lint gates CI enforces
+scripts/run-all.sh part6      # or filter by name / language
+```
+
+Or run a single lesson's companion code:
 
 ```bash
 cd examples/rust-ownership
 cargo test                     # 7 passing tests
 cargo run --release --bin bench  # reproduce the benchmark table
 ```
+
+### Zero-setup environment
+
+Open the repo in a ready-made environment with Rust, Go, Python, `uv`, and Node
+already installed — no local setup:
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/angolardevops/systems-programming-academy)
+
+Or locally: **VS Code → Reopen in Container** (uses `.devcontainer/`), or
+`nix develop` (uses `flake.nix`). Full guide:
+[Run It Yourself](https://angolardevops.github.io/systems-programming-academy/toolchains/run-it-yourself/).
 
 ## Repository layout
 

@@ -1,0 +1,138 @@
+---
+title: "Corre Tu Mesmo: Reproduz Tudo"
+description: "Cada exemplo da Academia corre na tua máquina com um comando. Clona o repo e corre as 107 suites de teste, ou abre-o num devcontainer / GitHub Codespace / shell Nix já prontos com Rust, Go, Python e uv configurados."
+---
+
+import { Aside, Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+A promessa da Academia é que **nada aqui é conversa** — cada exemplo compila,
+corre e passa os seus testes, e cada benchmark é re-executável. Esta página é como
+verificas isso tu mesmo, e montas um ambiente para mexer nos exemplos.
+
+<Aside type="tip" title="Um comando, o currículo inteiro">
+  O repositório traz um runner que executa **todas** as suites de exemplo da mesma
+  forma que o CI. Numa máquina com Rust, Go e Python instalados:
+
+  ```bash
+  git clone https://github.com/angolardevops/systems-programming-academy
+  cd systems-programming-academy
+  scripts/run-all.sh
+  ```
+
+  Imprime um quadro verde/vermelho e um resumo. À data do último build são
+  **107 suites a passar, 0 a falhar** — o currículo inteiro, verificado de uma vez.
+</Aside>
+
+## O runner
+
+O `scripts/run-all.sh` percorre `examples/`, deteta a linguagem de cada diretório,
+e corre os seus testes exatamente como o pipeline de CI:
+
+| Detetado | Comando corrido |
+| --- | --- |
+| `Cargo.toml` | `cargo test` |
+| `go.mod` | `go test ./...` |
+| `test_*.py` | `python3 -m unittest discover -s . -p 'test_*.py'` |
+
+Aceita argumentos opcionais:
+
+```bash
+scripts/run-all.sh              # todas as suites (só testes)
+scripts/run-all.sh rust         # só suites Rust  (também: go | python)
+scripts/run-all.sh part6        # só dirs cujo nome contém "part6"
+scripts/run-all.sh --full       # também corre os gates de fmt + lint do CI
+```
+
+O `--full` acrescenta os gates de qualidade exatos do CI — `cargo fmt --check` +
+`cargo clippy -- -D warnings`, `gofmt` + `go vet`, `ruff format --check` +
+`ruff check` — então um `--full` verde significa que a tua alteração passaria no CI.
+
+## Um ambiente pronto a usar
+
+Três formas de ter uma máquina com a toolchain toda (Rust + Go + Python + `uv` +
+Node para o site) sem instalar nada à mão.
+
+<Tabs>
+<TabItem label="GitHub Codespaces">
+O caminho mais rápido — zero setup local. No
+[repositório](https://github.com/angolardevops/systems-programming-academy), clica
+**Code → Codespaces → Create codespace**. O
+[`.devcontainer`](https://github.com/angolardevops/systems-programming-academy/blob/main/.devcontainer/devcontainer.json)
+incluído provisiona Rust, Go, Python 3.12, `uv`, `ruff` e Node, e depois podes
+correr:
+
+```bash
+scripts/run-all.sh
+```
+
+mesmo no VS Code no browser.
+</TabItem>
+<TabItem label="Dev Container (local)">
+Com [Docker](https://www.docker.com/) e a extensão
+[Dev Containers do VS Code](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers):
+abre o repo clonado e escolhe **Reopen in Container**. O mesmo `.devcontainer`
+constrói uma imagem com todas as toolchains e as extensões recomendadas
+(rust-analyzer, Go, Python, Ruff, Astro), para que os exemplos e o site construam
+de forma idêntica ao CI.
+</TabItem>
+<TabItem label="Nix">
+Com o [Nix](https://nixos.org/) e flakes ativados, um comando põe-te num shell com
+a toolchain pinada exata — sem Docker, sem instalações globais:
+
+```bash
+nix develop
+```
+
+O [`flake.nix`](https://github.com/angolardevops/systems-programming-academy/blob/main/flake.nix)
+fornece `cargo`, `rustc`, `clippy`, `rustfmt`, `go`, `python312`, `uv`, `ruff` e
+`nodejs`. Depois o `scripts/run-all.sh` ou o `npm run build` simplesmente funcionam.
+</TabItem>
+</Tabs>
+
+## Correr um exemplo isolado
+
+Cada diretório de exemplo é um projeto normal e autónomo que podes correr
+diretamente — é também como experimentarias o código de uma lição:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```bash
+cd examples/part6-ping-py
+python3 -m unittest          # correr os seus testes
+python3 ping.py 127.0.0.1    # correr (algumas ferramentas precisam de sudo)
+```
+</TabItem>
+<TabItem label="Go">
+```bash
+cd examples/part6-ping-go
+go test ./...                # correr os seus testes
+go run . 1.1.1.1 4           # correr (algumas ferramentas precisam de sudo)
+```
+</TabItem>
+<TabItem label="Rust">
+```bash
+cd examples/part6-ping-rust
+cargo test                   # correr os seus testes
+cargo run -- 1.1.1.1 4       # correr (algumas ferramentas precisam de sudo)
+```
+</TabItem>
+</Tabs>
+
+## Construir o site da documentação
+
+O site que estás a ler é um projeto [Astro Starlight](https://starlight.astro.build/)
+na raiz do repositório:
+
+```bash
+npm install
+npm run dev      # preview local com hot reload
+npm run build    # build de produção para dist/
+```
+
+<Aside type="note" title="Porque a reprodutibilidade faz parte do currículo">
+  Uma referência que não consegues correr é só uma alegação. Poder clonar o repo e
+  ver 107 suites ficarem verdes — ou abrir um Codespace, mudar uma linha e
+  re-correr — é o que transforma "confia em mim" em "verifica tu mesmo". É a mesma
+  disciplina que as lições ensinam, aplicada à própria Academia: a prova é
+  executável.
+</Aside>

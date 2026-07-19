@@ -1,0 +1,137 @@
+---
+title: "Run It Yourself: Reproduce Everything"
+description: "Every example in the Academy runs on your machine with one command. Clone the repo and run all 107 test suites, or open it in a ready-made devcontainer / GitHub Codespace / Nix shell with Rust, Go, Python, and uv already set up."
+---
+
+import { Aside, Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+The Academy's promise is that **nothing here is hand-waving** — every example
+compiles, runs, and passes its tests, and every benchmark is re-runnable. This
+page is how you verify that yourself, and set up an environment to hack on the
+examples.
+
+<Aside type="tip" title="One command, the whole curriculum">
+  The repository ships a runner that executes **every** example suite the same way
+  CI does. On a machine with Rust, Go, and Python installed:
+
+  ```bash
+  git clone https://github.com/angolardevops/systems-programming-academy
+  cd systems-programming-academy
+  scripts/run-all.sh
+  ```
+
+  It prints a green/red board and a summary. As of the latest build that's
+  **107 suites passing, 0 failing** — the entire curriculum, verified in one go.
+</Aside>
+
+## The runner
+
+`scripts/run-all.sh` walks `examples/`, detects each directory's language, and
+runs its tests exactly as the CI pipeline does:
+
+| Detected | Command run |
+| --- | --- |
+| `Cargo.toml` | `cargo test` |
+| `go.mod` | `go test ./...` |
+| `test_*.py` | `python3 -m unittest discover -s . -p 'test_*.py'` |
+
+It takes optional arguments:
+
+```bash
+scripts/run-all.sh              # every suite (tests only)
+scripts/run-all.sh rust         # only Rust suites  (also: go | python)
+scripts/run-all.sh part6        # only dirs whose name contains "part6"
+scripts/run-all.sh --full       # also run the fmt + lint gates CI enforces
+```
+
+`--full` adds the exact quality gates from CI — `cargo fmt --check` +
+`cargo clippy -- -D warnings`, `gofmt` + `go vet`, `ruff format --check` +
+`ruff check` — so a green `--full` run means your change would pass CI.
+
+## A ready-made environment
+
+Three ways to get a machine with the whole toolchain (Rust + Go + Python + `uv` +
+Node for the docs site) without installing anything by hand.
+
+<Tabs>
+<TabItem label="GitHub Codespaces">
+The fastest path — zero local setup. On the
+[repository](https://github.com/angolardevops/systems-programming-academy), click
+**Code → Codespaces → Create codespace**. The included
+[`.devcontainer`](https://github.com/angolardevops/systems-programming-academy/blob/main/.devcontainer/devcontainer.json)
+provisions Rust, Go, Python 3.12, `uv`, `ruff`, and Node, then you can run:
+
+```bash
+scripts/run-all.sh
+```
+
+right in the browser-based VS Code.
+</TabItem>
+<TabItem label="Dev Container (local)">
+With [Docker](https://www.docker.com/) and the VS Code
+[Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers):
+open the cloned repo and choose **Reopen in Container**. The same
+`.devcontainer` builds an image with every toolchain and the recommended
+extensions (rust-analyzer, Go, Python, Ruff, Astro), so the examples and the site
+build identically to CI.
+</TabItem>
+<TabItem label="Nix">
+With [Nix](https://nixos.org/) and flakes enabled, one command drops you into a
+shell with the exact pinned toolchain — no Docker, no global installs:
+
+```bash
+nix develop
+```
+
+The [`flake.nix`](https://github.com/angolardevops/systems-programming-academy/blob/main/flake.nix)
+provides `cargo`, `rustc`, `clippy`, `rustfmt`, `go`, `python312`, `uv`, `ruff`,
+and `nodejs`. Then `scripts/run-all.sh` or `npm run build` just work.
+</TabItem>
+</Tabs>
+
+## Running a single example
+
+Every example directory is a normal, standalone project you can run directly —
+this is also how you'd experiment with a lesson's code:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```bash
+cd examples/part6-ping-py
+python3 -m unittest          # run its tests
+python3 ping.py 127.0.0.1    # run it (some tools need sudo)
+```
+</TabItem>
+<TabItem label="Go">
+```bash
+cd examples/part6-ping-go
+go test ./...                # run its tests
+go run . 1.1.1.1 4           # run it (some tools need sudo)
+```
+</TabItem>
+<TabItem label="Rust">
+```bash
+cd examples/part6-ping-rust
+cargo test                   # run its tests
+cargo run -- 1.1.1.1 4       # run it (some tools need sudo)
+```
+</TabItem>
+</Tabs>
+
+## Building the docs site
+
+The site you're reading is an [Astro Starlight](https://starlight.astro.build/)
+project at the repository root:
+
+```bash
+npm install
+npm run dev      # local preview with hot reload
+npm run build    # production build into dist/
+```
+
+<Aside type="note" title="Why reproducibility is part of the curriculum">
+  A reference you can't run is just a claim. Being able to clone the repo and
+  watch 107 suites go green — or open a Codespace and change a line and re-run —
+  is what turns "trust me" into "check for yourself." It's the same discipline the
+  lessons teach applied to the Academy itself: the proof is executable.
+</Aside>

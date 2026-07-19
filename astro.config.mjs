@@ -152,6 +152,11 @@ export default defineConfig({
               slug: 'toolchains/git-github',
             },
             {
+              label: 'Run It Yourself',
+              translations: { 'pt-BR': 'Corre Tu Mesmo' },
+              slug: 'toolchains/run-it-yourself',
+            },
+            {
               label: 'Where to Contribute',
               translations: { 'pt-BR': 'Onde Contribuir' },
               slug: 'toolchains/contributing',
