@@ -61,6 +61,7 @@ jobs:
           - part6-ebpf-rust
           - part6-netdiag-rust
           - part7-calc-rust
+          - part7-vars-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -115,6 +116,7 @@ jobs:
           - part6-ebpf-go
           - part6-netdiag-go
           - part7-calc-go
+          - part7-vars-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -168,6 +170,7 @@ jobs:
           - part6-ebpf-py
           - part6-netdiag-py
           - part7-calc-py
+          - part7-vars-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

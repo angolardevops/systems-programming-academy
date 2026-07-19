@@ -472,6 +472,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Expressões: Lexer, Parser, Evaluator' },
               slug: 'part-7-interpreter/expressions',
             },
+            {
+              label: 'Variables & State',
+              translations: { 'pt-BR': 'Variáveis & Estado' },
+              slug: 'part-7-interpreter/variables',
+            },
           ],
         },
         {

@@ -1,0 +1,15 @@
+[package]
+name = "part7-vars-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the expression interpreter from lesson 1, grown into a small
+# language with variables, assignment, and a persistent environment. The
+# environment is the seed of scopes, closures, and everything that follows.
+
+[[bin]]
+name = "vars"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

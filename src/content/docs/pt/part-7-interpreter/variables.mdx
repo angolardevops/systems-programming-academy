@@ -1,0 +1,485 @@
+---
+title: "Constrói o Teu Próprio Interpretador — Variáveis & Estado"
+description: "Faz crescer o avaliador de expressões numa pequena linguagem real: adiciona variáveis, atribuição, e um environment persistente passado através da avaliação. A única ideia — um environment — é a semente de scopes, closures, e tudo o que se segue, construída e testada de três formas."
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+import PyRunner from '../../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+<Badge text="Constrói o Teu Próprio X" variant="tip" size="large" />
+
+O [avaliador de expressões](/systems-programming-academy/pt/part-7-interpreter/expressions/)
+computa `2 * (3 + 4)` e esquece-o instantaneamente. Uma *linguagem* lembra-se:
+nomeias um valor e usa-lo mais tarde. Esta lição adiciona isso — variáveis,
+atribuição, e a única estrutura que os faz funcionar, um **environment** — e ao
+fazê-lo transforma uma calculadora numa pequena linguagem de programação:
+
+```text
+x = 5
+y = x * 2 + 1     ← lê x, liga y
+y - x             ← 6
+```
+
+<Aside type="note" title="O environment é a ideia toda">
+  Tudo aqui assenta num conceito: um **environment**, um mapa `nome → valor`
+  passado através da avaliação. A atribuição escreve nele; uma referência a
+  variável lê dele. É só isto — mas este humilde mapa é a semente de *tudo* o que se
+  segue no track. Adiciona funções e cada chamada ganha o seu próprio environment
+  encadeado a um envolvente; essa cadeia é exatamente como **scopes**, **closures**,
+  e a **call stack** funcionam. Constrói o environment agora e construíste o
+  esqueleto da memória de um interpretador real.
+</Aside>
+
+Código:
+[`examples/part7-vars-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6 testes cada, output de programa **byte-idêntico nas três
+linguagens** (ainda aritmética inteira, então os resultados ficam exatos). Estende
+o lexer, parser e evaluator da lição 1 com as menores adições possíveis.
+
+## Três pequenas adições, uma por fase
+
+Uma variável toca cada uma das três fases exatamente uma vez — o sinal limpo de um
+design bem separado. O **lexer** aprende a ler identificadores e `=`; o **parser**
+aprende que um nome pode ser uma expressão (uma *referência a variável*) e que
+`name = expr` é uma *statement de atribuição*; o **evaluator** ganha um environment
+para ler e escrever.
+
+### O lexer: identificadores e `=`
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="vars.py"
+elif c.isalpha() or c == "_":
+    start = i
+    while i < len(src) and (src[i].isalnum() or src[i] == "_"):
+        i += 1
+    tokens.append(Token("i", name=src[start:i]))   # um identificador
+# ('=' junta-se aos tokens de um caractere '+-*/()')
+```
+</TabItem>
+<TabItem label="Go">
+```go title="vars.go"
+case unicode.IsLetter(c) || c == '_':
+	start := i
+	for i < len(r) && (unicode.IsLetter(r[i]) || unicode.IsDigit(r[i]) || r[i] == '_') {
+		i++
+	}
+	tokens = append(tokens, Token{Kind: 'i', Name: string(r[start:i])}) // um identificador
+// ('=' junta-se aos tokens de um caractere '+-*/()')
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+c if c.is_alphabetic() || c == '_' => {
+    let start = i;
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    tokens.push(Token::Ident(chars[start..i].iter().collect())); // um identificador
+}
+// ('=' junta-se aos tokens de um caractere '+-*/()')
+```
+</TabItem>
+</Tabs>
+
+Ler um identificador é o mesmo loop "agrupar caracteres que pertencem juntos" que
+ler um número multi-dígito — começa numa letra, continua enquanto o caractere for
+uma letra, dígito, ou underscore.
+
+### O parser: uma variável é uma expressão; `=` é uma statement
+
+Uma referência a variável encaixa no `factor` mesmo ao lado de um número — ambos
+são átomos. E aparece um tipo de nó totalmente novo: a **statement**. Um programa é
+uma sequência de statements, cada uma ou uma atribuição ou uma expressão nua.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="vars.py"
+def factor(self) -> Expr:  # factor := Num | Ident | '(' expr ')' | '-' factor
+    t = self._next()
+    ...
+    if t.kind == "i":
+        return Expr("v", name=t.name)      # uma referência a variável
+    ...
+
+def parse_stmt(tokens: list[Token]) -> Stmt:
+    # `name = expr` é uma atribuição; qualquer outra coisa é uma expressão nua.
+    is_assign = len(tokens) >= 2 and tokens[0].kind == "i" and tokens[1].kind == "="
+    p = _Parser(tokens)
+    if is_assign:
+        name = tokens[0].name
+        p.pos = 2                          # salta o identificador e o '='
+        stmt = Stmt("a", expr=p.expr(), name=name)
+    else:
+        stmt = Stmt("e", expr=p.expr())
+    ...
+    return stmt
+```
+</TabItem>
+<TabItem label="Go">
+```go title="vars.go"
+// factor := Num | Ident | '(' expr ')' | '-' factor
+case 'i':
+	return &Expr{Kind: 'v', Name: t.Name}, nil // uma referência a variável
+
+func ParseStmt(tokens []Token) (Stmt, error) {
+	// `name = expr` é uma atribuição; qualquer outra coisa é uma expressão nua.
+	isAssign := len(tokens) >= 2 && tokens[0].Kind == 'i' && tokens[1].Kind == '='
+	p := &parser{tokens: tokens}
+	if isAssign {
+		name := tokens[0].Name
+		p.pos = 2 // salta o identificador e o '='
+		e, err := p.expr()
+		if err != nil {
+			return Stmt{}, err
+		}
+		return Stmt{Kind: 'a', Name: name, Expr: e}, checkEnd(p)
+	}
+	e, err := p.expr()
+	...
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// factor := Num | Ident | '(' expr ')' | '-' factor
+Some(Token::Ident(name)) => Ok(Expr::Var(name)),   // uma referência a variável
+
+pub fn parse_stmt(tokens: Vec<Token>) -> Result<Stmt, String> {
+    // `name = expr` é uma atribuição; qualquer outra coisa é uma expressão nua.
+    let is_assign = matches!(tokens.first(), Some(Token::Ident(_)))
+        && matches!(tokens.get(1), Some(Token::Assign));
+    let mut p = Parser { tokens, pos: 0 };
+    let stmt = if is_assign {
+        let name = match p.next() { Some(Token::Ident(n)) => n, _ => unreachable!() };
+        p.pos += 1;                        // consome o '='
+        Stmt::Assign(name, p.expr()?)
+    } else {
+        Stmt::Expr(p.expr()?)
+    };
+    // ...verifica que todos os tokens foram consumidos...
+    Ok(stmt)
+}
+```
+</TabItem>
+</Tabs>
+
+Distinguir atribuição de expressão com um look-ahead de dois tokens (`Ident` depois
+`=`) é o parser de statements mais simples possível. Linguagens maiores generalizam
+isto, mas a forma é a mesma: decide que *tipo* de statement isto é, depois parseia
+as suas partes.
+
+### O evaluator: um environment para ler e escrever
+
+A avaliação agora carrega um environment. Uma referência a variável procura o seu
+nome (erro se não estiver ligado); uma atribuição avalia o lado direito, guarda-o, e
+devolve-o. E como as statements partilham um environment, **o estado persiste**.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="vars.py"
+def evaluate(e: Expr, env: Env) -> int:
+    ...
+    if e.kind == "v":                                  # referência a variável
+        if e.name not in env:
+            raise CalcError(f"undefined variable '{e.name}'")
+        return env[e.name]
+    ...
+
+def execute(stmt: Stmt, env: Env) -> int:
+    if stmt.kind == "a":                               # atribuição
+        v = evaluate(stmt.expr, env)
+        env[stmt.name] = v                             # escreve no environment
+        return v
+    return evaluate(stmt.expr, env)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="vars.go"
+func Eval(e *Expr, env Env) (int64, error) {
+	...
+	case 'v': // referência a variável
+		v, ok := env[e.Name]
+		if !ok {
+			return 0, fmt.Errorf("undefined variable '%s'", e.Name)
+		}
+		return v, nil
+	...
+}
+
+func Exec(stmt Stmt, env Env) (int64, error) {
+	if stmt.Kind == 'a' { // atribuição
+		v, err := Eval(stmt.Expr, env)
+		if err != nil {
+			return 0, err
+		}
+		env[stmt.Name] = v // escreve no environment
+		return v, nil
+	}
+	return Eval(stmt.Expr, env)
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn eval(e: &Expr, env: &Env) -> Result<i64, String> {
+    match e {
+        // referência a variável
+        Expr::Var(name) => env.get(name).copied()
+            .ok_or_else(|| format!("undefined variable '{name}'")),
+        ...
+    }
+}
+
+pub fn exec(stmt: &Stmt, env: &mut Env) -> Result<i64, String> {
+    match stmt {
+        Stmt::Assign(name, e) => {          // atribuição
+            let v = eval(e, env)?;
+            env.insert(name.clone(), v);    // escreve no environment
+            Ok(v)
+        }
+        Stmt::Expr(e) => eval(e, env),
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+Repara nas formas de ownership: o Rust torna a mutação explícita — o `eval` recebe
+`&Env` (só leitura), o `exec` recebe `&mut Env` (escreve), e o compilador força essa
+divisão. O Go e o Python passam o mapa por referência e mutam-no livremente. Mesmo
+comportamento; o Rust só torna "quem pode escrever" visível no tipo.
+
+## O estado em ação
+
+Corre um programa inteiro — uma statement por linha, partilhando um environment — e
+a memória mostra-se:
+
+```text
+$ vars "x = 5; y = x * 2 + 1; y = y + 100; y - x"
+x = 5  =>  5
+y = x * 2 + 1  =>  11
+y = y + 100  =>  111
+y - x  =>  106
+```
+
+A terceira linha é a lição silenciosa: `y = y + 100` lê o `y` *antigo* (11), soma
+100, e guarda o resultado de volta (111). A atribuição não é resolver equações — é
+"avalia o lado direito no environment atual, depois religa o nome". Essa ordem
+direita-depois-esquerda é porque `x = x + 1` faz sentido de todo, e é idêntica em
+todas as linguagens aqui.
+
+## Corre a tua linguagem no browser
+
+Aqui está o interpretador inteiro — com variáveis — como um programa auto-contido.
+Edita-o e carrega em **Run**; executa localmente via Pyodide. Vê o estado fluir de
+linha em linha:
+
+<PyRunner code={`def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c in " \\t": i += 1
+        elif c in "=+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"): j += 1
+            toks.append(("var", s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(self, t): self.t, self.i = t, 0
+    def peek(self): return self.t[self.i] if self.i < len(self.t) else None
+    def nxt(self):
+        v = self.peek(); self.i += 1; return v
+    def expr(self):
+        n = self.term()
+        while self.peek() in ("+", "-"):
+            op = self.nxt(); n = (op, n, self.term())
+        return n
+    def term(self):
+        n = self.factor()
+        while self.peek() in ("*", "/"):
+            op = self.nxt(); n = (op, n, self.factor())
+        return n
+    def factor(self):
+        t = self.nxt()
+        if isinstance(t, int): return t
+        if isinstance(t, tuple): return t          # ('var', name)
+        if t == "-": return ("neg", self.factor())
+        if t == "(":
+            n = self.expr()
+            if self.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+def ev(n, env):
+    if isinstance(n, int): return n
+    if n[0] == "var":
+        if n[1] not in env: raise ValueError(f"undefined variable {n[1]!r}")
+        return env[n[1]]
+    if n[0] == "neg": return -ev(n[1], env)
+    a, b = ev(n[1], env), ev(n[2], env)
+    if n[0] == "+": return a + b
+    if n[0] == "-": return a - b
+    if n[0] == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def run(program):
+    env = {}
+    for line in program.strip().split("\\n"):
+        line = line.strip()
+        if not line: continue
+        try:
+            toks = tokenize(line)
+            if len(toks) >= 2 and isinstance(toks[0], tuple) and toks[1] == "=":
+                env[toks[0][1]] = ev(P(toks[2:]).expr(), env)
+                print(f"{line:<22} => {env[toks[0][1]]}")
+            else:
+                print(f"{line:<22} => {ev(P(toks).expr(), env)}")
+        except ValueError as e:
+            print(f"{line:<22} -> error: {e}")
+
+# edita este programa — o estado persiste linha a linha:
+run('''
+x = 5
+y = x * 2 + 1
+total = (x + y) * 3
+y = y + 100
+total - y
+''')`} label="Python · a tua linguagem, com variáveis · corre no teu browser" />
+
+## Exercícios
+
+**1. Adiciona atribuição composta `+=` (nas três).** Deixa `x += 3` significar
+`x = x + 3`. Onde é o sítio mais limpo para o implementar — o lexer, o parser, ou
+por *desugaring* no parser para a atribuição que já tens?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O movimento elegante é o *desugaring*: parseia `x += 3` e constrói a mesma árvore
+exata que `x = x + 3` — uma atribuição cujo lado direito é `x + 3`. Então o
+evaluator não precisa de mudanças nenhumas, porque o `+=` nunca foi um conceito
+real para ele, só açúcar que o parser expandiu. É assim que muitas linguagens reais
+implementam operadores compostos, e mostra uma ideia profunda: sintaxe nova é muitas
+vezes mais barata de adicionar como uma transformação para sintaxe existente, não
+como um caso novo no evaluator.
+
+</details>
+
+**2. Deteta uso não inicializado no parse (pesquisa + uma linguagem).** Agora
+`z + 1` falha na *avaliação*. Conseguirias apanhar uma variável indefinida mais
+cedo, durante o parse? Que informação o parser precisaria, e porque é que a maioria
+das linguagens ainda adia isto para uma passagem posterior?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O parser sozinho não consegue saber em geral — uma variável pode ser definida numa
+linha anterior que ele já parseou, então precisarias de seguir um conjunto de nomes
+definidos à medida que avanças (uma pequena passagem de *análise semântica*). Casos
+simples apanham-se facilmente, mas o problema geral (variáveis definidas noutros
+scopes, definições condicionais) é porque compiladores reais correm uma passagem
+separada de *resolução* ou *análise de nomes* entre o parse e a avaliação/codegen. É
+um preview de porque o pipeline de três fases ganha mais fases à medida que uma
+linguagem cresce.
+
+</details>
+
+**3. Adiciona uma statement `print` e block scope (qualquer linguagem).** Adiciona
+`print expr` para um programa poder imprimir valores intermédios, depois adiciona
+blocos `{ ... }` que ganham o seu *próprio* environment sobreposto ao exterior. O
+que acontece a uma variável atribuída dentro de um bloco — e o que te diz isso sobre
+como os scopes aninham?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O `print` é um novo tipo de statement que avalia a sua expressão e emite-a. O block
+scope é a parte mais profunda: um bloco ganha um environment fresco cujo *parent* é
+o envolvente, então um lookup que falha localmente cai para o parent — mas uma
+atribuição dentro do bloco escreve na camada própria do bloco, então desaparece
+quando o bloco acaba (a menos que atribuas deliberadamente a um nome exterior). Essa
+cadeia de parents de environments é *scoping léxico*, e é exatamente a estrutura de
+que funções e closures vão precisar — que é para onde o track vai a seguir.
+
+</details>
+
+<Quiz
+  question={'O que é o "environment" neste interpretador, e porque é a ideia central da lição?'}
+  options={[
+    { text: 'Um mapa nome→valor passado através da avaliação: a atribuição escreve nele, uma referência a variável lê dele, e como as statements partilham um, o estado persiste — e essa mesma estrutura, encadeada por chamada de função, torna-se scopes e closures depois', correct: true, explanation: 'O environment é onde a memória do programa vive. Transforma uma calculadora sem estado numa linguagem que se lembra, e a sua extensão — uma cadeia de environments, um por chamada, cada um a apontar para o envolvente — é precisamente o mecanismo por trás do scoping léxico, das closures, e da call stack. É por isso que um pequeno mapa é a lição toda.' },
+    { text: 'Uma otimização de performance que faz cache de resultados de expressões computadas', correct: false, explanation: 'O environment não é uma cache de resultados — é o armazém de ligações de variáveis (nomes para valores). Existe para dar memória à linguagem, não para acelerar a recomputação.' },
+    { text: 'A lista de tokens produzida pelo lexer', correct: false, explanation: 'Os tokens são o output do lexer, consumidos pelo parser; o environment é uma estrutura de runtime separada usada durante a avaliação para guardar valores de variáveis. São fases completamente diferentes.' },
+    { text: 'Um nó da árvore de sintaxe que representa uma atribuição', correct: false, explanation: 'Uma atribuição é um nó de statement na árvore; o environment é o mapa de runtime em que esse nó escreve quando avaliado. O nó descreve a operação; o environment guarda o estado.' },
+  ]}
+/>
+
+<Quiz
+  question={'Avaliar y = y + 100 quando y é atualmente 11 produz 111. Que ordem de operações faz a atribuição funcionar?'}
+  options={[
+    { text: 'O lado direito é avaliado primeiro no environment atual (y + 100 = 111), e só então o nome y é religado a esse resultado — direita-depois-esquerda', correct: true, explanation: 'A atribuição não é resolver equações. O evaluator computa o lado direito usando o environment como está (lendo o y antigo = 11), depois guarda o resultado sob o nome. Essa ordem direita-depois-esquerda é exatamente porque x = x + 1 tem significado, e é idêntica nas três implementações.' },
+    { text: 'O lado esquerdo é ligado primeiro, depois o lado direito é computado usando a nova ligação', correct: false, explanation: 'Se o y fosse religado antes de avaliar o lado direito, o y + 100 leria o valor errado (ou um não definido). O lado direito tem de ser totalmente avaliado no environment atual antes de o nome ser religado.' },
+    { text: 'Ambos os lados são avaliados simultaneamente e depois reconciliados', correct: false, explanation: 'Não há avaliação simultânea nem reconciliação — a avaliação é estritamente ordenada: computa a expressão do lado direito, depois faz a ligação. A atribuição é uma sequência, não uma restrição a resolver.' },
+    { text: 'O interpretador resolve para y algebricamente', correct: false, explanation: 'Um interpretador não resolve equações; o = é uma operação de ligação, não uma igualdade matemática. Avalia o lado direito e guarda o valor, que é porque y = y + 100 incrementa em vez de ser uma contradição.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="Uma calculadora avalia expressões; uma linguagem tem variáveis. Arquiteturalmente, o que é preciso para as adicionar, e porque é uma mudança pequena?">
+
+É preciso um **environment** — um mapa de runtime de nomes para valores — mais três
+adições localizadas ao pipeline existente. O lexer aprende a tokenizar
+identificadores e o operador de atribuição; o parser aprende que um identificador é
+uma expressão atómica válida (uma referência a variável) e que um identificador
+seguido de `=` começa uma statement de atribuição em vez de uma expressão; e o
+evaluator passa o environment através, lendo-o numa referência a variável e
+escrevendo-o numa atribuição. É uma mudança pequena precisamente porque o design de
+três fases tem costuras limpas: cada fase ganha uma responsabilidade sem perturbar
+as outras. A razão profunda de importar é que o environment generaliza: dá a cada
+chamada de função o seu próprio environment ligado àquele onde foi definida, e tens
+scoping léxico e closures; empilha esses environments e tens a call stack. Então
+"adicionar variáveis" é arquiteturalmente o momento em que uma calculadora se torna
+uma linguagem — um mapa é a diferença — e tudo o mais rico (funções, scopes,
+objetos) é construído dando mais estrutura a esse mapa, não reconstruindo o
+interpretador.
+
+</Interview>
+
+## O track à frente
+
+Tens agora uma linguagem com memória: um lexer, um parser a produzir statements e
+expressões, e um evaluator com um environment persistente — construído e testado de
+três formas, byte-idêntico. O próximo passo é o grande: **funções**. Uma função é um
+pedaço de árvore que podes nomear e chamar, e cada chamada precisa do seu *próprio*
+environment encadeado àquele onde a função foi definida — que é de onde vêm as
+closures e o scoping léxico, e onde este humilde mapa `nome → valor` revela todo o
+seu poder. Daí: controlo de fluxo, e uma linguagem que é inconfundivelmente tua.
+
+## Referências & leitura adicional
+
+- [Crafting Interpreters — Statements and State](https://craftinginterpreters.com/statements-and-state.html) — o mesmo passo, desenvolvido em profundidade
+- O [avaliador de expressões](/systems-programming-academy/pt/part-7-interpreter/expressions/) — a lição 1, que isto estende
+- A [lição do DI container](/systems-programming-academy/pt/part-5-frameworks/di-container/) — outro sítio onde um mapa `nome → valor` (um registry) é a ideia central
+- [Environment (scope léxico)](https://en.wikipedia.org/wiki/Scope_(computer_science)) — o conceito que o environment implementa
+
+<Progress />
