@@ -167,6 +167,9 @@ mod tests {
         assert_eq!(rule.chars().count(), 48);
         // The tail is padded with the rule character.
         assert!(rule.ends_with("─────"));
-        assert_eq!(rule.chars().filter(|&c| c == '─').count(), 48 - "open ports".len() - 2);
+        assert_eq!(
+            rule.chars().filter(|&c| c == '─').count(),
+            48 - "open ports".len() - 2
+        );
     }
 }
