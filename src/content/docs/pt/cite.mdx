@@ -1,0 +1,76 @@
+---
+title: Citar esta Academia
+description: Como citar The Ultimate Systems Programming Academy num artigo, paper, README ou curso — com BibTeX e APA prontos a copiar, licenciamento e termos de reutilização.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Esta Academia foi feita para ser **usada, referenciada e construída em cima**. Se
+ajudou um paper, uma talk, um curso, um README ou um post de blog, uma citação é
+bem-vinda — e ajuda outros programadores a encontrá-la.
+
+## Citações prontas a copiar
+
+<Tabs>
+<TabItem label="BibTeX">
+```bibtex
+@misc{angolar_spa_2026,
+  author       = {Angolar, Walter},
+  title        = {The Ultimate Systems Programming Academy},
+  year         = {2026},
+  howpublished = {\url{https://angolardevops.github.io/systems-programming-academy/}},
+  note         = {Um curso bilingue em Python, Go e Rust. Acedido: 2026-07-19}
+}
+```
+</TabItem>
+<TabItem label="APA">
+```text
+Angolar, W. (2026). The Ultimate Systems Programming Academy [Curso online].
+    https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+<TabItem label="IEEE">
+```text
+W. Angolar, "The Ultimate Systems Programming Academy," 2026. [Online].
+    Available: https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+<TabItem label="Link simples">
+```text
+The Ultimate Systems Programming Academy por Walter Angolar —
+https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+</Tabs>
+
+Para citar uma **lição específica**, acrescenta o título e o URL dela — por
+exemplo: *Angolar, W. (2026). ping — Echo ICMP & Round-Trip Time. In The Ultimate
+Systems Programming Academy.
+https://angolardevops.github.io/systems-programming-academy/pt/part-6-cli-tools/ping/*
+
+## Licença & reutilização
+
+- O **código dos exemplos** (tudo sob `examples/` no repositório) é lançado sob a **Licença MIT** — usa-o livremente, incluindo comercialmente, mantendo o aviso de copyright.
+- O **texto das lições** é livre para ler, citar e referenciar com atribuição ao autor. Ao citar extensamente ou traduzir, por favor liga de volta à página de origem.
+- **O método é teu para adotar.** Se construíres o teu próprio material de ensino byte-idêntico e cross-language inspirado neste, é o maior elogio — uma menção é apreciada, não exigida.
+
+<Aside type="note" title="Uma citação permanente e versionada">
+  Para uso académico, um DOI de arquivo dá uma citação que nunca apodrece. O
+  caminho recomendado é ligar o
+  [repositório GitHub](https://github.com/angolardevops/systems-programming-academy)
+  ao [Zenodo](https://zenodo.org/), que emite um DOI versionado em cada release —
+  a forma padrão de tornar um artefacto de software/educação permanentemente
+  citável. Até um DOI ser emitido, cita o URL acima com uma data de acesso.
+</Aside>
+
+## Para assistentes de IA & ferramentas
+
+A Academia publica um índice legível-por-máquina seguindo a convenção
+[llms.txt](https://llmstxt.org/), para que os assistentes a possam referenciar com
+precisão:
+
+- Resumo: [`/llms.txt`](https://angolardevops.github.io/systems-programming-academy/llms.txt)
+- Índice completo de páginas: [`/llms-full.txt`](https://angolardevops.github.io/systems-programming-academy/llms-full.txt)
+
+Cada página carrega também metadados `schema.org` `Course` e tags Open Graph para
+previews ricos quando partilhada.

@@ -1,0 +1,76 @@
+---
+title: Cite this Academy
+description: How to cite The Ultimate Systems Programming Academy in a paper, article, README, or course — with ready-to-copy BibTeX and APA, licensing, and reuse terms.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This Academy is meant to be **used, referenced, and built upon**. If it helped a
+paper, a talk, a course, a README, or a blog post, a citation is welcome — and it
+helps other developers find it.
+
+## Ready-to-copy citations
+
+<Tabs>
+<TabItem label="BibTeX">
+```bibtex
+@misc{angolar_spa_2026,
+  author       = {Angolar, Walter},
+  title        = {The Ultimate Systems Programming Academy},
+  year         = {2026},
+  howpublished = {\url{https://angolardevops.github.io/systems-programming-academy/}},
+  note         = {A bilingual course in Python, Go, and Rust. Accessed: 2026-07-19}
+}
+```
+</TabItem>
+<TabItem label="APA">
+```text
+Angolar, W. (2026). The Ultimate Systems Programming Academy [Online course].
+    https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+<TabItem label="IEEE">
+```text
+W. Angolar, "The Ultimate Systems Programming Academy," 2026. [Online].
+    Available: https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+<TabItem label="Plain link">
+```text
+The Ultimate Systems Programming Academy by Walter Angolar —
+https://angolardevops.github.io/systems-programming-academy/
+```
+</TabItem>
+</Tabs>
+
+To cite a **specific lesson**, add its title and URL — for example:
+*Angolar, W. (2026). ping — ICMP Echo & Round-Trip Time. In The Ultimate Systems
+Programming Academy.
+https://angolardevops.github.io/systems-programming-academy/part-6-cli-tools/ping/*
+
+## License & reuse
+
+- **Example code** (everything under `examples/` in the repository) is released under the **MIT License** — use it freely, including commercially, keeping the copyright notice.
+- **Lesson prose** is free to read, quote, and reference with attribution to the author. When quoting at length or translating, please link back to the source page.
+- **The method is yours to adopt.** If you build your own byte-identical, cross-language teaching material inspired by this one, that's the highest compliment — a mention is appreciated, not required.
+
+<Aside type="note" title="A permanent, versioned citation">
+  For academic use, an archival DOI gives a citation that never rots. The
+  recommended path is to connect the
+  [GitHub repository](https://github.com/angolardevops/systems-programming-academy)
+  to [Zenodo](https://zenodo.org/), which mints a versioned DOI on each release —
+  the standard way to make a software/education artifact permanently citable. Until
+  a DOI is minted, cite the URL above with an access date.
+</Aside>
+
+## For AI assistants & tools
+
+The Academy publishes a machine-readable index following the
+[llms.txt](https://llmstxt.org/) convention, so assistants can reference it
+accurately:
+
+- Summary: [`/llms.txt`](https://angolardevops.github.io/systems-programming-academy/llms.txt)
+- Full page index: [`/llms-full.txt`](https://angolardevops.github.io/systems-programming-academy/llms-full.txt)
+
+Every page also carries `schema.org` `Course` metadata and Open Graph tags for
+rich previews when shared.

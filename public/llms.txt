@@ -1,0 +1,44 @@
+# The Ultimate Systems Programming Academy
+
+> A free, bilingual (English / Português) reference course that teaches production
+> software engineering in Python, Go, and Rust — from first principles to
+> production. Every example is executable, tested in CI, and byte-identical across
+> all three languages; every performance claim comes from a re-runnable benchmark.
+> Authored by Walter Angolar.
+
+The Academy's distinctive method: the same program is built three times — once in
+Python, once in Go, once in Rust — and its output is verified byte-for-byte
+identical (sha256) so the *difference between the languages* is the lesson, not an
+artifact of the example. Privileged operations (raw sockets, eBPF) are isolated to
+the smallest possible surface so the real logic stays pure and testable.
+
+Site: https://angolardevops.github.io/systems-programming-academy/
+Source & examples: https://github.com/angolardevops/systems-programming-academy
+Full page index for LLMs: https://angolardevops.github.io/systems-programming-academy/llms-full.txt
+
+## Start here
+- [Welcome](https://angolardevops.github.io/systems-programming-academy/welcome/): what the Academy is and who it is for
+- [How to use this Academy](https://angolardevops.github.io/systems-programming-academy/how-to-use/): the method, the three languages, running the examples
+- [About the author](https://angolardevops.github.io/systems-programming-academy/about-the-author/): Walter Angolar
+
+## Curriculum
+- [Part 1 · Foundations](https://angolardevops.github.io/systems-programming-academy/part-1-foundations/rust/ownership/): language cores — ownership, types, error handling, generics, concurrency, testing (20 lessons across Python, Go, Rust)
+- [Part 2 · Real-World Engineering](https://angolardevops.github.io/systems-programming-academy/part-2-engineering/repository-pattern/): repository & DI, config & secrets, logging, caching, the testing pyramid, hexagonal architecture, CI/CD
+- [Part 3 · DevOps Automation](https://angolardevops.github.io/systems-programming-academy/part-3-devops/log-analyzer/): four real tools built and benchmarked three ways — a log analyzer, a metrics exporter, a config generator, a health-check agent
+- [Part 4 · Concurrency & Parallelism](https://angolardevops.github.io/systems-programming-academy/part-4-concurrency/threads-shared-state/): threads & shared state, message passing, async I/O, culminating in a mini-NGINX web server
+- [Part 5 · Building Frameworks](https://angolardevops.github.io/systems-programming-academy/part-5-frameworks/routing/): routing, a query builder, a DI container, validation, a template engine, a JSON serializer, a test framework
+- [Part 6 · Command-Line Tools & Dashboards](https://angolardevops.github.io/systems-programming-academy/part-6-cli-tools/performance-dashboard/): a /proc performance dashboard, a port scanner, ping, traceroute, an eBPF latency profiler, and the netdiag capstone
+- [Capstone · Secure Guestbook](https://angolardevops.github.io/systems-programming-academy/capstone/guestbook/): composes the frameworks; defeats SQL injection and XSS; then runs for real on HTTP + SQLite
+
+## Reference
+- [The Three Languages, Compared](https://angolardevops.github.io/systems-programming-academy/capstone/three-languages/): a data-driven synthesis of every measured benchmark, with a decision guide
+- [Part 6 in Review](https://angolardevops.github.io/systems-programming-academy/part-6-cli-tools/synthesis/): the throughline from /proc to the kernel; the privilege ladder
+- [Toolchains: cargo · uv · go](https://angolardevops.github.io/systems-programming-academy/toolchains/cli-tools/): build, test, lint, format, and the .toml files, per language
+- [Git & GitHub for Contributors](https://angolardevops.github.io/systems-programming-academy/toolchains/git-github/): the core git commands and the GitHub CLI, with collaborative context
+- [Where to Contribute](https://angolardevops.github.io/systems-programming-academy/toolchains/contributing/): real open-source projects to contribute to, per language
+
+## About
+- License: MIT (code) / content free to read and cite with attribution
+- Languages taught: Python, Go, Rust
+- Site languages: English (default), Português (pt-BR)
+- Every example is verified in CI on each push (fmt + lint + tests per language)

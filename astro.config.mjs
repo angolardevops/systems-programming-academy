@@ -37,6 +37,72 @@ export default defineConfig({
       description:
         'Learn production software engineering from absolute beginner to advanced with Python, Go, and Rust.',
       tagline: 'Python · Go · Rust — from first principles to production.',
+      // Social-card image + machine-readable metadata on every page, so the
+      // Academy is shareable, and discoverable/citable by search engines and AI.
+      head: [
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image',
+            content:
+              'https://angolardevops.github.io/systems-programming-academy/og.png',
+          },
+        },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        {
+          tag: 'meta',
+          attrs: { name: 'twitter:card', content: 'summary_large_image' },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            name: 'twitter:image',
+            content:
+              'https://angolardevops.github.io/systems-programming-academy/og.png',
+          },
+        },
+        { tag: 'meta', attrs: { name: 'author', content: 'Walter Angolar' } },
+        {
+          tag: 'script',
+          attrs: { type: 'application/ld+json' },
+          content: JSON.stringify({
+            '@context': 'https://schema.org',
+            '@type': 'Course',
+            name: 'The Ultimate Systems Programming Academy',
+            description:
+              'A free, bilingual course teaching production software engineering in Python, Go, and Rust — every example executable, tested, and byte-identical across all three languages.',
+            url: 'https://angolardevops.github.io/systems-programming-academy/',
+            inLanguage: ['en', 'pt-BR'],
+            isAccessibleForFree: true,
+            teaches: [
+              'Python',
+              'Go',
+              'Rust',
+              'systems programming',
+              'concurrency',
+              'networking',
+              'testing',
+              'software architecture',
+            ],
+            author: {
+              '@type': 'Person',
+              name: 'Walter Angolar',
+              url: 'https://www.linkedin.com/in/walter-angolar-02a96b24/',
+            },
+            provider: {
+              '@type': 'Organization',
+              name: 'angolardevops',
+              url: 'https://github.com/angolardevops',
+            },
+            hasCourseInstance: {
+              '@type': 'CourseInstance',
+              courseMode: 'online',
+              courseWorkload: 'P6M',
+            },
+          }),
+        },
+      ],
       defaultLocale: 'root',
       locales: {
         root: { label: 'English', lang: 'en' },
@@ -63,6 +129,11 @@ export default defineConfig({
               label: 'How to use this Academy',
               translations: { 'pt-BR': 'Como usar esta Academia' },
               slug: 'how-to-use',
+            },
+            {
+              label: 'Cite this Academy',
+              translations: { 'pt-BR': 'Citar esta Academia' },
+              slug: 'cite',
             },
           ],
         },
