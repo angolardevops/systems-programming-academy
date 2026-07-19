@@ -24,6 +24,15 @@ examples.
   **107 suites passing, 0 failing** — the entire curriculum, verified in one go.
 </Aside>
 
+## Run Python without installing anything
+
+Some lessons embed a **live Python runner** right in the page — an editable box
+with a **Run** button that executes the code *in your browser* via Pyodide
+(CPython compiled to WebAssembly), with nothing sent to a server. The
+[eBPF profiler lesson](/systems-programming-academy/part-6-cli-tools/ebpf-observability/#run-it-in-your-browser)
+has one: edit the latency samples, press Run, and watch the histogram redraw. It's
+the quickest way to poke at a pure example before cloning anything.
+
 ## The runner
 
 `scripts/run-all.sh` walks `examples/`, detects each directory's language, and

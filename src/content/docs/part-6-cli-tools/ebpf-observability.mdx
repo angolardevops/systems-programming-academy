@@ -12,6 +12,7 @@ import Quiz from '../../../components/Quiz.astro';
 import Interview from '../../../components/Interview.astro';
 import LessonMeta from '../../../components/LessonMeta.astro';
 import Progress from '../../../components/Progress.astro';
+import PyRunner from '../../../components/PyRunner.astro';
 
 <LessonMeta difficulty="advanced" minutes={40} languages={["python", "go", "rust"]} />
 
@@ -251,6 +252,47 @@ Piping the same samples through all three binaries produces this, byte-for-byte
   from the performance dashboard, and it's why the three histograms are
   bit-identical rather than merely similar.
 </Aside>
+
+### Run it in your browser
+
+The userspace half is pure Python — so you can run it right here. Edit the
+`samples` list and press **Run**: the code executes locally in your browser (via
+Pyodide, CPython compiled to WebAssembly), no server involved. This is the exact
+`bucket` → `tally` → `render` pipeline the lesson describes.
+
+<PyRunner code={`import math
+
+def bucket(v):
+    return 0 if v <= 1 else v.bit_length() - 1        # floor(log2 v)
+
+def bucket_range(k):
+    return (0, 1) if k == 0 else (1 << k, (1 << (k + 1)) - 1)
+
+def tally(samples):
+    counts = []
+    for s in samples:
+        b = bucket(s)
+        if b >= len(counts):
+            counts.extend([0] * (b + 1 - len(counts)))
+        counts[b] += 1
+    return counts
+
+def render(counts, unit="usecs"):
+    out = [f"{unit:>18} : count    distribution"]
+    last = max((i for i, c in enumerate(counts) if c > 0), default=-1)
+    if last < 0:
+        return out[0]
+    top = max(counts[:last + 1])
+    for k in range(last + 1):
+        lo, hi = bucket_range(k)
+        filled = math.floor(counts[k] / top * 40 + 0.5)
+        bar = "*" * filled + " " * (40 - filled)
+        out.append(f"{f'{lo} -> {hi}':>18} : {counts[k]:<8} |{bar}|")
+    return "\\n".join(out)
+
+# edit these latencies (in microseconds) and press Run:
+samples = [1, 2, 3, 5, 5, 6, 9, 10, 12, 100, 200, 250, 250, 300, 1000, 4000]
+print(render(tally(samples)))`} label="Python · latency histogram · runs in your browser" />
 
 ## Wiring it to the kernel
 

@@ -23,6 +23,16 @@ verificas isso tu mesmo, e montas um ambiente para mexer nos exemplos.
   **107 suites a passar, 0 a falhar** — o currículo inteiro, verificado de uma vez.
 </Aside>
 
+## Correr Python sem instalar nada
+
+Algumas lições embutem um **runner de Python ao vivo** mesmo na página — uma caixa
+editável com um botão **Run** que executa o código *no teu browser* via Pyodide
+(CPython compilado para WebAssembly), sem nada enviado para um servidor. A
+[lição do profiler eBPF](/systems-programming-academy/pt/part-6-cli-tools/ebpf-observability/#corre-o-no-teu-browser)
+tem um: edita as amostras de latência, carrega em Run, e vê o histograma
+redesenhar-se. É a forma mais rápida de mexer num exemplo puro antes de clonar o
+que quer que seja.
+
 ## O runner
 
 O `scripts/run-all.sh` percorre `examples/`, deteta a linguagem de cada diretório,
