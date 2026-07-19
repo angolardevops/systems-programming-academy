@@ -477,6 +477,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Variáveis & Estado' },
               slug: 'part-7-interpreter/variables',
             },
+            {
+              label: 'Functions & Closures',
+              translations: { 'pt-BR': 'Funções & Closures' },
+              slug: 'part-7-interpreter/functions',
+            },
           ],
         },
         {

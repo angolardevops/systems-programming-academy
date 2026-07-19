@@ -1,0 +1,16 @@
+[package]
+name = "part7-fns-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the small language now has functions — first-class values that
+# capture the environment where they are defined (closures) and get a fresh scope
+# per call chained to that captured one (lexical scoping). Values are integers or
+# functions; environments form a parent chain via Rc<RefCell<Scope>>.
+
+[[bin]]
+name = "fns"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

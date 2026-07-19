@@ -1,0 +1,531 @@
+---
+title: "Constrói o Teu Próprio Interpretador — Funções & Closures"
+description: "Adiciona funções first-class e closures à tua linguagem em Rust, Go e Python. Uma chamada ganha um scope fresco; uma função captura onde foi definida — encadeando environments em scoping léxico. O coração subtil de toda a linguagem, construído e testado byte-idêntico de três formas."
+difficulty: advanced
+estimatedMinutes: 45
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+import PyRunner from '../../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={45} languages={["python", "go", "rust"]} />
+
+<Badge text="Constrói o Teu Próprio X" variant="tip" size="large" />
+
+As [variáveis](/systems-programming-academy/pt/part-7-interpreter/variables/) deram
+memória à linguagem. As **funções** dão-lhe *abstração* — nomeias uma computação e
+reutiliza-la: `double(x) = x * 2`, depois `double(21)`. É o passo mais rico do
+track, porque as funções forçam o environment da lição 2 a crescer numa **cadeia**,
+e essa cadeia é o mecanismo por trás das duas ideias mais mal-entendidas da
+programação: **closures** e **scoping léxico**. Construímos ambas, byte-idênticas,
+de três formas.
+
+<Aside type="note" title="Duas ideias, ambas sobre environments">
+  Uma função precisa de duas coisas além de uma expressão. Primeiro, um **scope
+  fresco por chamada** para guardar os seus argumentos, para que os parâmetros não
+  vazem e chamadas recursivas ou aninhadas não se atropelem. Segundo — a subtil —
+  uma função é uma **closure**: captura o environment onde foi *definida*, e o seu
+  scope de chamada encadeia-se a *esse*, não a onde quer que tenha sido chamada.
+  Então uma função vê as variáveis em scope onde foi escrita. Isso é **scoping
+  léxico**, e é a única decisão de design que separa linguagens previsíveis de
+  confusas.
+</Aside>
+
+Código:
+[Rust](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-fns-rust) · [Go](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-fns-go) · [Python](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-fns-py)
+— fmt/lint limpos, 6 testes cada, output de programa **byte-idêntico nas três
+linguagens** — mesmo que cada uma guarde a closure de forma diferente (Rust
+`Rc<RefCell<Scope>>`, Go um ponteiro `*Scope`, Python uma referência de objeto).
+
+## Os valores tornam-se first-class
+
+Até agora todo o valor era um inteiro. Agora um valor é *ou um inteiro ou uma
+função* — e uma função pode ser guardada numa variável, passada como argumento, e
+devolvida. É isso que "first-class" significa. Então o tipo de valor do evaluator
+ganha uma variante:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="fns.py"
+@dataclass
+class Function:
+    params: list[str]
+    body: Expr
+    env: Scope          # a closure: o environment onde foi definida
+
+# Um valor de runtime é ou um int ou uma Function.
+```
+</TabItem>
+<TabItem label="Go">
+```go title="fns.go"
+type Value struct {
+	Kind byte // 'i' int, 'f' func
+	Int  int64
+	Fn   *Function
+}
+
+type Function struct {
+	Params []string
+	Body   *Expr
+	Env    *Scope // a closure: o environment onde foi definida
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub enum Value {
+    Int(i64),
+    Func(Rc<Function>),
+}
+
+pub struct Function {
+    params: Vec<String>,
+    body: Expr,
+    env: Env,            // a closure: o environment onde foi definida
+}
+```
+</TabItem>
+</Tabs>
+
+O campo-chave é o `env` — a função *lembra-se do environment onde nasceu*. Essa
+única referência é a closure. Tudo o resto decorre dela.
+
+## O environment torna-se uma cadeia
+
+Um único mapa já não chega: uma chamada de função precisa do seu próprio scope para
+os parâmetros, sobreposto ao scope que capturou. Então o `Scope` ganha um
+**parent**, e o lookup percorre a cadeia para fora até encontrar o nome.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="fns.py"
+class Scope:
+    def __init__(self, parent: Scope | None = None) -> None:
+        self.vars: dict[str, int | Function] = {}
+        self.parent = parent
+
+    def lookup(self, name: str) -> int | Function | None:
+        scope = self
+        while scope is not None:
+            if name in scope.vars:
+                return scope.vars[name]
+            scope = scope.parent          # falha local? percorre para fora
+        return None
+```
+</TabItem>
+<TabItem label="Go">
+```go title="fns.go"
+type Scope struct {
+	vars   map[string]Value
+	parent *Scope
+}
+
+func lookup(env *Scope, name string) (Value, bool) {
+	for s := env; s != nil; s = s.parent { // percorre para fora
+		if v, ok := s.vars[name]; ok {
+			return v, true
+		}
+	}
+	return Value{}, false
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub struct Scope {
+    vars: HashMap<String, Value>,
+    parent: Option<Env>,
+}
+pub type Env = Rc<RefCell<Scope>>;
+
+fn lookup(env: &Env, name: &str) -> Option<Value> {
+    let scope = env.borrow();
+    if let Some(v) = scope.vars.get(name) {
+        return Some(v.clone());
+    }
+    match &scope.parent {
+        Some(p) => lookup(p, name),        // percorre para fora
+        None => None,
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Porque o Rust precisa de Rc<RefCell<Scope>>">
+  Uma closure e o código que a definiu *partilham* um environment, e ele pode ser
+  mutado depois da captura. O Go e o Python exprimem estado mutável partilhado com
+  um simples ponteiro / referência de objeto. O Rust torna-o explícito: o `Rc` dá
+  ownership partilhado (muitos donos do mesmo scope), e o `RefCell` dá interior
+  mutability (mutação através de um handle partilhado, verificada em runtime). É
+  mais cerimónia, mas nomeia exatamente o que está a acontecer — *partilhado,
+  mutável* — que as outras duas deixam implícito. O comportamento é idêntico; o
+  Rust só se recusa a deixá-lo invisível.
+</Aside>
+
+## A chamada: um scope fresco encadeado à *definição*
+
+Aqui está a lição toda numa função. Avaliar uma chamada: procura a função, avalia
+os argumentos *no environment do chamador*, depois cria um novo scope para os
+parâmetros cujo parent é o environment **capturado** da função — e corre o corpo aí.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="fns.py"
+def _eval_call(e: Expr, env: Scope) -> int | Function:
+    fn = env.lookup(e.name)
+    if not isinstance(fn, Function):
+        raise CalcError(f"'{e.name}' is not a function")   # (ou undefined)
+    if len(e.args) != len(fn.params):
+        raise CalcError(f"'{e.name}' expects {len(fn.params)} argument(s), ...")
+    argv = [evaluate(a, env) for a in e.args]      # args no env do CHAMADOR
+    call = Scope(parent=fn.env)                    # ...mas encadeia ao env de DEFINIÇÃO
+    for p, v in zip(fn.params, argv):
+        call.vars[p] = v
+    return evaluate(fn.body, call)
+```
+</TabItem>
+<TabItem label="Go">
+```go title="fns.go"
+func evalCall(e *Expr, env *Scope) (Value, error) {
+	v, _ := lookup(env, e.Name)
+	if v.Kind != 'f' { /* undefined / not a function */ }
+	fn := v.Fn
+	if len(e.Args) != len(fn.Params) { /* arity error */ }
+	argv := make([]Value, len(e.Args))
+	for i, a := range e.Args {
+		argv[i], _ = Eval(a, env)              // args no env do CHAMADOR
+	}
+	call := childEnv(fn.Env)                    // ...mas encadeia ao env de DEFINIÇÃO
+	for i, p := range fn.Params {
+		call.vars[p] = argv[i]
+	}
+	return Eval(fn.Body, call)
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+Expr::Call(name, args) => {
+    let func = match lookup(env, name) { /* Func / not-a-fn / undefined */ };
+    if args.len() != func.params.len() { /* arity error */ }
+    let mut argv = Vec::new();
+    for a in args {
+        argv.push(eval(a, env)?);              // args no env do CHAMADOR
+    }
+    let call_scope = child_env(&func.env);      // ...mas encadeia ao env de DEFINIÇÃO
+    for (p, v) in func.params.iter().zip(argv) {
+        call_scope.borrow_mut().vars.insert(p.clone(), v);
+    }
+    eval(&func.body, &call_scope)
+}
+```
+</TabItem>
+</Tabs>
+
+**Essa única escolha — o parent é o `fn.env`, não o `env` do chamador — é o scoping
+léxico.** Erra-a (encadeia ao chamador) e tens scoping *dinâmico*, onde o
+comportamento de uma função depende de quem a chama — uma fonte notória de bugs. O
+teste prova que a acertámos:
+
+```text
+x = 10
+f(n) = n + x        # f captura x = 10 de onde é DEFINIDA
+g(x) = f(0)         # g tem o seu PRÓPRIO parâmetro também chamado x
+g(999)              # => 10, NÃO 999
+```
+
+Quando `g(999)` corre, o scope de `g` liga `x = 999` e chama `f(0)`. Mas o corpo de
+`f` corre num scope encadeado ao environment de definição de *`f`*, onde `x` é 10 —
+o `x` de `g` é invisível para ele. Então a resposta é `10`. É essa a diferença entre
+scoping léxico e dinâmico, e é decidida inteiramente por qual environment o parent
+do scope de chamada aponta.
+
+## As closures capturam um environment *vivo*
+
+Como o environment capturado é partilhado (não copiado), uma closure vê mudanças
+posteriores nas variáveis que fechou:
+
+```text
+base = 100
+shift(n) = n + base   # captura o environment que contém base
+shift(5)              # => 105
+base = 200            # muta o environment capturado
+shift(5)              # => 205  — a closure vê o novo valor
+```
+
+Isto sai de graça nas três linguagens precisamente porque o environment é uma coisa
+partilhada e mutável — o `Rc<RefCell>` do Rust, o ponteiro do Go, a referência do
+Python apontam todos para o *mesmo* objeto scope, então reatribuir `base` é visível
+através da closure. Mesmo comportamento, output byte-idêntico, três grafias
+diferentes de "partilhado e mutável".
+
+## Corre funções no teu browser
+
+O interpretador inteiro — com funções e closures — como um programa. Edita-o e
+carrega em **Run**; vê uma closure lembrar-se, e o scoping léxico decidir:
+
+<PyRunner code={`def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c in " \\t": i += 1
+        elif c in "=,+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"): j += 1
+            toks.append(("id", s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(s, t): s.t, s.i = t, 0
+    def peek(s): return s.t[s.i] if s.i < len(s.t) else None
+    def nxt(s):
+        v = s.peek(); s.i += 1; return v
+    def expr(s):
+        n = s.term()
+        while s.peek() in ("+", "-"):
+            op = s.nxt(); n = (op, n, s.term())
+        return n
+    def term(s):
+        n = s.factor()
+        while s.peek() in ("*", "/"):
+            op = s.nxt(); n = (op, n, s.factor())
+        return n
+    def factor(s):
+        t = s.nxt()
+        if isinstance(t, int): return t
+        if isinstance(t, tuple):
+            if s.peek() == "(":
+                s.nxt(); args = []
+                if s.peek() != ")":
+                    args.append(s.expr())
+                    while s.peek() == ",": s.nxt(); args.append(s.expr())
+                if s.nxt() != ")": raise ValueError("expected ')'")
+                return ("call", t[1], args)
+            return ("var", t[1])
+        if t == "-": return ("neg", s.factor())
+        if t == "(":
+            n = s.expr()
+            if s.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+class Scope:
+    def __init__(s, parent=None): s.v, s.parent = {}, parent
+    def get(s, n):
+        sc = s
+        while sc:
+            if n in sc.v: return sc.v[n]
+            sc = sc.parent
+        return None
+
+def asint(v):
+    if isinstance(v, int): return v
+    raise ValueError("cannot do arithmetic on a function")
+
+def ev(node, env):
+    if isinstance(node, int): return node
+    k = node[0]
+    if k == "var":
+        v = env.get(node[1])
+        if v is None: raise ValueError(f"undefined variable {node[1]!r}")
+        return v
+    if k == "neg": return -asint(ev(node[1], env))
+    if k == "call":
+        fn = env.get(node[1])
+        if not (isinstance(fn, tuple) and fn[0] == "fn"):
+            raise ValueError(f"{node[1]!r} is not a function")
+        _, params, body, defenv = fn
+        args = [ev(a, env) for a in node[2]]
+        if len(args) != len(params): raise ValueError(f"{node[1]!r} arity mismatch")
+        call = Scope(defenv)                 # encadeia ao env de DEFINIÇÃO — léxico
+        for p, a in zip(params, args): call.v[p] = a
+        return ev(body, call)
+    a, b = asint(ev(node[1], env)), asint(ev(node[2], env))
+    if k == "+": return a + b
+    if k == "-": return a - b
+    if k == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def params_of(toks):
+    ps, i = [], 0
+    if toks[i] == ")": return ps, i + 1
+    while True:
+        ps.append(toks[i][1]); i += 1
+        if toks[i] == ",": i += 1; continue
+        if toks[i] == ")": return ps, i + 1
+        raise ValueError("bad parameter list")
+
+def run(program):
+    env = Scope()
+    for line in program.strip().split("\\n"):
+        line = line.strip()
+        if not line: continue
+        try:
+            t = tokenize(line)
+            is_def = len(t) > 2 and isinstance(t[0], tuple) and t[1] == "(" and ")" in t and t[t.index(")") + 1:t.index(")") + 2] == ["="]
+            if is_def:
+                name = t[0][1]
+                ps, after = params_of(t[2:])
+                body = P(t[2 + after + 1:]).expr()
+                env.v[name] = ("fn", ps, body, env)
+                print(f"{line:<26} => <fn>")
+            elif len(t) >= 2 and isinstance(t[0], tuple) and t[1] == "=":
+                env.v[t[0][1]] = ev(P(t[2:]).expr(), env)
+                print(f"{line:<26} => {env.v[t[0][1]] if isinstance(env.v[t[0][1]], int) else '<fn>'}")
+            else:
+                r = ev(P(t).expr(), env)
+                print(f"{line:<26} => {r if isinstance(r, int) else '<fn>'}")
+        except ValueError as e:
+            print(f"{line:<26} -> error: {e}")
+
+# uma closure que se lembra, e o scoping léxico em ação:
+run('''
+x = 10
+f(n) = n + x
+g(x) = f(0)
+g(999)
+adder(step) = step + x
+adder(5)
+x = 100
+adder(5)
+''')`} label="Python · funções & closures · corre no teu browser" />
+
+## Exercícios
+
+**1. Adiciona recursão — e bate no problema do caso-base (nas três).** Tenta
+`fact(n) = n * fact(n - 1)`. Já *faz parse* e o nome está em scope (as funções
+capturam o environment onde são definidas, que agora contém a própria). Mas
+`fact(3)` nunca pára. Adiciona um condicional para a recursão poder terminar — que
+construção nova mínima a linguagem precisa?
+
+<details>
+<summary>Esboço da solução</summary>
+
+A recursão funciona estruturalmente no momento em que uma função consegue ver o seu
+próprio nome (consegue, porque a closure captura o scope global onde a função está a
+ser definida). O que falta é uma forma de *parar*: uma expressão `if`/condicional,
+para `fact(n) = if n <= 1 then 1 else n * fact(n - 1)`. Isso precisa de um operador
+de comparação e um nó condicional de três ramos na AST mais um caso de `eval` que
+avalia só o ramo tomado (lazy, não ambos). Os condicionais são a próxima primitiva —
+com eles mais funções, a linguagem torna-se Turing-completa.
+
+</details>
+
+**2. Torna as funções verdadeiramente first-class: passa uma como argumento
+(pesquisa + uma linguagem).** Como um `Value` pode ser uma função, `apply(f, x) = f(x)`
+devia funcionar — chamar a função passada. O teu evaluator já suporta isto, ou a
+maquinaria de chamada assume que o callee é procurado por nome? O que tem de mudar?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O bloqueio é geralmente que o `Call` guarda um *nome* (uma string) e procura-o, em
+vez de avaliar uma expressão arbitrária a um valor-função. Generaliza o nó de
+chamada para que o callee seja uma *expressão* que avalia a uma função — então
+`f(x)` onde `f` é um parâmetro a segurar uma função simplesmente funciona, e devolver
+uma função para chamar depois também. Essa única mudança (callee é um valor, não um
+nome) é o que torna as funções totalmente first-class e desbloqueia funções de ordem
+superior como `map` e `compose` — a recompensa de ter feito das funções valores em
+primeiro lugar.
+
+</details>
+
+**3. Adiciona closures que capturam estado por-chamada (qualquer linguagem).** Faz
+uma função que *devolve* uma função a capturar o seu argumento: `make_adder(k)`
+devolve uma função que soma `k`. Duas chamadas, `make_adder(10)` e `make_adder(100)`,
+têm de produzir dois adders independentes. Porque é que cada `k` capturado fica
+separado?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Cada *chamada* a `make_adder` cria um scope fresco a ligar o seu próprio `k`, e a
+função interna devolvida captura *esse* scope. Como as duas chamadas criaram dois
+objetos scope diferentes, o adder de `make_adder(10)` fecha sobre um scope onde
+`k=10` e o de `make_adder(100)` sobre um scope diferente onde `k=100` — nunca
+interferem. É a recompensa mais profunda do design de cadeia-de-environments: as
+closures dão a cada instância de função o seu próprio estado privado e persistente,
+que é a fundação de contadores, iteradores, e encapsulamento tipo-objeto construído
+puramente a partir de funções.
+
+</details>
+
+<Quiz
+  question={'Quando g(999) corre o programa (x = 10; f(n) = n + x; g(x) = f(0); g(999)), o resultado é 10, não 999. Porquê?'}
+  options={[
+    { text: 'O corpo de f corre num scope encadeado a onde f foi DEFINIDA (onde x = 10), não ao scope de chamada de g (onde o parâmetro x = 999) — isso é scoping léxico, decidido por fazer o parent do scope de chamada ser o environment capturado da função', correct: true, explanation: 'O scope de chamada de f tem como parent o environment de definição de f, então procurar x encontra o 10 de lá e nunca vê o x local de g. Como o link parent aponta para o local de definição (não o de chamada), o scoping é léxico. Apontá-lo para o chamador seria scoping dinâmico, dando 999.' },
+    { text: 'O interpretador avalia argumentos lazily, então x nunca é lido', correct: false, explanation: 'O x é lido — o corpo de f n + x procura-o. A razão de encontrar 10 em vez de 999 é para onde a cadeia de lookup leva (o environment de definição), não qualquer laziness na avaliação de argumentos.' },
+    { text: 'O parâmetro x de g faz shadow do x global só dentro de g, e f não é afetada porque as funções copiam todos os globais quando definidas', correct: false, explanation: 'As funções não copiam globais — capturam o environment vivo por referência (que é porque mutações posteriores são visíveis). O f vê 10 porque a sua cadeia de scope leva ao environment de definição, não por causa de qualquer cópia.' },
+    { text: 'Porque 999 é maior que 10 e o interpretador limita valores', correct: false, explanation: 'Não há limitação — o valor é 10 por causa da resolução de scope, não de qualquer limite numérico. O lookup de x resolve através do environment de definição de f para 10.' },
+  ]}
+/>
+
+<Quiz
+  question={'O que torna uma função neste interpretador uma "closure"?'}
+  options={[
+    { text: 'Guarda uma referência ao environment em que foi definida, e as suas chamadas correm num novo scope encadeado a esse environment capturado — para que consiga ver e partilhar as variáveis em scope onde foi escrita', correct: true, explanation: 'Uma closure é uma função mais o environment que fechou. Guardar esse environment de definição (por referência, para ficar vivo) e encadear cada scope de chamada a ele é exatamente o que deixa a função usar variáveis exteriores — e ver as suas mudanças posteriores. Remove o environment capturado e tens uma função simples sem acesso ao seu redor.' },
+    { text: 'É uma função que não recebe argumentos', correct: false, explanation: 'A contagem de argumentos não tem nada a ver com closures. Uma closure é sobre capturar o environment envolvente; uma função de zero argumentos pode ou não ser uma closure, e funções multi-argumento também são closures.' },
+    { text: 'É uma função cujo código-fonte é guardado como string para parse posterior', correct: false, explanation: 'As closures guardam uma referência a um environment de runtime, não texto-fonte. O corpo já está parseado numa árvore de sintaxe; o que a torna uma closure é o environment capturado, não como o código é guardado.' },
+    { text: 'É uma função que foi compilada para código de máquina', correct: false, explanation: 'A compilação é irrelevante. Uma closure é um conceito de semântica de linguagem — uma função agrupada com o seu environment de definição — e existe em interpretadores (como este) sem qualquer compilação para código de máquina.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="Explica closures e scoping léxico, usando como as implementarias.">
+
+Uma closure é uma função agrupada com o environment em que foi definida. Em termos
+de implementação: representa um environment como um scope com um mapa de ligações e
+um ponteiro para um scope parent, para que o lookup de nomes percorra a cadeia para
+fora. Quando *avalias uma definição de função*, guarda, ao lado dos parâmetros e do
+corpo, uma referência ao environment atual — essa referência capturada é a closure.
+Quando *chamas* a função, cria um scope fresco para os parâmetros e define o seu
+parent como o environment capturado da função (não o environment do chamador),
+depois avalia o corpo aí. Essa única decisão — o parent do scope de chamada é o
+environment de *definição* — é o scoping léxico: a função resolve variáveis livres
+onde foi escrita, não onde foi chamada, o que é previsível e é o que toda a
+linguagem mainstream faz. (Encadear ao chamador dá scoping dinâmico.) Como o
+environment capturado é segurado por referência e é mutável, a closure também vê
+mudanças posteriores nessas variáveis, e cada chamada a uma função envolvente cria
+um scope distinto, então closures devolvidas ganham estado privado independente.
+Esse mecanismo de cadeia-de-environments — scopes com ponteiros parent, capturados
+na definição, estendidos na chamada — é tudo, e é idêntico quer grafes "environment
+mutável partilhado" como um ponteiro Go, uma referência Python, ou o `Rc<RefCell>`
+do Rust.
+
+</Interview>
+
+## O track à frente
+
+A tua linguagem tem agora funções e closures — o conceito mais difícil do track, e o
+que revela porque o environment teve de se tornar uma cadeia. O que resta é
+sobretudo composição do que construíste: **condicionais** (que desbloqueiam a
+recursão e tornam a linguagem Turing-completa), **operadores de comparação e
+booleanos**, valores-função first-class passados e devolvidos (funções de ordem
+superior), e depois statements como loops e `print`. Cada um é uma pequena adição às
+mesmas três fases. Construíste o coração pulsante de um interpretador; o resto é
+dar-lhe mais para dizer.
+
+## Referências & leitura adicional
+
+- [Crafting Interpreters — Functions](https://craftinginterpreters.com/functions.html) e [Closures](https://craftinginterpreters.com/closures.html) — os mesmos conceitos em profundidade
+- [Variáveis & Estado](/systems-programming-academy/pt/part-7-interpreter/variables/) — a lição 2, cujo environment isto estende numa cadeia
+- [SICP — o modelo de environment de avaliação](https://mitp-content-server.mit.edu/books/content/sectbyfn/books_pres_0/6515/sicp.zip/full-text/book/book-Z-H-21.html) — o tratamento clássico de environments e closures
+- A [lição de smart pointers](/systems-programming-academy/pt/part-1-foundations/rust/smart-pointers/) — porque as closures do Rust aqui precisam de `Rc<RefCell>`
+
+<Progress />
