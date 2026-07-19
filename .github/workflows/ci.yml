@@ -60,6 +60,7 @@ jobs:
           - part6-traceroute-rust
           - part6-ebpf-rust
           - part6-netdiag-rust
+          - part7-calc-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -113,6 +114,7 @@ jobs:
           - part6-traceroute-go
           - part6-ebpf-go
           - part6-netdiag-go
+          - part7-calc-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -165,6 +167,7 @@ jobs:
           - part6-traceroute-py
           - part6-ebpf-py
           - part6-netdiag-py
+          - part7-calc-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

@@ -1,0 +1,591 @@
+---
+title: "Constrói o Teu Próprio Interpretador — Expressões"
+description: "Constrói um interpretador completo e minúsculo em Rust, Go e Python — um lexer, um parser recursive-descent, e um evaluator tree-walking para aritmética inteira. As mesmas três fases que toda a linguagem real tem, testadas e byte-idênticas, pequenas o suficiente para caberem na tua cabeça."
+difficulty: advanced
+estimatedMinutes: 40
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+import PyRunner from '../../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={40} languages={["python", "go", "rust"]} />
+
+<Badge text="Constrói o Teu Próprio X" variant="tip" size="large" />
+
+Nada desmistifica as linguagens de programação como construir uma. Este novo track
+faz exatamente isso, e começa aqui — com o menor interpretador completo que ainda é
+*real*: recebe texto-fonte como `2 * (3 + 4) - 10 / 3`, e computa `11`. Por mais
+minúsculo que seja, tem **as três fases exatas que toda a implementação de
+linguagem tem**, do Python a um compilador de produção:
+
+<Mermaid title="O pipeline universal de um interpretador — as mesmas três fases em toda a linguagem" code={`flowchart LR
+  S["texto-fonte<br/>'1 + 2 * 3'"] -->|lexer| T["tokens<br/>1 + 2 * 3"]
+  T -->|parser| A["árvore de sintaxe<br/>(+ 1 (* 2 3))"]
+  A -->|evaluator| V["valor<br/>7"]`} />
+
+<Aside type="note" title="Porquê aritmética inteira — e porque é esse o ponto">
+  A linguagem aqui é aritmética inteira: `+ - * /`, parênteses, e menos unário, com
+  `/` como divisão inteira truncada para zero. Manter em inteiros faz cada
+  resultado ser *exato*, então as três implementações produzem output
+  **byte-idêntico** — o lexer, o parser e o evaluator são a lição, não a formatação
+  de vírgula flutuante. Floats, variáveis e funções são para onde o track vai a
+  seguir; a maquinaria que constróis aqui carrega tudo isso.
+</Aside>
+
+Código:
+[`examples/part7-calc-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint limpos, 6 testes cada, o output do REPL (árvore de sintaxe + valor)
+**byte-idêntico nas três linguagens** (sha256).
+
+## Fase 1 — o lexer: texto em tokens
+
+O lexer (ou *tokenizer*) é a fase mais simples: percorre os caracteres da esquerda
+para a direita e agrupa-os em **tokens** — as palavras da linguagem. `12 + 3` torna-se
+três tokens: o número `12`, um `+`, o número `3`. O espaço em branco é saltado;
+qualquer coisa não reconhecida é um erro.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+def tokenize(src: str) -> list[Token]:
+    tokens: list[Token] = []
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c in " \t\n\r":
+            i += 1
+        elif c in "+-*/()":
+            tokens.append(Token(c))
+            i += 1
+        elif c.isdigit():
+            start = i
+            while i < len(src) and src[i].isdigit():
+                i += 1
+            tokens.append(Token("n", int(src[start:i])))   # número multi-dígito
+        else:
+            raise CalcError(f"unexpected character '{c}'")
+    return tokens
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+func Tokenize(src string) ([]Token, error) {
+	var tokens []Token
+	r := []rune(src)
+	i := 0
+	for i < len(r) {
+		c := r[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '+' || c == '-' || c == '*' || c == '/' || c == '(' || c == ')':
+			tokens = append(tokens, Token{Kind: byte(c)})
+			i++
+		case c >= '0' && c <= '9':
+			start := i
+			for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+				i++
+			}
+			n, _ := strconv.ParseInt(string(r[start:i]), 10, 64) // número multi-dígito
+			tokens = append(tokens, Token{Kind: 'n', Num: n})
+		default:
+			return nil, fmt.Errorf("unexpected character '%c'", c)
+		}
+	}
+	return tokens, nil
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            ' ' | '\t' | '\n' | '\r' => i += 1,
+            '+' => { tokens.push(Token::Plus); i += 1; }
+            '-' => { tokens.push(Token::Minus); i += 1; }
+            '*' => { tokens.push(Token::Star); i += 1; }
+            '/' => { tokens.push(Token::Slash); i += 1; }
+            '(' => { tokens.push(Token::LParen); i += 1; }
+            ')' => { tokens.push(Token::RParen); i += 1; }
+            '0'..='9' => {
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() { i += 1; }
+                let text: String = chars[start..i].iter().collect();
+                let n = text.parse::<i64>().map_err(|_| format!("number too large: {text}"))?;
+                tokens.push(Token::Num(n));
+            }
+            _ => return Err(format!("unexpected character '{c}'")),
+        }
+    }
+    Ok(tokens)
+}
+```
+O Rust modela o token como um `enum` — um conjunto *fechado* de possibilidades que
+o compilador verifica exaustivamente; o Go usa uma pequena struct (`Kind` byte +
+`Num`), o Python uma frozen dataclass. Mesma ideia, três sistemas de tipos.
+</TabItem>
+</Tabs>
+
+A única subtileza são os **números multi-dígito**: quando chegas a um dígito
+continuas a consumir dígitos até não haver mais, então `12` torna-se um token
+`Num(12)`, não dois. Esse loop interno é o lexer em miniatura — agrupar caracteres
+que pertencem juntos.
+
+## Fase 2 — o parser: tokens numa árvore
+
+Uma lista plana de tokens não captura que o `*` liga mais forte que o `+`. O parser
+transforma tokens numa **árvore de sintaxe abstrata (AST)** cuja *forma* codifica a
+precedência: `1 + 2 * 3` tem de se tornar `+(1, *(2, 3))`, nunca `*(+(1, 2), 3)`.
+
+A técnica é **recursive descent**: uma função por nível de precedência, cada uma a
+chamar a mais forte. A gramática *é* o código:
+
+```text
+expr   := term (('+' | '-') term)*        ← precedência mais baixa
+term   := factor (('*' | '/') factor)*    ← liga mais forte
+factor := Num | '(' expr ')' | '-' factor ← mais forte: átomos e parênteses
+```
+
+Como o `term` é chamado pelo `expr`, a multiplicação é agrupada *antes* de a adição
+ter hipótese — a precedência sai da estrutura de chamadas de graça.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+class _Parser:
+    def expr(self) -> Expr:  # expr := term (('+' | '-') term)*
+        left = self.term()
+        while (t := self._peek()) is not None and t.kind in "+-":
+            self.pos += 1
+            left = Expr(t.kind, left=left, right=self.term())
+        return left
+
+    def term(self) -> Expr:  # term := factor (('*' | '/') factor)*
+        left = self.factor()
+        while (t := self._peek()) is not None and t.kind in "*/":
+            self.pos += 1
+            left = Expr(t.kind, left=left, right=self.factor())
+        return left
+
+    def factor(self) -> Expr:  # factor := Num | '(' expr ')' | '-' factor
+        t = self._next()
+        if t is None:
+            raise CalcError("unexpected end of input")
+        if t.kind == "n":
+            return Expr("n", num=t.num)
+        if t.kind == "-":
+            return Expr("u", left=self.factor())       # menos unário
+        if t.kind == "(":
+            inner = self.expr()
+            if (close := self._next()) is None or close.kind != ")":
+                raise CalcError("expected ')'")
+            return inner
+        raise CalcError(f"unexpected token '{t.kind}'")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+// expr := term (('+' | '-') term)*
+func (p *parser) expr() (*Expr, error) {
+	left, err := p.term()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t, ok := p.peek()
+		if !ok || (t.Kind != '+' && t.Kind != '-') {
+			return left, nil
+		}
+		p.pos++
+		right, err := p.term()
+		if err != nil {
+			return nil, err
+		}
+		left = &Expr{Kind: t.Kind, L: left, R: right}
+	}
+}
+
+// factor := Num | '(' expr ')' | '-' factor
+func (p *parser) factor() (*Expr, error) {
+	t, ok := p.next()
+	if !ok {
+		return nil, fmt.Errorf("unexpected end of input")
+	}
+	switch t.Kind {
+	case 'n':
+		return &Expr{Kind: 'n', Num: t.Num}, nil
+	case '-':
+		inner, err := p.factor() // menos unário
+		if err != nil {
+			return nil, err
+		}
+		return &Expr{Kind: 'u', L: inner}, nil
+	case '(':
+		inner, err := p.expr()
+		if err != nil {
+			return nil, err
+		}
+		if rp, ok := p.next(); !ok || rp.Kind != ')' {
+			return nil, fmt.Errorf("expected ')'")
+		}
+		return inner, nil
+	default:
+		return nil, fmt.Errorf("unexpected token '%c'", t.Kind)
+	}
+}
+```
+(O `term` espelha o `expr` com `*` e `/`.)
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// expr := term (('+' | '-') term)*
+fn expr(&mut self) -> Result<Expr, String> {
+    let mut left = self.term()?;
+    while let Some(op) = match self.peek() {
+        Some(Token::Plus) => Some('+'),
+        Some(Token::Minus) => Some('-'),
+        _ => None,
+    } {
+        self.pos += 1;
+        let right = self.term()?;
+        left = Expr::Bin(op, Box::new(left), Box::new(right));
+    }
+    Ok(left)
+}
+
+// factor := Num | '(' expr ')' | '-' factor
+fn factor(&mut self) -> Result<Expr, String> {
+    match self.next() {
+        Some(Token::Num(n)) => Ok(Expr::Num(n)),
+        Some(Token::Minus) => Ok(Expr::Neg(Box::new(self.factor()?))), // menos unário
+        Some(Token::LParen) => {
+            let inner = self.expr()?;
+            match self.next() {
+                Some(Token::RParen) => Ok(inner),
+                _ => Err("expected ')'".to_string()),
+            }
+        }
+        Some(t) => Err(format!("unexpected token {t:?}")),
+        None => Err("unexpected end of input".to_string()),
+    }
+}
+```
+A AST recursiva precisa de um ponteiro no heap — o `Box` do Rust, o `*Expr` do Go,
+as referências de objeto do Python — porque um nó da árvore contém outros nós.
+</TabItem>
+</Tabs>
+
+Dois detalhes tornam-no robusto. O **menos unário** é tratado no `factor`, então
+`-7 / 2` faz parse como `(/ (neg 7) 2)` — o `neg` liga mais forte que o `/`,
+correspondendo à forma como o lês. E depois do parse, o `parse()` verifica que
+*todos* os tokens foram consumidos, então `1 2` é um erro limpo "unexpected trailing
+input" em vez de ignorar silenciosamente o `2`.
+
+## Fase 3 — o evaluator: a árvore num valor
+
+Com uma árvore, a avaliação é quase anticlimática — um **tree walk**: recorre a
+cada nó, computa os filhos, combina. É o núcleo de todo o interpretador
+tree-walking (o próprio compilador de bytecode do Python é uma versão mais
+sofisticada disto).
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+def evaluate(e: Expr) -> int:
+    if e.kind == "n":
+        return e.num
+    if e.kind == "u":
+        return -evaluate(e.left)
+    a, b = evaluate(e.left), evaluate(e.right)
+    if e.kind == "+": return a + b
+    if e.kind == "-": return a - b
+    if e.kind == "*": return a * b
+    if e.kind == "/":
+        if b == 0:
+            raise CalcError("division by zero")
+        return _trunc_div(a, b)   # trunca para zero, não o floor // do Python
+    raise CalcError("unreachable")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+func Eval(e *Expr) (int64, error) {
+	switch e.Kind {
+	case 'n':
+		return e.Num, nil
+	case 'u':
+		v, err := Eval(e.L)
+		return -v, err
+	default:
+		a, err := Eval(e.L)
+		if err != nil {
+			return 0, err
+		}
+		b, err := Eval(e.R)
+		if err != nil {
+			return 0, err
+		}
+		switch e.Kind {
+		case '+':
+			return a + b, nil
+		case '-':
+			return a - b, nil
+		case '*':
+			return a * b, nil
+		case '/':
+			if b == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			return a / b, nil // o / inteiro do Go trunca para zero
+		}
+		return 0, fmt.Errorf("unreachable")
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn eval(e: &Expr) -> Result<i64, String> {
+    match e {
+        Expr::Num(n) => Ok(*n),
+        Expr::Neg(inner) => Ok(-eval(inner)?),
+        Expr::Bin(op, l, r) => {
+            let a = eval(l)?;
+            let b = eval(r)?;
+            match op {
+                '+' => Ok(a + b),
+                '-' => Ok(a - b),
+                '*' => Ok(a * b),
+                '/' => {
+                    if b == 0 {
+                        Err("division by zero".to_string())
+                    } else {
+                        Ok(a / b) // o / de i64 do Rust trunca para zero
+                    }
+                }
+                _ => unreachable!("parser only produces + - * /"),
+            }
+        }
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="A única armadilha cross-language: arredondamento da divisão">
+  O `/` aqui trunca para zero, então `-7 / 2` é `-3`. O `/` inteiro do Rust e do Go
+  já fazem isto — mas o `//` do Python faz *floor*, dando `-4`. Para manter as três
+  byte-idênticas, o Python implementa a truncagem explicitamente
+  (`abs(a) // abs(b)`, depois corrige o sinal). É a mesma lição de toda a armadilha
+  de arredondamento nesta Academia: aritmética "óbvia" difere entre linguagens, e
+  só construir a mesma coisa três vezes te faz ver isso.
+</Aside>
+
+Para tornar a árvore visível, o código também a renderiza como uma **S-expression**
+totalmente parentetizada, para que consigas *ver* o que o parser decidiu. O REPL
+imprime ambos, byte-idênticos nas três linguagens:
+
+```text
+$ calc "2 * (3 + 4) - 10 / 3"
+2 * (3 + 4) - 10 / 3  =>  (- (* 2 (+ 3 4)) (/ 10 3))  =>  11
+
+$ printf '1 + 2 * 3\n-7 / 2\n1 / 0\n' | calc
+1 + 2 * 3  =>  (+ 1 (* 2 3))  =>  7
+-7 / 2  =>  (/ (neg 7) 2)  =>  -3
+1 / 0  =>  error: division by zero
+```
+
+## Corre o interpretador no teu browser
+
+Aqui está o pipeline inteiro — lexer, parser, evaluator — como um programa Python
+auto-contido. Edita as expressões e carrega em **Run**; executa localmente no teu
+browser (via Pyodide), para que possas ver a tua própria linguagem a interpretar o
+que quer que escrevas:
+
+<PyRunner code={`def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c in " \\t": i += 1
+        elif c in "+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(self, t): self.t, self.i = t, 0
+    def peek(self): return self.t[self.i] if self.i < len(self.t) else None
+    def nxt(self):
+        v = self.peek(); self.i += 1; return v
+    def expr(self):
+        n = self.term()
+        while self.peek() in ("+", "-"):
+            op = self.nxt(); n = (op, n, self.term())
+        return n
+    def term(self):
+        n = self.factor()
+        while self.peek() in ("*", "/"):
+            op = self.nxt(); n = (op, n, self.factor())
+        return n
+    def factor(self):
+        t = self.nxt()
+        if isinstance(t, int): return t
+        if t == "-": return ("neg", self.factor())
+        if t == "(":
+            n = self.expr()
+            if self.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+def ev(n):
+    if isinstance(n, int): return n
+    if n[0] == "neg": return -ev(n[1])
+    a, b = ev(n[1]), ev(n[2])
+    if n[0] == "+": return a + b
+    if n[0] == "-": return a - b
+    if n[0] == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+# edita estas expressoes e carrega em Run:
+for src in ["1 + 2 * 3", "(1 + 2) * 3", "-7 / 2", "2 * (3 + 4) - 10 / 3"]:
+    try:
+        print(f"{src:<22} = {ev(P(tokenize(src)).expr())}")
+    except ValueError as e:
+        print(f"{src:<22} -> error: {e}")`} label="Python · o teu interpretador · corre no teu browser" />
+
+## Exercícios
+
+**1. Adiciona um operador de módulo `%` (nas três).** Tem a mesma precedência que o
+`*` e o `/`. Que única função tocas no lexer, qual no parser, e qual no evaluator? O
+que deve `7 % 0` fazer?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Três edições minúsculas, uma por fase: o lexer ganha um token `%`, a regra `term`
+do parser aceita `%` ao lado de `*` e `/`, e o evaluator adiciona um caso `%`
+(erro num divisor zero, exatamente como o `/`). Esse operador tocar exatamente uma
+linha em cada fase é o objetivo todo do design de três fases: cada fase tem uma
+única responsabilidade, então um novo operador é uma mudança local, não uma
+reescrita. É por isso que as implementações de linguagem reais são estruturadas
+assim.
+
+</details>
+
+**2. Suporta o operador de potência `^` com associatividade à direita (pesquisa +
+uma linguagem).** Ao contrário do `+` e do `*`, `2 ^ 3 ^ 2` deve ser
+`2 ^ (3 ^ 2) = 512`, não `(2 ^ 3) ^ 2 = 64`. Porque é que o loop associativo à
+esquerda usado para `+`/`*` produz a árvore errada, e como é que a recursão o
+corrige?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O `while` no `expr`/`term` constrói uma árvore inclinada à *esquerda* (cada novo
+operador envolve o lado esquerdo acumulado), o que é correto para operadores
+associativos à esquerda. Para associatividade à direita *recorres* no lado direito:
+`power := factor ('^' power)?` — depois de ler um `^`, chamas `power` outra vez para
+o lado direito, para que o `^` mais à direita seja avaliado primeiro. A
+associatividade, como a precedência, é expressa puramente na *forma* das regras da
+gramática, que é a lição mais profunda: a estrutura da árvore é o significado.
+
+</details>
+
+**3. Adiciona variáveis e uma atribuição (qualquer linguagem).** Deixa `x = 5`
+ligar um nome, e `x * 2` lê-lo. Vais precisar de um token para identificadores, uma
+distinção entre statement e expressão, e um *environment* (um mapa nome→valor)
+passado através do `eval`. No que se torna o environment quando mais tarde
+adicionas funções?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O lexer ganha um token de identificador; o parser distingue uma statement de
+atribuição de uma expressão; e o `eval` recebe um dict/mapa de environment que lê e
+escreve. Esse environment é a semente de tudo o que se segue: adiciona funções e
+cada chamada ganha o seu *próprio* environment encadeado a um envolvente — essa
+cadeia de scopes é exatamente como closures, scoping léxico, e a call stack
+funcionam. Construíste o esqueleto de um interpretador real; o environment é onde a
+sua memória vive.
+
+</details>
+
+<Quiz
+  question={'O parser transforma 1 + 2 * 3 na árvore (+ 1 (* 2 3)) e não em (* (+ 1 2) 3). O que faz a precedência sair certa?'}
+  options={[
+    { text: 'A gramática tem uma função por nível de precedência, e a regra de precedência mais baixa (expr, para + e -) chama a de precedência mais alta (term, para * e /); então a multiplicação é sempre agrupada numa subárvore antes de a adição combinar as peças', correct: true, explanation: 'Essa estrutura de chamadas É a precedência. Como o expr chama o term para cada um dos seus operandos, qualquer sequência de * e / é totalmente parseada numa subárvore antes de o + ou - envolvente as combinar. A precedência não é uma tabela de lookup — sai de qual regra chama qual, que é a elegância do recursive descent.' },
+    { text: 'O evaluator reordena as operações depois do parse para respeitar a precedência', correct: false, explanation: 'O evaluator não reordena nada — percorre a árvore exatamente como construída. A precedência é decidida inteiramente pelo parser através da forma da árvore; à hora da avaliação a estrutura já codifica o agrupamento correto.' },
+    { text: 'O lexer emite os tokens por ordem de precedência', correct: false, explanation: 'O lexer só agrupa caracteres em tokens da esquerda para a direita; não sabe nada sobre precedência e emite-os por ordem de fonte. A precedência é o trabalho do parser, via as suas regras de gramática.' },
+    { text: 'Um número de precedência anexado a cada token de operador é comparado durante a avaliação', correct: false, explanation: 'Esta calculadora não anexa números de precedência e não compara nada à hora do eval — a precedência é estrutural, codificada por qual regra da gramática (expr vs term) parseia quais operadores. (Parsers precedence-climbing usam números, mas é uma técnica diferente do recursive-descent mostrado aqui.)' },
+  ]}
+/>
+
+<Quiz
+  question={'As três implementações produzem output byte-idêntico, mas a divisão de -7 / 2 precisou de cuidado especial em Python. Porquê?'}
+  options={[
+    { text: 'A linguagem trunca a divisão para zero (-7 / 2 = -3), o que o / inteiro do Rust e do Go já fazem, mas o // do Python faz floor (dando -4) — então o Python implementa a truncagem explicitamente para corresponder', correct: true, explanation: 'A divisão inteira arredonda de forma diferente por omissão: Rust e Go truncam para zero, o Python faz floor para menos infinito. Para -7 / 2 isso é -3 vs -4. Para manter as três byte-idênticas a versão Python divide os valores absolutos e reaplica o sinal, reproduzindo a truncagem. É a mesma armadilha "aritmética óbvia difere entre linguagens" que a Academia continua a trazer à superfície.' },
+    { text: 'O Python não consegue fazer divisão inteira de todo', correct: false, explanation: 'O Python faz divisão inteira bem com o //; o problema é só a sua direção de arredondamento (floor) diferir do Rust/Go (truncar), então o resultado para negativos discorda a menos que a truncagem seja feita explicitamente.' },
+    { text: 'O Rust e o Go arredondam a divisão para o número par mais próximo', correct: false, explanation: 'Nenhum arredonda para o par-mais-próximo na divisão inteira; ambos truncam para zero. A discrepância é especificamente o floor do Python vs a truncagem dos outros, não banker\'s rounding.' },
+    { text: 'O parser constrói uma árvore diferente em Python', correct: false, explanation: 'A árvore é idêntica nas três — a diferença é puramente em como o evaluator faz a divisão inteira. A correção vive no eval, não no parser.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="Explica-me o que acontece quando um interpretador corre uma linha de código-fonte.">
+
+Três fases, sempre. Primeiro **lexing**: percorre os caracteres crus e agrupa-os em
+tokens — números, identificadores, operadores, pontuação — descartando o espaço em
+branco. Isto transforma uma string numa sequência plana de unidades com significado
+e apanha caracteres estranhos cedo. Segundo **parsing**: consome os tokens e
+constrói uma árvore de sintaxe abstrata cuja estrutura codifica a gramática — a
+precedência e a associatividade de operadores tornam-se a *forma* da árvore, então
+`1 + 2 * 3` aninha a multiplicação abaixo da adição. O recursive descent faz isto
+com uma função por nível de precedência, cada uma a chamar a que liga mais forte; o
+parser também reporta erros de sintaxe como um parêntese não fechado ou tokens a
+mais. Terceiro **avaliação**: percorre a árvore, computando cada nó dos seus filhos
+— um número avalia para si próprio, um nó binário avalia os seus operandos e depois
+combina-os. Isso é um interpretador tree-walking. Sistemas maiores inserem fases —
+um compilador baixa a árvore para bytecode ou código de máquina, adiciona um type
+checker ou optimizer — mas o front end é sempre este mesmo pipeline
+lex-depois-parse-depois-processa, que é porque construir até uma calculadora de
+quatro operadores ensina a forma de toda a implementação de linguagem.
+
+</Interview>
+
+## O track à frente
+
+Esta é a lição um de *Constrói o Teu Próprio Interpretador*. Tens agora o esqueleto
+que toda a linguagem partilha — um lexer, um parser recursive-descent a produzir uma
+AST, e um evaluator tree-walking — e construíste-o de três formas, testado e
+byte-idêntico. Daqui a linguagem cresce ao longo dos exercícios: vírgula flutuante e
+mais operadores, **variáveis e um environment**, depois **funções e closures** (onde
+o environment se torna uma cadeia de scopes), e eventualmente **statements, controlo
+de fluxo, e a tua própria pequena linguagem de programação**. Cada passo reutiliza
+esta maquinaria exata. O mistério de "como é que uma linguagem *funciona*" desaparece:
+faz lex, faz parse, percorre uma árvore — e agora consegues construir uma.
+
+## Referências & leitura adicional
+
+- [Crafting Interpreters](https://craftinginterpreters.com/) de Robert Nystrom — o livro definitivo e gratuito sobre construir uma linguagem; esta lição é uma rampa de acesso em três linguagens a ele
+- [Recursive descent parsing](https://en.wikipedia.org/wiki/Recursive_descent_parser) — a técnica que o parser usa
+- [Pratt parsing](https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html) — uma alternativa elegante para precedência, vale a pena estudar a seguir
+- A [lição do test framework](/systems-programming-academy/pt/part-5-frameworks/test-framework/) — outro projeto "constrói a ferramenta que usas" nesta Academia
+
+<Progress />

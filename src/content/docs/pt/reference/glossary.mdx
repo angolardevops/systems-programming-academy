@@ -1,0 +1,120 @@
+---
+title: "Glossário"
+description: "Os termos centrais que esta academia usa em Python, Go e Rust — ownership, goroutines, o GIL, zero-cost abstractions, eBPF e mais — cada um definido numa frase ou duas e ligado à lição que o ensina."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Uma referência rápida e com links cruzados para o vocabulário que atravessa a
+academia. Cada termo é definido de forma breve, marcado com a linguagem a que mais
+pertence e — quando uma lição o ensina a fundo — ligado a essa lição. Quando um
+conceito existe em mais de uma linguagem com nomes diferentes (interface vs trait
+vs protocol), as entradas apontam umas para as outras.
+
+<Aside type="tip" title="Os termos são ferramentas, não trivialidades">
+  O objectivo de um vocabulário partilhado é a precisão: "isto é uma data race, não
+  só um bug" diz-te exactamente ao que recorrer. Quando uma definição nomeia um
+  trade-off, a [síntese das três linguagens](/systems-programming-academy/pt/capstone/three-languages/)
+  costuma ter os números medidos por trás.
+</Aside>
+
+## A
+
+**Async/await** *(as três)* — Uma sintaxe para escrever código concorrente e não-bloqueante que se lê como código sequencial: o `await` suspende uma tarefa numa fronteira de I/O para o runtime correr outra. O `asyncio` do Python, o `async`/`.await` do Rust e o escalonamento implícito do Go atacam todos o mesmo problema. Ver [Async I/O](/systems-programming-academy/pt/part-4-concurrency/async-io/).
+
+**Atomic** *(Go, Rust)* — Uma operação sobre um único valor que completa de forma indivisível, sem lock, porque compila para uma instrução de CPU. A academia mediu atomics a custar ~50 ms em Go e Rust — idêntico, porque a linguagem é irrelevante quando emites a mesma instrução. Ver [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/).
+
+## B
+
+**Borrowing** *(Rust)* — Aceder a um valor através de uma referência (`&T` partilhada, ou `&mut T` exclusiva) sem tomar ownership, para que o dono a mantenha. A regra — muitos borrows partilhados *ou* um borrow mutável, nunca ambos — é o que torna as data races um erro de compilação. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+
+**Byte-identical** *(o método de verificação da academia)* — A disciplina de construir o mesmo programa de três formas e confirmar que as saídas são literalmente os mesmos bytes antes de comparar desempenho. É como a academia prova que um benchmark mede trabalho idêntico, e não três programas diferentes; o método importa mais do que qualquer número que produza.
+
+## C
+
+**Channel** *(Go, Rust)* — Um canal tipado que passa valores entre tarefas concorrentes, sincronizando-as pela própria transferência. O lema do Go é "partilha memória comunicando"; o Rust oferece `std::sync::mpsc`. Ver [Message Passing](/systems-programming-academy/pt/part-4-concurrency/message-passing/).
+
+**Checksum** *(redes)* — Um valor pequeno calculado a partir de um bloco de bytes para detectar corrupção em trânsito; os cabeçalhos ICMP e IP levam um. Calculá-lo correctamente à mão faz parte de construir o `ping`. Ver [Ping](/systems-programming-academy/pt/part-6-cli-tools/ping/).
+
+**Closure** *(as três)* — Um valor-função que captura variáveis do scope onde foi definido. Python e Go capturam por referência; os closures de Rust capturam por borrow, por borrow mutável, ou por `move` (tomando ownership), razão pela qual `move ||` aparece ao lançar threads.
+
+## D
+
+**Data race** *(as três)* — Duas threads a aceder à mesma memória em concorrência, com pelo menos uma escrita e sem sincronização — comportamento indefinido. O Rust rejeita-a em tempo de compilação (`E0499`), o detector `-race` do Go encontra-a em runtime se um teste lá chegar, e o GIL do Python estreita mas não fecha a janela. Ver [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/).
+
+**Deadlock** *(as três)* — Um impasse em que cada tarefa espera por um recurso que outra segura, e nenhuma avança. Causa clássica: dois locks adquiridos em ordens opostas por duas threads. Ordem consistente de locks ou channels evitam-no.
+
+**Dependency injection** *(padrão de design)* — Passar a um componente os seus colaboradores a partir de fora, em vez de o deixar construí-los, para que o comportamento se possa trocar e testar. Ver [DI Container](/systems-programming-academy/pt/part-5-frameworks/di-container/).
+
+**Duck typing** *(Python)* — "Se anda como um pato e grasna como um pato, é um pato": o Python liga a que um objecto tenha os métodos que chamas, não à classe que é. A tipagem estrutural (ver Protocol) é a versão verificada por tipos da mesma ideia. Ver [Data Model](/systems-programming-academy/pt/part-1-foundations/python/data-model/).
+
+## E
+
+**eBPF** *(sistemas Linux)* — Uma facilidade do Linux para correr pequenos programas verificados dentro do kernel para observar ou filtrar eventos (syscalls, pacotes) sem alterar o kernel. Sustenta o tracing moderno de baixo overhead. Ver [eBPF Observability](/systems-programming-academy/pt/part-6-cli-tools/ebpf-observability/).
+
+**Event loop** *(Python, async)* — O escalonador de thread única no coração do async I/O: corre as tarefas prontas e, quando uma faz await, estaciona-a e escolhe outra. Dá concorrência sem threads — mas num só core, razão pela qual o servidor asyncio do Python serializou o trabalho de CPU nos testes da academia. Ver [Async I/O](/systems-programming-academy/pt/part-4-concurrency/async-io/).
+
+## G
+
+**Generics / type parameters** *(Go, Rust; Python via hints)* — Código escrito uma vez contra um tipo de placeholder (`T`) e reutilizado para muitos tipos concretos com verificação de tipos completa. O Rust monomorfiza-os em compilação (custo zero); o Go acrescentou-os na 1.18. Ver [Go: Generics](/systems-programming-academy/pt/part-1-foundations/go/generics/) · [Rust: Generics](/systems-programming-academy/pt/part-1-foundations/rust/generics/).
+
+**Generator** *(Python)* — Uma função que usa `yield` para produzir valores de forma preguiçosa, um de cada vez, mantendo o estado entre chamadas. É a forma nativa do Python de escrever um iterador sem uma classe. Ver [Iteradores](/systems-programming-academy/pt/part-1-foundations/python/iterators/).
+
+**GIL (Global Interpreter Lock)** *(Python)* — Um único lock no CPython que deixa apenas uma thread executar bytecode Python de cada vez, pelo que as threads nunca paralelizam trabalho CPU-bound — a academia mediu quatro threads a correr *mais devagar* do que uma. É por isso que o Python escala trabalho de CPU com processos ou código nativo, e trabalho de I/O com threads ou asyncio. Ver [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/).
+
+**Goroutine** *(Go)* — Uma thread leve gerida pelo runtime do Go, barata o suficiente para lançar aos milhares; o escalonador multiplexa-as sobre threads do SO. Goroutine-por-ligação foi o que venceu o teste de débito de servidor da academia. Ver [Go: Concorrência](/systems-programming-academy/pt/part-1-foundations/go/concurrency/).
+
+## I
+
+**Interface** *(Go)* — Um conjunto de assinaturas de métodos; qualquer tipo com esses métodos satisfá-la *implicitamente*, sem palavra-chave `implements`. O `error` do Go é uma interface de um só método. Os equivalentes são a trait do Rust e o protocol do Python. Ver [Go: Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/).
+
+**Interior mutability** *(Rust)* — Mutar dados através de uma referência partilhada (`&`) movendo a verificação de borrow para runtime — `RefCell<T>` para código de thread única (faz panic na violação), `Mutex`/`RwLock` entre threads. A válvula de escape para quando as regras de compilação são demasiado estritas. Ver [Smart Pointers](/systems-programming-academy/pt/part-1-foundations/rust/smart-pointers/).
+
+**Iterator** *(as três)* — Um objecto que produz elementos um de cada vez via um protocolo "next", permitindo pipelines preguiçosas (filter, map, take) sem construir colecções intermédias. Os iteradores do Rust são zero-cost; os do Python são `__next__`; o Go 1.23 acrescentou range-over-func. Ver [Rust: Colecções](/systems-programming-academy/pt/part-1-foundations/rust/collections/) · [Python: Iteradores](/systems-programming-academy/pt/part-1-foundations/python/iterators/).
+
+## L
+
+**Lifetime** *(Rust)* — A região de compilação para a qual uma referência é válida, escrita `'a` quando o compilador precisa de ajuda a relacionar entradas com saídas. Os lifetimes não têm custo em runtime; são a contabilidade que prova que nenhuma referência sobrevive aos seus dados. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+
+## M
+
+**Middleware** *(frameworks web)* — Uma função que envolve um handler de pedido para acrescentar comportamento transversal — logging, auth, compressão — correndo antes e/ou depois dele, compondo como camadas. Ver [Routing e Middleware](/systems-programming-academy/pt/part-5-frameworks/routing-middleware/).
+
+**Move semantics** *(Rust; também nuance de Go/Python)* — Transferir o ownership de um valor de modo que a antiga ligação fica inválida, garantindo que o valor é libertado exactamente uma vez. `let w = v;` num tipo não-`Copy` move-o; usar `v` depois é um erro de compilação. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+
+**Mutex** *(Go, Rust, Python)* — Um lock de exclusão mútua que serializa o acesso a dados partilhados, de modo que só uma thread está na secção crítica. Mesmo nome, maquinaria diferente: a academia mediu o mutex contendido do Go (112 ms) a bater o `std::sync::Mutex` do Rust (356 ms) em 3× sob contenção brutal, porque o do Go integra com o seu escalonador enquanto o do Rust faz chamadas futex ao kernel. Ver [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/).
+
+## O
+
+**Ownership** *(Rust)* — A regra de que cada valor tem exactamente um dono, e quando o dono sai de scope o valor é dropped (libertado) — segurança de memória sem garbage collector, verificada inteiramente em compilação. A ideia que faz do Rust *Rust*. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+
+## P
+
+**Protocol (structural typing)** *(Python)* — Um `typing.Protocol` que descreve os métodos que um tipo deve ter; qualquer objecto com eles conforma, verificado estaticamente sem herança — duck typing que um type checker consegue verificar. O primo tipado da interface do Go. Ver [Protocols](/systems-programming-academy/pt/part-1-foundations/python/protocols/).
+
+## R
+
+**RAII (Resource Acquisition Is Initialization)** *(Rust, C++)* — Atar o tempo de vida de um recurso ao scope de um valor, de modo que a limpeza (fechar um ficheiro, largar um lock) acontece de forma determinística no `drop` quando o valor sai de scope — sem `finally`, sem close manual. O `MutexGuard` e o `File` do Rust ambos o usam.
+
+**Raw socket** *(redes)* — Um socket que expõe pacotes na camada IP, deixando-te forjar e ler cabeçalhos (ICMP, IP) directamente em vez de usar TCP/UDP — como o `ping` e o `traceroute` enviam as suas sondas, normalmente exigindo privilégio elevado. Ver [Ping](/systems-programming-academy/pt/part-6-cli-tools/ping/).
+
+## S
+
+**Smart pointer (Box / Rc / Arc)** *(Rust)* — Um tipo que possui dados na heap e acrescenta comportamento: `Box<T>` para ownership único na heap, `Rc<T>` para ownership partilhado via contagem de referências (thread única), `Arc<T>` para a versão atómica e segura entre threads. Ver [Smart Pointers](/systems-programming-academy/pt/part-1-foundations/rust/smart-pointers/).
+
+**Struct** *(Go, Rust; a dataclass do Python)* — Um tipo composto que agrupa campos com nome. Os métodos ligam-se a ele (Go via receivers, Rust via `impl`, Python via um corpo de classe). O simples portador de dados na base de todo o programa. Ver [Go: Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/).
+
+## T
+
+**Trait** *(Rust)* — Um conjunto nomeado de métodos que um tipo pode implementar, permitindo tanto dispatch estático (generics, monomorfizado) como dispatch dinâmico (`dyn Trait`). A resposta do Rust às interfaces, mas mais poderosa — também carrega tipos associados e métodos por omissão. Ver [Rust: Traits](/systems-programming-academy/pt/part-1-foundations/rust/traits/).
+
+## Z
+
+**Zero-cost abstraction** *(Rust)* — Um construto de alto nível — iteradores, generics, `Option` — que compila para código tão rápido como o equivalente de baixo nível escrito à mão, pelo que não pagas nada em runtime pela abstracção. O benchmark de ownership da academia mostrou o borrow idiomático a bater um clone feito à mão. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+
+## Onde tudo isto se junta
+
+Cada termo acima é um fio de uma só história: como três linguagens fazem
+trade-offs diferentes para os mesmos objectivos. A [síntese das três linguagens](/systems-programming-academy/pt/capstone/three-languages/)
+liga o vocabulário de concorrência — mutex, atomic, channel, GIL, data race — aos
+números que a academia de facto mediu.

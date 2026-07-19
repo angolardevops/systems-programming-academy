@@ -464,6 +464,17 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Part 7 · Build Your Own Interpreter',
+          translations: { 'pt-BR': 'Parte 7 · Constrói o Teu Interpretador' },
+          items: [
+            {
+              label: 'Expressions: Lexer, Parser, Evaluator',
+              translations: { 'pt-BR': 'Expressões: Lexer, Parser, Evaluator' },
+              slug: 'part-7-interpreter/expressions',
+            },
+          ],
+        },
+        {
           label: 'Capstone',
           translations: { 'pt-BR': 'Capstone' },
           items: [
@@ -484,6 +495,27 @@ export default defineConfig({
               translations: { 'pt-BR': 'As Três Linguagens, Comparadas' },
               slug: 'capstone/three-languages',
               badge: { text: 'Synthesis', variant: 'note' },
+            },
+          ],
+        },
+        {
+          label: 'Reference',
+          translations: { 'pt-BR': 'Referência' },
+          items: [
+            {
+              label: 'Rosetta Stone',
+              translations: { 'pt-BR': 'Pedra de Roseta' },
+              slug: 'reference/rosetta',
+            },
+            {
+              label: 'Glossary',
+              translations: { 'pt-BR': 'Glossário' },
+              slug: 'reference/glossary',
+            },
+            {
+              label: 'Decision Guides',
+              translations: { 'pt-BR': 'Guias de Decisão' },
+              slug: 'reference/decision-guides',
             },
           ],
         },

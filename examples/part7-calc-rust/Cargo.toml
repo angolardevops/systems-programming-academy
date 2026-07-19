@@ -1,0 +1,15 @@
+[package]
+name = "part7-calc-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: a complete tiny interpreter — lexer, recursive-descent parser,
+# and tree-walking evaluator — for an integer arithmetic language. The same three
+# stages every real interpreter has, small enough to hold in your head.
+
+[[bin]]
+name = "calc"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

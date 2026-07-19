@@ -1,0 +1,104 @@
+---
+title: "Guias de Decisão: Quando Usar o Quê"
+description: "Orientação prática e com opinião, ancorada apenas nos resultados medidos pela própria academia — que linguagem para um trabalho, threads vs async vs channels, mutex vs atomic vs channel, e quando usar uma biblioteca em vez de a construíres tu mesmo."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+As páginas de referência dizem-te *como*; esta ajuda-te a *escolher*. Cada regra
+abaixo está ancorada a um número que a academia mediu, não a reputação — para que
+possas pesar um trade-off em vez de seguir um slogan. Quando um guia enuncia uma
+regra prática, o número por trás dela liga à lição que o produziu.
+
+<Aside type="caution" title="Uma regra prática é um ponto de partida, não um veredicto">
+  Estes guias comprimem medições reais em heurísticas rápidas. São honestos para as
+  cargas que a academia correu numa máquina — e a meta-lição do curso inteiro é
+  *medires a tua*. Usa-os para formar uma hipótese depressa, e depois testa-a nos
+  teus inputs e no teu hardware.
+</Aside>
+
+## Que linguagem para este trabalho?
+
+Os números da academia apontam para uma divisão de trabalho clara. O Python é o
+mais rápido a *escrever*; o Go é feito para *serviços em rede e equipas*; o Rust
+vence onde os *limites da máquina apertam*. Nenhum é vencedor universal — o Go
+bateu o Rust no débito de servidor enquanto o Rust usou uma fracção da memória.
+
+| Caso de uso | Linguagem | Porquê (medido) |
+| --- | --- | --- |
+| Scripting, glue, dados/ML, exploração | **Python** | O mais rápido a escrever; a sua penalização de compute de ~7× é irrelevante quando os hot paths são nativos ou o programa corre uma vez |
+| Servidores em rede, concorrência, tooling de ops | **Go** | Melhor débito de servidor (~71k req/s vs 53k Rust, 13k Python); goroutines baratas, compilações quase instantâneas, um binário estático |
+| Sistemas críticos em memória/latência ou segurança | **Rust** | Menor footprint (2.3 MB RSS vs 10.5 Go, 22.2 Python); sem pausas de GC; classes inteiras de bugs impossíveis em compilação |
+| CLIs invocados milhares de vezes numa pipeline | **Rust ou Go** | Arranque de binário nativo ~2–3 ms vs os ~26 ms de boot do interpretador Python |
+
+Os valores de arranque e memória vêm da
+[síntese das três linguagens](/systems-programming-academy/pt/capstone/three-languages/);
+os valores de débito vêm do [servidor mini-NGINX](/systems-programming-academy/pt/part-4-concurrency/mini-nginx/).
+
+<Aside type="tip" title="A versão de uma linha">
+  Optimiza para o teu tempo → Python. Optimiza para lançar um serviço com uma
+  equipa → Go. Optimiza para os limites da máquina → Rust. Depois mede para
+  confirmar.
+</Aside>
+
+## Threads vs async vs channels
+
+Três formas de concorrência, cada uma melhor nalgum sítio — e a
+[Parte 4](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+mediu as três.
+
+- **Threads com estado partilhado** — Paralelismo genuíno entre cores, mas cada escrita partilhada precisa de sincronização, e errar isso é uma data race. Melhor para trabalho CPU-bound em Go e Rust. Em Python, o GIL faz com que threads CPU-bound **não dêem speedup** (quatro threads correram *mais devagar* do que uma), pelo que ali as threads são só para I/O.
+- **Async / um event loop** — Uma thread a fazer malabarismo com milhares de tarefas I/O-bound suspendendo em cada `await`. Excelente para I/O de alta concorrência; inútil para trabalho de CPU, que bloqueia o loop. O servidor asyncio do Python atingiu ~13k req/s num só core — o preço de serializar num único event loop. Ver [Async I/O](/systems-programming-academy/pt/part-4-concurrency/async-io/).
+- **Channels (message passing)** — As tarefas possuem os seus dados e comunicam enviando, pelo que não há estado partilhado para correr. O idioma por omissão do Go; muitas vezes o design correcto mais simples. Ver [Message Passing](/systems-programming-academy/pt/part-4-concurrency/message-passing/).
+
+**Regra prática:** I/O-bound e alta concorrência → async ou goroutines. CPU-bound →
+threads reais (Go/Rust) ou processos (Python). Partilhar estado entre tarefas →
+prefere um channel; recorre a um lock só quando um channel ficaria contorcido.
+
+## Regras rápidas por linguagem
+
+Três armadilhas que a academia assinala, uma por linguagem.
+
+- **Go — receiver por valor vs por ponteiro.** Usa um receiver por ponteiro (`func (r *Rect)`) quando o método muta o struct ou o struct é grande; usa um receiver por valor quando só lê um struct pequeno. Sê consistente dentro de um tipo — misturá-los é um smell. Ver [Go: Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/).
+- **Rust — borrow vs clone.** Por omissão faz borrow (`&T`, `&[T]`, `&str`); é mais seguro *e* mais rápido. O benchmark de ownership mostrou o borrow ~4.5× mais rápido do que clonar um `Vec` em cada chamada, porque o clone aloca e faz memcpy de cada vez. Recorre a `.clone()` por último, e torna o custo visível. Ver [Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/).
+- **Python — a armadilha do default mutável.** Um argumento por omissão como `def f(x, acc=[])` é criado *uma vez* e partilhado por todas as chamadas, pelo que as mutações vazam entre chamadas. Por omissão usa `None` e constrói dentro, ou usa `field(default_factory=list)` para dataclasses. Ver [Python: Type Hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/).
+
+## Mutex vs atomic vs channel para estado partilhado
+
+Quando duas tarefas tocam nos mesmos dados, escolhe pelo que estás a proteger — e
+sabe que o *mesmo primitivo custa quantias diferentes em linguagens diferentes*.
+
+| Necessidade | Recorre a | Nota das medições |
+| --- | --- | --- |
+| Um inteiro/flag actualizado em concorrência | **Atomic** | ~50 ms em Go e Rust — idêntico, porque ambos emitem a mesma instrução de CPU |
+| Um invariante de vários campos mantido junto | **Mutex** | O mutex contendido do Go (112 ms) bateu o `std::sync::Mutex` do Rust (356 ms) em 3× sob contenção brutal — o do Go integra com o escalonador, o do Rust faz chamadas futex ao kernel |
+| Entregar ownership entre tarefas | **Channel** | Sem memória partilhada para correr; o padrão por omissão do Go e muitas vezes o design mais claro |
+
+E a maior alavanca de todas: **a contenção, não o lock**. Fazer batch de um milhão
+de incrementos para bloquear *uma só vez* tornou o mutex ~1000× mais barato (0.3 ms).
+Se um lock está quente, a correcção costuma ser segurá-lo menos vezes, não trocar
+de primitivo. Todos os valores de [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/).
+
+**Regra prática:** um único valor → atomic; invariante agrupado → mutex; entrega de
+ownership → channel. Se um mutex for gargalo, reduz quantas vezes o tomas antes de
+recorrer a algo mais engenhoso.
+
+## Biblioteca vs construir tu mesmo
+
+A academia constrói tudo a partir da biblioteca padrão — um mini-NGINX, um query
+builder, um `ping` — *para ensinar*, não porque devas lançar versões feitas à mão.
+Saber como uma coisa funciona é exactamente o que te deixa usar bem a biblioteca e
+depurá-la quando parte.
+
+- **Constrói tu mesmo quando** o objectivo é compreender, a dependência é pesada face à necessidade, ou o problema é genuinamente o núcleo do teu domínio. O método inteiro da academia — construir de três formas, verificar byte-identical, medir — é uma disciplina de *aprendizagem*.
+- **Usa a biblioteca quando** estás a lançar: é testada, mantida, e trata de casos-limite em que não pensaste. A [app guestbook a correr](/systems-programming-academy/pt/capstone/running-app/) puxa deliberadamente um driver SQLite real em vez de reimplementar uma base de dados.
+
+**Regra prática:** constrói-a para a aprender, depois usa a biblioteca testada em
+batalha para a lançar — e usarás melhor essa biblioteca por teres construído uma
+vez.
+
+## Leitura adicional
+
+- A base medida para cada número aqui: [As Três Linguagens: Uma Comparação Medida](/systems-programming-academy/pt/capstone/three-languages/).
+- As lições de concorrência por trás da orientação sobre estado partilhado: [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/) · [Message Passing](/systems-programming-academy/pt/part-4-concurrency/message-passing/) · [Async I/O](/systems-programming-academy/pt/part-4-concurrency/async-io/) · [mini-NGINX](/systems-programming-academy/pt/part-4-concurrency/mini-nginx/).
+- As regras por linguagem a fundo: [Go: Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/) · [Rust: Ownership](/systems-programming-academy/pt/part-1-foundations/rust/ownership/) · [Python: Type Hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/).

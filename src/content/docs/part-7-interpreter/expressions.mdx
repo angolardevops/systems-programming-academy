@@ -1,0 +1,585 @@
+---
+title: "Build Your Own Interpreter — Expressions"
+description: "Build a complete tiny interpreter in Rust, Go, and Python — a lexer, a recursive-descent parser, and a tree-walking evaluator for integer arithmetic. The same three stages every real language has, tested and byte-identical, small enough to hold in your head."
+difficulty: advanced
+estimatedMinutes: 40
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+import PyRunner from '../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={40} languages={["python", "go", "rust"]} />
+
+<Badge text="Build Your Own X" variant="tip" size="large" />
+
+Nothing demystifies programming languages like building one. This new track does
+exactly that, and it starts here — with the smallest complete interpreter that is
+still *real*: it takes source text like `2 * (3 + 4) - 10 / 3`, and computes `11`.
+Tiny as it is, it has **the exact three stages every language implementation has**,
+from Python to a production compiler:
+
+<Mermaid title="The universal interpreter pipeline — the same three stages in every language" code={`flowchart LR
+  S["source text<br/>'1 + 2 * 3'"] -->|lexer| T["tokens<br/>1 + 2 * 3"]
+  T -->|parser| A["syntax tree<br/>(+ 1 (* 2 3))"]
+  A -->|evaluator| V["value<br/>7"]`} />
+
+<Aside type="note" title="Why integer arithmetic — and why that's the point">
+  The language here is integer arithmetic: `+ - * /`, parentheses, and unary
+  minus, with `/` as integer division truncated toward zero. Keeping it to
+  integers means every result is *exact*, so the three implementations produce
+  **byte-identical** output — the lexer, parser, and evaluator are the lesson, not
+  floating-point formatting. Floats, variables, and functions are where the track
+  goes next; the machinery you build here carries all of it.
+</Aside>
+
+Code:
+[`examples/part7-calc-{rust,go,py}/`](https://github.com/angolardevops/systems-programming-academy)
+— fmt/lint clean, 6 tests each, the REPL output (syntax tree + value)
+**byte-identical across all three languages** (sha256).
+
+## Stage 1 — the lexer: text into tokens
+
+The lexer (or *tokenizer*) is the simplest stage: scan the characters left to
+right and group them into **tokens** — the words of the language. `12 + 3` becomes
+three tokens: the number `12`, a `+`, the number `3`. Whitespace is skipped;
+anything unrecognized is an error.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+def tokenize(src: str) -> list[Token]:
+    tokens: list[Token] = []
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c in " \t\n\r":
+            i += 1
+        elif c in "+-*/()":
+            tokens.append(Token(c))
+            i += 1
+        elif c.isdigit():
+            start = i
+            while i < len(src) and src[i].isdigit():
+                i += 1
+            tokens.append(Token("n", int(src[start:i])))   # multi-digit number
+        else:
+            raise CalcError(f"unexpected character '{c}'")
+    return tokens
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+func Tokenize(src string) ([]Token, error) {
+	var tokens []Token
+	r := []rune(src)
+	i := 0
+	for i < len(r) {
+		c := r[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '+' || c == '-' || c == '*' || c == '/' || c == '(' || c == ')':
+			tokens = append(tokens, Token{Kind: byte(c)})
+			i++
+		case c >= '0' && c <= '9':
+			start := i
+			for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+				i++
+			}
+			n, _ := strconv.ParseInt(string(r[start:i]), 10, 64) // multi-digit number
+			tokens = append(tokens, Token{Kind: 'n', Num: n})
+		default:
+			return nil, fmt.Errorf("unexpected character '%c'", c)
+		}
+	}
+	return tokens, nil
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            ' ' | '\t' | '\n' | '\r' => i += 1,
+            '+' => { tokens.push(Token::Plus); i += 1; }
+            '-' => { tokens.push(Token::Minus); i += 1; }
+            '*' => { tokens.push(Token::Star); i += 1; }
+            '/' => { tokens.push(Token::Slash); i += 1; }
+            '(' => { tokens.push(Token::LParen); i += 1; }
+            ')' => { tokens.push(Token::RParen); i += 1; }
+            '0'..='9' => {
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() { i += 1; }
+                let text: String = chars[start..i].iter().collect();
+                let n = text.parse::<i64>().map_err(|_| format!("number too large: {text}"))?;
+                tokens.push(Token::Num(n));
+            }
+            _ => return Err(format!("unexpected character '{c}'")),
+        }
+    }
+    Ok(tokens)
+}
+```
+Rust models the token as an `enum` — a *closed* set of possibilities the compiler
+checks exhaustively; Go uses a small struct (`Kind` byte + `Num`), Python a
+frozen dataclass. Same idea, three type systems.
+</TabItem>
+</Tabs>
+
+The one subtlety is **multi-digit numbers**: when you hit a digit you keep
+consuming digits until you don't, so `12` becomes one `Num(12)` token, not two.
+That inner loop is the lexer in miniature — group characters that belong together.
+
+## Stage 2 — the parser: tokens into a tree
+
+A flat list of tokens doesn't capture that `*` binds tighter than `+`. The parser
+turns tokens into an **abstract syntax tree (AST)** whose *shape* encodes
+precedence: `1 + 2 * 3` must become `+(1, *(2, 3))`, never `*(+(1, 2), 3)`.
+
+The technique is **recursive descent**: one function per precedence level, each
+calling the tighter one. The grammar *is* the code:
+
+```text
+expr   := term (('+' | '-') term)*        ← lowest precedence
+term   := factor (('*' | '/') factor)*    ← binds tighter
+factor := Num | '(' expr ')' | '-' factor ← tightest: atoms & parens
+```
+
+Because `term` is called by `expr`, multiplication is grouped *before* addition
+gets a chance — precedence falls out of the call structure for free.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+class _Parser:
+    def expr(self) -> Expr:  # expr := term (('+' | '-') term)*
+        left = self.term()
+        while (t := self._peek()) is not None and t.kind in "+-":
+            self.pos += 1
+            left = Expr(t.kind, left=left, right=self.term())
+        return left
+
+    def term(self) -> Expr:  # term := factor (('*' | '/') factor)*
+        left = self.factor()
+        while (t := self._peek()) is not None and t.kind in "*/":
+            self.pos += 1
+            left = Expr(t.kind, left=left, right=self.factor())
+        return left
+
+    def factor(self) -> Expr:  # factor := Num | '(' expr ')' | '-' factor
+        t = self._next()
+        if t is None:
+            raise CalcError("unexpected end of input")
+        if t.kind == "n":
+            return Expr("n", num=t.num)
+        if t.kind == "-":
+            return Expr("u", left=self.factor())       # unary minus
+        if t.kind == "(":
+            inner = self.expr()
+            if (close := self._next()) is None or close.kind != ")":
+                raise CalcError("expected ')'")
+            return inner
+        raise CalcError(f"unexpected token '{t.kind}'")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+// expr := term (('+' | '-') term)*
+func (p *parser) expr() (*Expr, error) {
+	left, err := p.term()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t, ok := p.peek()
+		if !ok || (t.Kind != '+' && t.Kind != '-') {
+			return left, nil
+		}
+		p.pos++
+		right, err := p.term()
+		if err != nil {
+			return nil, err
+		}
+		left = &Expr{Kind: t.Kind, L: left, R: right}
+	}
+}
+
+// factor := Num | '(' expr ')' | '-' factor
+func (p *parser) factor() (*Expr, error) {
+	t, ok := p.next()
+	if !ok {
+		return nil, fmt.Errorf("unexpected end of input")
+	}
+	switch t.Kind {
+	case 'n':
+		return &Expr{Kind: 'n', Num: t.Num}, nil
+	case '-':
+		inner, err := p.factor() // unary minus
+		if err != nil {
+			return nil, err
+		}
+		return &Expr{Kind: 'u', L: inner}, nil
+	case '(':
+		inner, err := p.expr()
+		if err != nil {
+			return nil, err
+		}
+		if rp, ok := p.next(); !ok || rp.Kind != ')' {
+			return nil, fmt.Errorf("expected ')'")
+		}
+		return inner, nil
+	default:
+		return nil, fmt.Errorf("unexpected token '%c'", t.Kind)
+	}
+}
+```
+(`term` mirrors `expr` with `*` and `/`.)
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+// expr := term (('+' | '-') term)*
+fn expr(&mut self) -> Result<Expr, String> {
+    let mut left = self.term()?;
+    while let Some(op) = match self.peek() {
+        Some(Token::Plus) => Some('+'),
+        Some(Token::Minus) => Some('-'),
+        _ => None,
+    } {
+        self.pos += 1;
+        let right = self.term()?;
+        left = Expr::Bin(op, Box::new(left), Box::new(right));
+    }
+    Ok(left)
+}
+
+// factor := Num | '(' expr ')' | '-' factor
+fn factor(&mut self) -> Result<Expr, String> {
+    match self.next() {
+        Some(Token::Num(n)) => Ok(Expr::Num(n)),
+        Some(Token::Minus) => Ok(Expr::Neg(Box::new(self.factor()?))), // unary minus
+        Some(Token::LParen) => {
+            let inner = self.expr()?;
+            match self.next() {
+                Some(Token::RParen) => Ok(inner),
+                _ => Err("expected ')'".to_string()),
+            }
+        }
+        Some(t) => Err(format!("unexpected token {t:?}")),
+        None => Err("unexpected end of input".to_string()),
+    }
+}
+```
+The recursive AST needs a heap pointer — Rust's `Box`, Go's `*Expr`, Python's
+object references — because a tree node holds other nodes.
+</TabItem>
+</Tabs>
+
+Two details make it robust. **Unary minus** is handled in `factor`, so `-7 / 2`
+parses as `(/ (neg 7) 2)` — the `neg` binds tighter than the `/`, matching how you
+read it. And after parsing, `parse()` checks that *every* token was consumed, so
+`1 2` is a clean "unexpected trailing input" error rather than silently ignoring
+the `2`.
+
+## Stage 3 — the evaluator: the tree into a value
+
+With a tree, evaluation is almost anticlimactic — a **tree walk**: recurse into
+each node, compute the children, combine. This is the core of every tree-walking
+interpreter (Python's own bytecode compiler is a fancier version of this).
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="calc.py"
+def evaluate(e: Expr) -> int:
+    if e.kind == "n":
+        return e.num
+    if e.kind == "u":
+        return -evaluate(e.left)
+    a, b = evaluate(e.left), evaluate(e.right)
+    if e.kind == "+": return a + b
+    if e.kind == "-": return a - b
+    if e.kind == "*": return a * b
+    if e.kind == "/":
+        if b == 0:
+            raise CalcError("division by zero")
+        return _trunc_div(a, b)   # truncate toward zero, not Python's floor //
+    raise CalcError("unreachable")
+```
+</TabItem>
+<TabItem label="Go">
+```go title="calc.go"
+func Eval(e *Expr) (int64, error) {
+	switch e.Kind {
+	case 'n':
+		return e.Num, nil
+	case 'u':
+		v, err := Eval(e.L)
+		return -v, err
+	default:
+		a, err := Eval(e.L)
+		if err != nil {
+			return 0, err
+		}
+		b, err := Eval(e.R)
+		if err != nil {
+			return 0, err
+		}
+		switch e.Kind {
+		case '+':
+			return a + b, nil
+		case '-':
+			return a - b, nil
+		case '*':
+			return a * b, nil
+		case '/':
+			if b == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			return a / b, nil // Go's integer / truncates toward zero
+		}
+		return 0, fmt.Errorf("unreachable")
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+pub fn eval(e: &Expr) -> Result<i64, String> {
+    match e {
+        Expr::Num(n) => Ok(*n),
+        Expr::Neg(inner) => Ok(-eval(inner)?),
+        Expr::Bin(op, l, r) => {
+            let a = eval(l)?;
+            let b = eval(r)?;
+            match op {
+                '+' => Ok(a + b),
+                '-' => Ok(a - b),
+                '*' => Ok(a * b),
+                '/' => {
+                    if b == 0 {
+                        Err("division by zero".to_string())
+                    } else {
+                        Ok(a / b) // Rust's i64 / truncates toward zero
+                    }
+                }
+                _ => unreachable!("parser only produces + - * /"),
+            }
+        }
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="The one cross-language trap: division rounding">
+  `/` here truncates toward zero, so `-7 / 2` is `-3`. Rust and Go's integer `/`
+  already do this — but Python's `//` *floors*, giving `-4`. To keep the three
+  byte-identical, Python implements truncation explicitly
+  (`abs(a) // abs(b)`, then fix the sign). It's the same lesson as every
+  rounding gotcha in this Academy: "obvious" arithmetic differs between languages,
+  and only building the same thing three ways makes you see it.
+</Aside>
+
+To make the tree visible, the code also renders it as a fully-parenthesised
+**S-expression**, so you can *see* what the parser decided. The REPL prints both,
+byte-identically across all three languages:
+
+```text
+$ calc "2 * (3 + 4) - 10 / 3"
+2 * (3 + 4) - 10 / 3  =>  (- (* 2 (+ 3 4)) (/ 10 3))  =>  11
+
+$ printf '1 + 2 * 3\n-7 / 2\n1 / 0\n' | calc
+1 + 2 * 3  =>  (+ 1 (* 2 3))  =>  7
+-7 / 2  =>  (/ (neg 7) 2)  =>  -3
+1 / 0  =>  error: division by zero
+```
+
+## Run the interpreter in your browser
+
+Here is the whole pipeline — lexer, parser, evaluator — as one self-contained
+Python program. Edit the expressions and press **Run**; it executes locally in
+your browser (via Pyodide), so you can watch your own language interpret whatever
+you type:
+
+<PyRunner code={`def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c in " \\t": i += 1
+        elif c in "+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(self, t): self.t, self.i = t, 0
+    def peek(self): return self.t[self.i] if self.i < len(self.t) else None
+    def nxt(self):
+        v = self.peek(); self.i += 1; return v
+    def expr(self):
+        n = self.term()
+        while self.peek() in ("+", "-"):
+            op = self.nxt(); n = (op, n, self.term())
+        return n
+    def term(self):
+        n = self.factor()
+        while self.peek() in ("*", "/"):
+            op = self.nxt(); n = (op, n, self.factor())
+        return n
+    def factor(self):
+        t = self.nxt()
+        if isinstance(t, int): return t
+        if t == "-": return ("neg", self.factor())
+        if t == "(":
+            n = self.expr()
+            if self.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+def ev(n):
+    if isinstance(n, int): return n
+    if n[0] == "neg": return -ev(n[1])
+    a, b = ev(n[1]), ev(n[2])
+    if n[0] == "+": return a + b
+    if n[0] == "-": return a - b
+    if n[0] == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+# edit these expressions and press Run:
+for src in ["1 + 2 * 3", "(1 + 2) * 3", "-7 / 2", "2 * (3 + 4) - 10 / 3"]:
+    try:
+        print(f"{src:<22} = {ev(P(tokenize(src)).expr())}")
+    except ValueError as e:
+        print(f"{src:<22} -> error: {e}")`} label="Python · your interpreter · runs in your browser" />
+
+## Exercises
+
+**1. Add a modulo operator `%` (all three).** It has the same precedence as `*`
+and `/`. Which one function do you touch in the lexer, which in the parser, and
+which in the evaluator? What should `7 % 0` do?
+
+<details>
+<summary>Solution sketch</summary>
+
+Three tiny edits, one per stage: the lexer gains a `%` token, the parser's `term`
+rule accepts `%` alongside `*` and `/`, and the evaluator adds a `%` case (erroring
+on a zero divisor, exactly like `/`). That one operator touching exactly one line
+in each stage is the whole point of the three-stage design: each stage has a single
+responsibility, so a new operator is a local change, not a rewrite. This is why
+real language implementations are structured this way.
+
+</details>
+
+**2. Support the power operator `^` with right-associativity (research + one
+language).** Unlike `+` and `*`, `2 ^ 3 ^ 2` should be `2 ^ (3 ^ 2) = 512`, not
+`(2 ^ 3) ^ 2 = 64`. Why does the left-associative loop used for `+`/`*` produce the
+wrong tree, and how does recursion fix it?
+
+<details>
+<summary>Solution sketch</summary>
+
+The `while` loop in `expr`/`term` builds a *left*-leaning tree (each new operator
+wraps the accumulated left side), which is correct for left-associative operators.
+For right-associativity you instead *recurse* on the right: `power := factor ('^'
+power)?` — after reading one `^`, call `power` again for the right side, so the
+rightmost `^` is evaluated first. Associativity, like precedence, is expressed
+purely in the *shape* of the grammar rules, which is the deeper lesson: the tree's
+structure is the meaning.
+
+</details>
+
+**3. Add variables and an assignment (any language).** Let `x = 5` bind a name,
+and `x * 2` read it. You'll need a token for identifiers, a statement vs
+expression distinction, and an *environment* (a name→value map) threaded through
+`eval`. What does the environment become when you later add functions?
+
+<details>
+<summary>Solution sketch</summary>
+
+The lexer grows an identifier token; the parser distinguishes an assignment
+statement from an expression; and `eval` takes an environment dict/map it reads and
+writes. That environment is the seed of everything that follows: add functions and
+each call gets its *own* environment chained to an enclosing one — that chain of
+scopes is exactly how closures, lexical scoping, and the call stack work. You've
+built the skeleton of a real interpreter; the environment is where its memory
+lives.
+
+</details>
+
+<Quiz
+  question={'The parser turns 1 + 2 * 3 into the tree (+ 1 (* 2 3)) rather than (* (+ 1 2) 3). What makes precedence come out right?'}
+  options={[
+    { text: 'The grammar has one function per precedence level, and the lower-precedence rule (expr, for + and -) calls the higher-precedence rule (term, for * and /); so multiplication is always grouped into a subtree before addition combines the pieces', correct: true, explanation: 'That call structure IS the precedence. Because expr calls term for each of its operands, any run of * and / is fully parsed into a subtree before the surrounding + or - gets to combine them. Precedence is not a lookup table — it falls out of which rule calls which, which is the elegance of recursive descent.' },
+    { text: 'The evaluator reorders the operations after parsing to respect precedence', correct: false, explanation: 'The evaluator does no reordering — it walks the tree exactly as built. Precedence is decided entirely by the parser through the shape of the tree; by evaluation time the structure already encodes the correct grouping.' },
+    { text: 'The lexer emits the tokens in precedence order', correct: false, explanation: 'The lexer only groups characters into tokens left to right; it knows nothing about precedence and emits them in source order. Precedence is the parser\'s job, via its grammar rules.' },
+    { text: 'A precedence number attached to each operator token is compared during evaluation', correct: false, explanation: 'This calculator attaches no precedence numbers and compares nothing at eval time — precedence is structural, encoded by which grammar rule (expr vs term) parses which operators. (Precedence-climbing parsers do use numbers, but that is a different technique from the recursive-descent grammar shown here.)' },
+  ]}
+/>
+
+<Quiz
+  question={'The three implementations produce byte-identical output, but the division of -7 / 2 needed special care in Python. Why?'}
+  options={[
+    { text: 'The language truncates division toward zero (-7 / 2 = -3), which Rust and Go\'s integer / already do, but Python\'s // floors (giving -4) — so Python implements truncation explicitly to match', correct: true, explanation: 'Integer division rounds differently by default: Rust and Go truncate toward zero, Python floors toward negative infinity. For -7 / 2 that is -3 vs -4. To keep all three byte-identical the Python version divides the absolute values and reapplies the sign, reproducing truncation. It is the same "obvious arithmetic differs across languages" trap the Academy keeps surfacing.' },
+    { text: 'Python cannot do integer division at all', correct: false, explanation: 'Python does integer division fine with //; the issue is only its rounding direction (floor) differs from Rust/Go (truncate), so the result for negatives disagrees unless truncation is done explicitly.' },
+    { text: 'Rust and Go round division to the nearest even number', correct: false, explanation: 'Neither rounds to nearest-even for integer division; both truncate toward zero. The mismatch is specifically Python\'s floor vs the others\' truncation, not banker\'s rounding.' },
+    { text: 'The parser builds a different tree in Python', correct: false, explanation: 'The tree is identical across all three — the difference is purely in how the evaluator performs integer division. The fix lives in eval, not in the parser.' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="Walk me through what happens when an interpreter runs a line of source code.">
+
+Three stages, always. First **lexing**: scan the raw characters and group them into
+tokens — numbers, identifiers, operators, punctuation — discarding whitespace. This
+turns a string into a flat sequence of meaningful units and catches stray
+characters early. Second **parsing**: consume the tokens and build an abstract
+syntax tree whose structure encodes the grammar — operator precedence and
+associativity become the *shape* of the tree, so `1 + 2 * 3` nests the
+multiplication below the addition. Recursive descent does this with one function
+per precedence level, each calling the tighter-binding one; the parser also reports
+syntax errors like an unclosed parenthesis or trailing tokens. Third **evaluation**:
+walk the tree, computing each node from its children — a number evaluates to itself,
+a binary node evaluates its operands then combines them. That is a tree-walking
+interpreter. Bigger systems insert stages — a compiler lowers the tree to bytecode
+or machine code, adds a type checker or optimizer — but the front end is always
+this same lex-then-parse-then-process pipeline, which is why building even a
+four-operator calculator teaches the shape of every language implementation.
+
+</Interview>
+
+## The track ahead
+
+This is lesson one of *Build Your Own Interpreter*. You now have the skeleton every
+language shares — a lexer, a recursive-descent parser producing an AST, and a
+tree-walking evaluator — and you've built it three ways, tested and byte-identical.
+From here the language grows along the exercises: floating-point and more operators,
+**variables and an environment**, then **functions and closures** (where the
+environment becomes a chain of scopes), and eventually **statements, control flow,
+and your own little programming language**. Every step reuses this exact machinery.
+The mystery of "how does a language *work*" is gone: it lexes, it parses, it walks
+a tree — and now you can build one.
+
+## References & further reading
+
+- [Crafting Interpreters](https://craftinginterpreters.com/) by Robert Nystrom — the definitive, free book on building a language; this lesson is a three-language on-ramp to it
+- [Recursive descent parsing](https://en.wikipedia.org/wiki/Recursive_descent_parser) — the technique the parser uses
+- [Pratt parsing](https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html) — an elegant alternative for precedence, worth studying next
+- The [test framework lesson](/systems-programming-academy/part-5-frameworks/test-framework/) — another "build the tool you use" project in this Academy
+
+<Progress />

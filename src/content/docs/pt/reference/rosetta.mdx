@@ -1,0 +1,486 @@
+---
+title: "Pedra de Roseta: Uma Tarefa, Três Linguagens"
+description: "A mesma pequena tarefa escrita em Python, Go e Rust, lado a lado — uma consulta rápida de idiomas para as doze coisas que fazes em todos os programas, de definir uma função a escrever um teste unitário."
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Sabes fazer uma coisa numa linguagem e precisas do idioma noutra. Esta página é
+essa consulta: doze tarefas do dia a dia — definir uma função, tratar um valor
+ausente, contar ocorrências, lançar uma thread — cada uma escrita de três formas,
+Python depois Go depois Rust, para que a forma da mesma ideia seja visível num
+relance. Lê uma coluna para sentir o grão de uma linguagem; lê uma linha para
+traduzir.
+
+<Aside type="note" title="Isto são referências, não lições completas">
+  Cada snippet é mínimo mas idiomático — a forma correcta mais pequena do idioma,
+  sem imports e sem `main` onde só acrescentam ruído. Para o tratamento completo e
+  testado, com caminhos de erro, casos-limite e benchmarks, segue os links em
+  [Ver também](#ver-também) para as lições da Parte 1 de onde cada idioma vem.
+</Aside>
+
+### 1. Definir e chamar uma função
+
+O ponto de partida: uma função com nome, parâmetros tipados e um retorno.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+print(add(2, 3))  # 5
+```
+</TabItem>
+<TabItem label="Go">
+```go
+func add(a, b int) int {
+	return a + b
+}
+
+fmt.Println(add(2, 3)) // 5
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+fn add(a: i32, b: i32) -> i32 {
+    a + b // sem `return`, sem ponto-e-vírgula: isto é o valor
+}
+
+println!("{}", add(2, 3)); // 5
+```
+</TabItem>
+</Tabs>
+
+### 2. Tratar um erro ou um valor ausente
+
+A maior diferença de dialecto: Python lança (ou devolve `None`), Go devolve um
+`error` que verificas, Rust devolve `Result`/`Option` e o `?` propaga.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+def parse(s: str) -> int | None:
+    try:
+        return int(s)
+    except ValueError:
+        return None  # ou: deixa a excepção propagar
+
+
+print(parse("42"))    # 42
+print(parse("oops"))  # None
+```
+</TabItem>
+<TabItem label="Go">
+```go
+n, err := strconv.Atoi("42")
+if err != nil {
+	return fmt.Errorf("parsing: %w", err) // envolve e propaga
+}
+fmt.Println(n) // 42
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+fn parse(s: &str) -> Result<i32, std::num::ParseIntError> {
+    let n: i32 = s.parse()?; // ? devolve o Err cedo
+    Ok(n)
+}
+```
+</TabItem>
+</Tabs>
+
+### 3. Iterar com um índice
+
+Percorrer uma sequência sabendo também a posição de cada elemento.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+for i, name in enumerate(["a", "b", "c"]):
+    print(i, name)  # 0 a / 1 b / 2 c
+```
+</TabItem>
+<TabItem label="Go">
+```go
+for i, name := range []string{"a", "b", "c"} {
+	fmt.Println(i, name) // 0 a / 1 b / 2 c
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+for (i, name) in ["a", "b", "c"].iter().enumerate() {
+    println!("{i} {name}"); // 0 a / 1 b / 2 c
+}
+```
+</TabItem>
+</Tabs>
+
+### 4. Inserir num mapa e procurar com um valor por omissão
+
+Um put num hash map e depois um get que dá um fallback quando a chave falta.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+ages = {"Ada": 36}
+ages["Grace"] = 45
+print(ages.get("Bob", 0))  # 0 — valor por omissão quando ausente
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ages := map[string]int{"Ada": 36}
+ages["Grace"] = 45
+age, ok := ages["Bob"] // comma-ok: ok é false se ausente
+if !ok {
+	age = 0
+}
+fmt.Println(age) // 0
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use std::collections::HashMap;
+
+let mut ages = HashMap::from([("Ada", 36)]);
+ages.insert("Grace", 45);
+let age = ages.get("Bob").copied().unwrap_or(0);
+println!("{age}"); // 0
+```
+</TabItem>
+</Tabs>
+
+### 5. Contar ocorrências (um mapa de frequências)
+
+Somar quantas vezes cada elemento aparece — o exercício canónico de mapas.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+from collections import Counter
+
+counts = Counter("banana")
+print(counts["a"])  # 3
+```
+</TabItem>
+<TabItem label="Go">
+```go
+counts := map[rune]int{}
+for _, c := range "banana" {
+	counts[c]++ // chave ausente lê-se como 0, depois incrementa
+}
+fmt.Println(counts['a']) // 3
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use std::collections::HashMap;
+
+let mut counts: HashMap<char, i32> = HashMap::new();
+for c in "banana".chars() {
+    *counts.entry(c).or_insert(0) += 1;
+}
+println!("{}", counts[&'a']); // 3
+```
+</TabItem>
+</Tabs>
+
+### 6. Ordenar por uma chave
+
+Ordenar um conjunto de registos por um campo, e não pela ordem natural.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+people = [("Ada", 36), ("Bob", 20)]
+people.sort(key=lambda p: p[1])  # por idade
+print(people)  # [('Bob', 20), ('Ada', 36)]
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type Person struct {
+	Name string
+	Age  int
+}
+
+people := []Person{{"Ada", 36}, {"Bob", 20}}
+sort.Slice(people, func(i, j int) bool {
+	return people[i].Age < people[j].Age // por idade
+})
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let mut people = vec![("Ada", 36), ("Bob", 20)];
+people.sort_by_key(|p| p.1); // por idade
+// [("Bob", 20), ("Ada", 36)]
+```
+</TabItem>
+</Tabs>
+
+### 7. Filtrar e depois transformar
+
+Manter alguns elementos e remodelá-los — comprehension, loop, ou cadeia de iterador.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+nums = [1, 2, 3, 4, 5]
+evens_squared = [n * n for n in nums if n % 2 == 0]
+print(evens_squared)  # [4, 16]
+```
+</TabItem>
+<TabItem label="Go">
+```go
+nums := []int{1, 2, 3, 4, 5}
+var out []int
+for _, n := range nums {
+	if n%2 == 0 {
+		out = append(out, n*n)
+	}
+}
+fmt.Println(out) // [4 16]
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let nums = [1, 2, 3, 4, 5];
+let out: Vec<i32> = nums
+    .iter()
+    .copied()
+    .filter(|n| n % 2 == 0)
+    .map(|n| n * n)
+    .collect();
+println!("{out:?}"); // [4, 16]
+```
+</TabItem>
+</Tabs>
+
+### 8. Um struct/classe com um método
+
+Juntar dados e dar-lhes comportamento que lê os seus próprios campos.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+from dataclasses import dataclass
+
+
+@dataclass
+class Rect:
+    w: float
+    h: float
+
+    def area(self) -> float:
+        return self.w * self.h
+
+
+print(Rect(3, 4).area())  # 12
+```
+</TabItem>
+<TabItem label="Go">
+```go
+type Rect struct {
+	W, H float64
+}
+
+func (r Rect) Area() float64 { // método em Rect
+	return r.W * r.H
+}
+
+fmt.Println(Rect{3, 4}.Area()) // 12
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+struct Rect {
+    w: f64,
+    h: f64,
+}
+
+impl Rect {
+    fn area(&self) -> f64 { // faz borrow de self
+        self.w * self.h
+    }
+}
+// Rect { w: 3.0, h: 4.0 }.area() == 12.0
+```
+</TabItem>
+</Tabs>
+
+### 9. Ler um ficheiro linha a linha
+
+Ler um ficheiro de texto sem o carregar inteiro, fechando o handle em segurança.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+with open("data.txt", encoding="utf-8") as f:
+    for line in f:  # o objecto ficheiro é ele próprio um iterador de linhas
+        print(line.rstrip())
+```
+</TabItem>
+<TabItem label="Go">
+```go
+f, err := os.Open("data.txt")
+if err != nil {
+	return err
+}
+defer f.Close() // corre quando a função retorna
+
+sc := bufio.NewScanner(f)
+for sc.Scan() {
+	fmt.Println(sc.Text())
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+let file = File::open("data.txt")?;
+for line in BufReader::new(file).lines() {
+    println!("{}", line?); // cada linha é um Result
+}
+```
+</TabItem>
+</Tabs>
+
+### 10. Correr algo em concorrência
+
+Fazer trabalho fora da linha principal de execução e recolher os resultados.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+import threading
+
+results: list[int] = []
+
+
+def work(n: int) -> None:
+    results.append(n * n)
+
+
+threads = [threading.Thread(target=work, args=(i,)) for i in range(3)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+print(sorted(results))  # [0, 1, 4] — as threads partilham um processo (GIL)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ch := make(chan int)
+for i := 0; i < 3; i++ {
+	go func(n int) { ch <- n * n }(i) // goroutine envia num channel
+}
+for i := 0; i < 3; i++ {
+	fmt.Println(<-ch) // recebe cada resultado
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use std::thread;
+
+let handles: Vec<_> = (0..3)
+    .map(|n| thread::spawn(move || n * n)) // move n para dentro da thread
+    .collect();
+for h in handles {
+    println!("{}", h.join().unwrap());
+}
+```
+</TabItem>
+</Tabs>
+
+### 11. Formatar uma string com valores
+
+Interpolar variáveis e controlar a precisão numérica.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+name, age = "Ada", 36
+print(f"{name} is {age}")   # Ada is 36
+print(f"{3.14159:.2f}")     # 3.14
+```
+</TabItem>
+<TabItem label="Go">
+```go
+name, age := "Ada", 36
+fmt.Printf("%s is %d\n", name, age) // Ada is 36
+s := fmt.Sprintf("%.2f", 3.14159)   // "3.14"
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let (name, age) = ("Ada", 36);
+println!("{name} is {age}");       // Ada is 36
+let s = format!("{:.2}", 3.14159); // "3.14"
+```
+</TabItem>
+</Tabs>
+
+### 12. Testar uma função (teste unitário)
+
+Verificar a saída de uma função — todas as linguagens trazem um test runner de raiz.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python
+import unittest
+
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+class TestAdd(unittest.TestCase):
+    def test_adds(self) -> None:
+        self.assertEqual(add(2, 3), 5)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+package calc
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if got := Add(2, 3); got != 5 {
+		t.Errorf("Add(2, 3) = %d, want 5", got)
+	}
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+#[test]
+fn adds() {
+    assert_eq!(add(2, 3), 5);
+}
+```
+</TabItem>
+</Tabs>
+
+## Ver também
+
+As lições completas e testadas por trás destes idiomas:
+
+- Tratamento de erros e ausência — [Go: Error Handling](/systems-programming-academy/pt/part-1-foundations/go/error-handling/) · [Rust: Ownership e o Borrow Checker](/systems-programming-academy/pt/part-1-foundations/rust/ownership/) · [Python: Type Hints](/systems-programming-academy/pt/part-1-foundations/python/type-hints/) (`| None`)
+- Iteradores, mapas e colecções — [Python: Iteradores](/systems-programming-academy/pt/part-1-foundations/python/iterators/) · [Go: Colecções](/systems-programming-academy/pt/part-1-foundations/go/collections/) · [Rust: Colecções](/systems-programming-academy/pt/part-1-foundations/rust/collections/)
+- Structs e métodos — [Go: Structs, Métodos e Interfaces](/systems-programming-academy/pt/part-1-foundations/go/interfaces/) · [Rust: Traits](/systems-programming-academy/pt/part-1-foundations/rust/traits/) · [Python: Data Model](/systems-programming-academy/pt/part-1-foundations/python/data-model/)
+- Concorrência — [Go: Concorrência](/systems-programming-academy/pt/part-1-foundations/go/concurrency/) · [Rust: Concorrência](/systems-programming-academy/pt/part-1-foundations/rust/concurrency/) · [Threads e Estado Partilhado](/systems-programming-academy/pt/part-4-concurrency/threads-shared-state/)
+- Testes — [Python](/systems-programming-academy/pt/part-1-foundations/python/testing/) · [Go](/systems-programming-academy/pt/part-1-foundations/go/testing/) · [Rust](/systems-programming-academy/pt/part-1-foundations/rust/testing/)
+- E a síntese que mede as três umas contra as outras: [As Três Linguagens: Uma Comparação Medida](/systems-programming-academy/pt/capstone/three-languages/).
