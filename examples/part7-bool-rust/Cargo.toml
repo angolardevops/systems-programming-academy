@@ -1,0 +1,15 @@
+[package]
+name = "part7-bool-rust"
+version = "0.1.0"
+edition = "2021"
+
+# Dependency-free: the interpreter gains short-circuit boolean logic — and, or,
+# not — the same laziness as `if`, extending the conditionals from lesson 4 into
+# real predicates like `x >= lo and x <= hi`.
+
+[[bin]]
+name = "boollang"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

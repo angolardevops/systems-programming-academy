@@ -487,6 +487,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Condicionais & Recursão' },
               slug: 'part-7-interpreter/conditionals',
             },
+            {
+              label: 'Boolean Logic',
+              translations: { 'pt-BR': 'Lógica Booleana' },
+              slug: 'part-7-interpreter/booleans',
+            },
           ],
         },
         {

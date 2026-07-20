@@ -1,0 +1,531 @@
+---
+title: "Constrói o Teu Próprio Interpretador — Lógica Booleana"
+description: "Adiciona and, or e not à tua linguagem em Rust, Go e Python — com avaliação em curto-circuito, a mesma preguiça do if. Constrói predicados reais como uma verificação de ano bissexto, testado e byte-idêntico de três formas."
+difficulty: advanced
+estimatedMinutes: 30
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Quiz from '../../../../components/Quiz.astro';
+import Interview from '../../../../components/Interview.astro';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+import PyRunner from '../../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={30} languages={["python", "go", "rust"]} />
+
+<Badge text="Constrói o Teu Próprio X" variant="tip" size="large" />
+
+A tua linguagem consegue [tomar decisões](/systems-programming-academy/pt/part-7-interpreter/conditionals/),
+mas as suas condições são finas: uma única comparação. Condições reais combinam-nas
+— "dentro do intervalo" é `x >= lo and x <= hi`; um ano bissexto é um pequeno
+emaranhado de `and`, `or` e `not`. Esta lição adiciona esses três operadores, e ao
+fazê-lo reutiliza a ideia mais importante da lição anterior: a **avaliação em
+curto-circuito** — a mesma preguiça que faz o `if` funcionar.
+
+<Aside type="note" title="and e or são preguiçosos, tal como o if">
+  O `and` e o `or` não são operadores comuns. `a and b` avalia `a`, e se `a` já é
+  falso, devolve falso **sem avaliar `b`** — porque a resposta já está decidida. `a
+  or b` salta o `b` quando `a` já é verdadeiro. Este curto-circuito é exatamente o
+  salto-de-ramo do `if`, e é uma propriedade de *correção*: `x != 0 and 100 / x > 1`
+  é seguro precisamente porque `100 / x` nunca é avaliado quando `x` é 0. Os
+  booleanos continuam inteiros (`1`/`0`, qualquer não-zero é verdadeiro), então os
+  resultados ficam exatos e byte-idênticos.
+</Aside>
+
+Código:
+[Rust](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-bool-rust) · [Go](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-bool-go) · [Python](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-bool-py)
+— fmt/lint limpos, 6 testes cada, output de programa **byte-idêntico nas três
+linguagens**, predicado de ano bissexto incluído.
+
+## Nenhum token novo — só keywords
+
+O `and`, o `or` e o `not` não precisam de nada do lexer: tokenizam como
+identificadores comuns, e o parser reconhece-os por nome (tal como o
+`if`/`then`/`else`). O que *precisam* são três novos níveis de precedência,
+encaixados abaixo da comparação:
+
+```text
+expr    := 'if' ... | or_expr
+or_expr  := and_expr ('or' and_expr)*      ← mais frouxo
+and_expr := not_expr ('and' not_expr)*
+not_expr := 'not' not_expr | comparison    ← 'not' liga mais forte que and/or
+comparison := add (cmpop add)?
+```
+
+Esta ordenação — `or` mais frouxo que `and` mais frouxo que `not` mais frouxo que a
+comparação — é a convenção universal, e é porque `x >= lo and x <= hi` agrupa as
+duas comparações *antes* do `and`, e porque `1 or 0 and 0` significa `1 or (0 and 0)`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="boollang.py"
+def or_expr(self) -> Expr:               # and_expr ('or' and_expr)*
+    left = self.and_expr()
+    while self._is_kw("or"):
+        self.pos += 1
+        left = Expr("O", left=left, right=self.and_expr())
+    return left
+
+def and_expr(self) -> Expr:              # not_expr ('and' not_expr)*
+    left = self.not_expr()
+    while self._is_kw("and"):
+        self.pos += 1
+        left = Expr("A", left=left, right=self.not_expr())
+    return left
+
+def not_expr(self) -> Expr:              # 'not' not_expr | comparison
+    if self._is_kw("not"):
+        self.pos += 1
+        return Expr("N", left=self.not_expr())
+    return self.comparison()
+```
+</TabItem>
+<TabItem label="Go">
+```go title="bool.go"
+func (p *parser) orExpr() (*Expr, error) {     // andExpr ('or' andExpr)*
+	left, _ := p.andExpr()
+	for p.isKw("or") {
+		p.pos++
+		right, err := p.andExpr()
+		if err != nil { return nil, err }
+		left = &Expr{Kind: 'O', L: left, R: right}
+	}
+	return left, nil
+}
+
+func (p *parser) notExpr() (*Expr, error) {    // 'not' notExpr | comparison
+	if p.isKw("not") {
+		p.pos++
+		inner, err := p.notExpr()
+		if err != nil { return nil, err }
+		return &Expr{Kind: 'N', L: inner}, nil
+	}
+	return p.comparison()
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn or_expr(&mut self) -> Result<Expr, String> {   // and_expr ('or' and_expr)*
+    let mut left = self.and_expr()?;
+    while self.is_kw("or") {
+        self.pos += 1;
+        left = Expr::Or(Box::new(left), Box::new(self.and_expr()?));
+    }
+    Ok(left)
+}
+
+fn not_expr(&mut self) -> Result<Expr, String> {  // 'not' not_expr | comparison
+    if self.is_kw("not") {
+        self.pos += 1;
+        return Ok(Expr::Not(Box::new(self.not_expr()?)));
+    }
+    self.comparison()
+}
+```
+</TabItem>
+</Tabs>
+
+Repara que o `not_expr` recorre a si próprio, então `not not 3` faz parse
+limpamente como `not (not 3)`.
+
+## Avaliação: curto-circuito, à mão
+
+Os casos de eval são onde a preguiça vive. Ao contrário da aritmética (que avalia
+ambos os operandos à cabeça), o `and` e o `or` avaliam o esquerdo, decidem se a
+resposta já é conhecida, e **só então** tocam no direito:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="boollang.py"
+if e.kind == "N":                                  # not
+    return 1 if _as_int(evaluate(e.left, env)) == 0 else 0
+if e.kind in ("A", "O"):
+    left = _as_int(evaluate(e.left, env))
+    if e.kind == "A" and left == 0:
+        return 0                                   # curto-circuito: salta o direito
+    if e.kind == "O" and left != 0:
+        return 1                                   # curto-circuito: salta o direito
+    return 1 if _as_int(evaluate(e.right, env)) != 0 else 0
+```
+</TabItem>
+<TabItem label="Go">
+```go title="bool.go"
+if e.Kind == 'N' { // not: nega a truthiness
+	v, err := Eval(e.L, env)
+	if err != nil { return Value{}, err }
+	n, _ := asInt(v)
+	return Value{Kind: 'i', Int: 1 - truthy(n)}, nil
+}
+lv, err := Eval(e.L, env)
+if err != nil { return Value{}, err }
+left, _ := asInt(lv)
+if e.Kind == 'A' && left == 0 {
+	return Value{Kind: 'i', Int: 0}, nil  // curto-circuito: salta o direito
+}
+if e.Kind == 'O' && left != 0 {
+	return Value{Kind: 'i', Int: 1}, nil  // curto-circuito: salta o direito
+}
+rv, _ := Eval(e.R, env)
+right, _ := asInt(rv)
+return Value{Kind: 'i', Int: truthy(right)}, nil
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+Expr::And(l, r) => {
+    if as_int(eval(l, env)?)? == 0 {
+        Ok(Value::Int(0))                          // curto-circuito: salta o direito
+    } else {
+        Ok(Value::Int(if as_int(eval(r, env)?)? != 0 { 1 } else { 0 }))
+    }
+}
+Expr::Or(l, r) => {
+    if as_int(eval(l, env)?)? != 0 {
+        Ok(Value::Int(1))                          // curto-circuito: salta o direito
+    } else {
+        Ok(Value::Int(if as_int(eval(r, env)?)? != 0 { 1 } else { 0 }))
+    }
+}
+Expr::Not(inner) => Ok(Value::Int(if as_int(eval(inner, env)?)? == 0 { 1 } else { 0 })),
+```
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Porque não podes escrever and/or como uma função">
+  Nesta linguagem, uma *função* avalia todos os seus argumentos antes de o corpo
+  correr (é assim que a maquinaria de chamada da lição de funções funciona). Então o
+  `and`/`or` **não podem** ser funções comuns — uma função `myAnd(a, b)` avaliaria o
+  `b` antes sequer de correr, derrotando o curto-circuito. Têm de ser construídos no
+  evaluator como *formas especiais* que controlam a avaliação. É uma razão profunda
+  para as linguagens terem keywords como `and`/`if` distintas de funções: algumas
+  construções precisam de decidir *se* avaliam os seus operandos, e só o evaluator o
+  pode fazer.
+</Aside>
+
+## Um predicado real: ano bissexto
+
+Com `and`, `or` e `not`, as condições tornam-se genuinamente expressivas. Aqui está
+a regra completa do ano bissexto Gregoriano — divisível por 4, mas não por 100 a
+menos que também por 400 — escrita na *tua* linguagem (usando `y - y/4*4 == 0` como
+"divisível por 4", já que ainda não temos módulo):
+
+```text
+leap(y) = if y - y/4*4 == 0 and (y - y/100*100 != 0 or y - y/400*400 == 0) then 1 else 0
+leap(2000)   => 1     # divisível por 400
+leap(1900)   => 0     # divisível por 100 mas não por 400
+leap(2024)   => 1     # divisível por 4, não por 100
+```
+
+As três implementações produzem isto byte a byte. Um predicado real não-trivial, a
+correr no interpretador que fizeste crescer de um scanner de caracteres — os
+operadores booleanos são o que torna condições como esta legíveis.
+
+## Corre no teu browser
+
+Edita os predicados e carrega em **Run** — incluindo a verificação de ano bissexto e
+um guarda de curto-circuito que dividiria por zero sem a preguiça do `and`:
+
+<PyRunner code={`CMP = ("<", "<=", ">", ">=", "==", "!=")
+CMPF = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b}
+
+def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]; nx = s[i + 1] if i + 1 < len(s) else ""
+        if c in " \\t": i += 1
+        elif c == "=" and nx == "=": toks.append("=="); i += 2
+        elif c in "!<>" and nx == "=": toks.append(c + "="); i += 2
+        elif c in "<>": toks.append(c); i += 1
+        elif c in "=,+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"): j += 1
+            toks.append(("id", s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(s, t): s.t, s.i = t, 0
+    def peek(s): return s.t[s.i] if s.i < len(s.t) else None
+    def nxt(s):
+        v = s.peek(); s.i += 1; return v
+    def iskw(s, k): return s.peek() == ("id", k)
+    def expr(s):
+        if s.iskw("if"):
+            s.nxt(); cond = s.expr()
+            if not s.iskw("then"): raise ValueError("expected 'then'")
+            s.nxt(); then = s.expr()
+            if not s.iskw("else"): raise ValueError("expected 'else'")
+            s.nxt(); els = s.expr()
+            return ("if", cond, then, els)
+        return s.orx()
+    def orx(s):
+        n = s.andx()
+        while s.iskw("or"): s.nxt(); n = ("or", n, s.andx())
+        return n
+    def andx(s):
+        n = s.notx()
+        while s.iskw("and"): s.nxt(); n = ("and", n, s.notx())
+        return n
+    def notx(s):
+        if s.iskw("not"): s.nxt(); return ("not", s.notx())
+        return s.cmp()
+    def cmp(s):
+        left = s.add()
+        if s.peek() in CMP:
+            op = s.nxt(); return ("cmp", op, left, s.add())
+        return left
+    def add(s):
+        n = s.term()
+        while s.peek() in ("+", "-"):
+            op = s.nxt(); n = (op, n, s.term())
+        return n
+    def term(s):
+        n = s.factor()
+        while s.peek() in ("*", "/"):
+            op = s.nxt(); n = (op, n, s.factor())
+        return n
+    def factor(s):
+        t = s.nxt()
+        if isinstance(t, int): return t
+        if isinstance(t, tuple):
+            if s.peek() == "(":
+                s.nxt(); args = []
+                if s.peek() != ")":
+                    args.append(s.expr())
+                    while s.peek() == ",": s.nxt(); args.append(s.expr())
+                if s.nxt() != ")": raise ValueError("expected ')'")
+                return ("call", t[1], args)
+            return ("var", t[1])
+        if t == "-": return ("neg", s.factor())
+        if t == "(":
+            n = s.expr()
+            if s.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+class Scope:
+    def __init__(s, parent=None): s.v, s.parent = {}, parent
+    def get(s, n):
+        sc = s
+        while sc:
+            if n in sc.v: return sc.v[n]
+            sc = sc.parent
+        return None
+
+def asint(v):
+    if isinstance(v, int): return v
+    raise ValueError("cannot do arithmetic on a function")
+
+def ev(n, env):
+    if isinstance(n, int): return n
+    k = n[0]
+    if k == "var":
+        v = env.get(n[1])
+        if v is None: raise ValueError(f"undefined variable {n[1]!r}")
+        return v
+    if k == "neg": return -asint(ev(n[1], env))
+    if k == "not": return 1 if asint(ev(n[1], env)) == 0 else 0
+    if k == "and":
+        if asint(ev(n[1], env)) == 0: return 0          # curto-circuito
+        return 1 if asint(ev(n[2], env)) != 0 else 0
+    if k == "or":
+        if asint(ev(n[1], env)) != 0: return 1          # curto-circuito
+        return 1 if asint(ev(n[2], env)) != 0 else 0
+    if k == "cmp":
+        a, b = asint(ev(n[2], env)), asint(ev(n[3], env))
+        return 1 if CMPF[n[1]](a, b) else 0
+    if k == "if":
+        return ev(n[2], env) if asint(ev(n[1], env)) != 0 else ev(n[3], env)
+    if k == "call":
+        fn = env.get(n[1])
+        if not (isinstance(fn, tuple) and fn[0] == "fn"):
+            raise ValueError(f"{n[1]!r} is not a function")
+        _, params, body, defenv = fn
+        args = [ev(a, env) for a in n[2]]
+        if len(args) != len(params): raise ValueError(f"{n[1]!r} arity mismatch")
+        call = Scope(defenv)
+        for p, a in zip(params, args): call.v[p] = a
+        return ev(body, call)
+    a, b = asint(ev(n[1], env)), asint(ev(n[2], env))
+    if k == "+": return a + b
+    if k == "-": return a - b
+    if k == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def params_of(toks):
+    ps, i = [], 0
+    if toks[i] == ")": return ps, i + 1
+    while True:
+        ps.append(toks[i][1]); i += 1
+        if toks[i] == ",": i += 1; continue
+        if toks[i] == ")": return ps, i + 1
+        raise ValueError("bad parameter list")
+
+def run(program):
+    env = Scope()
+    for line in program.strip().split("\\n"):
+        line = line.strip()
+        if not line: continue
+        try:
+            t = tokenize(line)
+            is_def = len(t) > 2 and isinstance(t[0], tuple) and t[1] == "(" and ")" in t and t[t.index(")") + 1:t.index(")") + 2] == ["="]
+            if is_def:
+                name = t[0][1]
+                ps, after = params_of(t[2:])
+                env.v[name] = ("fn", ps, P(t[2 + after + 1:]).expr(), env)
+                print(f"{line:<58} => <fn>")
+            elif len(t) >= 2 and isinstance(t[0], tuple) and t[1] == "=":
+                env.v[t[0][1]] = ev(P(t[2:]).expr(), env)
+                r = env.v[t[0][1]]
+                print(f"{line:<58} => {r if isinstance(r, int) else '<fn>'}")
+            else:
+                r = ev(P(t).expr(), env)
+                print(f"{line:<58} => {r if isinstance(r, int) else '<fn>'}")
+        except ValueError as e:
+            print(f"{line:<58} -> error: {e}")
+
+# edita os predicados a vontade:
+run('''
+in_range(x, lo, hi) = if x >= lo and x <= hi then 1 else 0
+in_range(5, 1, 10)
+in_range(15, 1, 10)
+guard(x) = if x != 0 and 100 / x > 1 then 100 / x else -1
+guard(0)
+leap(y) = if y - y/4*4 == 0 and (y - y/100*100 != 0 or y - y/400*400 == 0) then 1 else 0
+leap(2000)
+leap(1900)
+leap(2024)
+''')`} label="Python · lógica booleana & predicados reais · corre no teu browser" />
+
+## Exercícios
+
+**1. Adiciona `xor` (ou-exclusivo) — e repara que não pode fazer curto-circuito (nas
+três).** `a xor b` é verdadeiro quando exatamente um lado é verdadeiro.
+Implementa-o. Porque é que, ao contrário do `and` e do `or`, o `xor` tem *sempre* de
+avaliar ambos os operandos?
+
+<details>
+<summary>Esboço da solução</summary>
+
+O `xor` precisa de ambos os valores aconteça o que acontecer: saber só o esquerdo não
+te diz nada sobre o resultado, já que `esquerdo xor b` inverte com `b` de qualquer
+forma. Então não tem forma de curto-circuito — avalia ambos os lados e devolve `1` se
+diferem. Esse contraste é esclarecedor: o `and`/`or` podem fazer curto-circuito
+*porque* um operando pode decidir a resposta toda, e o `xor` não pode *porque* nenhum
+consegue. O curto-circuito não é uma propriedade dos "operadores booleanos" em geral —
+é específico de operadores com um valor dominante.
+
+</details>
+
+**2. Prova que a ordem do curto-circuito importa (pesquisa + uma linguagem).** Escreve
+`10 / x > 0 and x != 0` — o guarda na ordem *errada* — e chama-o com `x = 0`. O que
+acontece, e o que ensina sobre como os programadores dependem do curto-circuito em
+código real?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Divide por zero e dá erro, porque o `and` avalia da esquerda para a direita: chega ao
+`10 / x` antes do guarda `x != 0`. A forma segura põe o guarda primeiro
+(`x != 0 and 10 / x > 0`), para que a operação perigosa só seja atingida quando é
+segura. Código real depende disto constantemente — `if p != null and p.value > 0`,
+`if i < len and arr[i] == x` — o guarda *tem* de vir primeiro, e o curto-circuito é a
+garantia que o faz funcionar. A ordem importa precisamente porque a avaliação é
+preguiçosa e da esquerda para a direita.
+
+</details>
+
+**3. Representa os booleanos como o seu próprio tipo (qualquer linguagem).** Agora o
+`true` e o `false` são só `1` e `0`. Adiciona valores booleanos reais distintos dos
+inteiros, para que `1 and 2` se torne um erro de tipo em vez de aritmética
+verdadeira. O que ganhas, e o que custa à simplicidade byte-idêntica?
+
+<details>
+<summary>Esboço da solução</summary>
+
+Adicionarias uma variante `Bool` ao tipo de valor ao lado do `Int`, farias as
+comparações e o `and`/`or`/`not` produzirem `Bool`, e farias o `if` exigir uma
+condição `Bool` — transformando `if 5 then ...` num erro de tipo em vez de
+silenciosamente verdadeiro. O ganho é segurança: a linguagem apanha disparates como
+`1 and 2` ou `if <uma função> then`. O custo é complexidade (um tipo de valor mais
+rico, mais casos de erro) e que o truque bonito "booleanos são só inteiros" — que
+manteve cada resultado exato e byte-idêntico aqui — desaparece. É a troca clássica que
+toda a linguagem faz entre simplicidade e um sistema de tipos mais estrito e seguro.
+
+</details>
+
+<Quiz
+  question={'Porque é que o and e o or podem fazer curto-circuito (saltar a avaliação do operando direito), enquanto a aritmética comum como o + não pode?'}
+  options={[
+    { text: 'Para o and/or, um valor do operando esquerdo determina o resultado todo (falso para o and, verdadeiro para o or), então o direito não precisa de ser avaliado; para o +, ambos os operandos sempre contribuem para a soma, então ambos têm de ser avaliados', correct: true, explanation: 'O curto-circuito é possível exatamente quando um operando pode decidir a resposta sozinho. false and X é falso independentemente de X, e true or X é verdadeiro independentemente de X — então o lado direito é saltado. A adição não tem tal valor dominante: 3 + X depende de X, então o + tem de avaliar ambos. É por isto que o and/or são preguiçosos e o + é ansioso.' },
+    { text: 'O and e o or são operadores mais rápidos, então o interpretador otimiza-os saltando trabalho', correct: false, explanation: 'O curto-circuito não é uma otimização de velocidade que o interpretador escolhe — é semântica definida que também afeta a correção (um 100 / 0 saltado não pode correr). Acontece porque um operando decide o resultado, não porque o operador é inerentemente mais rápido.' },
+    { text: 'O operando direito do and/or é sempre uma constante, então nunca precisa de avaliação', correct: false, explanation: 'O operando direito pode ser qualquer expressão, incluindo chamadas de função e divisões — frequentemente não é constante. É saltado só quando o esquerdo já determina o resultado, não por ser constante.' },
+    { text: 'Os operadores aritméticos avaliam da direita para a esquerda, o que impede o salto', correct: false, explanation: 'A ordem de avaliação (esquerda para a direita aqui) não é a razão. O + tem de avaliar ambos os operandos porque ambos afetam a soma; a direção da avaliação não muda que ambos são necessários.' },
+  ]}
+/>
+
+<Quiz
+  question={'Porque é que o and e o or têm de ser construídos no evaluator como formas especiais, em vez de definidos como funções comuns na linguagem?'}
+  options={[
+    { text: 'Uma chamada de função avalia todos os seus argumentos antes de o corpo correr, o que avaliaria o operando direito ansiosamente e derrotaria o curto-circuito; só uma construção construída no evaluator pode escolher se avalia os seus operandos', correct: true, explanation: 'A maquinaria de chamada avalia os argumentos à cabeça, então uma função myAnd(a, b) computaria o b antes de poder decidir saltá-lo — perdendo o curto-circuito (e a sua segurança). O and/or têm portanto de ser formas especiais que o evaluator trata diretamente, controlando a avaliação. É a razão fundamental pela qual as linguagens distinguem keywords/formas especiais de funções.' },
+    { text: 'As funções não conseguem devolver valores booleanos nesta linguagem', correct: false, explanation: 'As funções conseguem devolver booleanos (são só inteiros aqui). O problema não é o tipo de retorno mas que uma função avalia todos os argumentos antes de correr, o que parte o curto-circuito.' },
+    { text: 'O and e o or precisam de mais de dois argumentos, que as funções não suportam', correct: false, explanation: 'São binários — dois operandos. A aridade não é o problema; o problema é que uma função avaliaria ansiosamente ambos os operandos, enquanto o curto-circuito requer decidir se avalia o segundo.' },
+    { text: 'As keywords são mais rápidas de parsear que chamadas de função', correct: false, explanation: 'A velocidade de parsing é irrelevante. A razão é a semântica de avaliação: uma função avalia os argumentos ansiosamente, então os operadores de curto-circuito têm de ser formas especiais que controlam quando os operandos são avaliados.' },
+  ]}
+/>
+
+## Canto da entrevista
+
+<Interview question="O que é a avaliação em curto-circuito, e porque importa para além da performance?">
+
+A avaliação em curto-circuito significa que um operador booleano pára assim que o seu
+resultado é determinado: `a and b` devolve falso sem avaliar o `b` se o `a` é falso, e
+`a or b` devolve verdadeiro sem avaliar o `b` se o `a` é verdadeiro. Importa muito para
+além de poupar um pouco de trabalho — é um mecanismo de *correção* em que os
+programadores dependem constantemente. O padrão clássico é um guarda: `p != null and
+p.field > 0`, ou `i < len and arr[i] == x`. O lado direito só é *seguro* de avaliar
+quando o esquerdo é verdadeiro, e o curto-circuito garante que só é atingido então — por
+isso o dereferência de null ou o acesso fora-dos-limites nunca acontece. É por isto que
+a ordem importa: `arr[i] == x and i < len` rebentaria, porque o `and` avalia da esquerda
+para a direita e chega à indexação antes da verificação de limites. Implementá-lo ensina
+uma lição mais profunda também: os operadores de curto-circuito não podem ser funções
+comuns, porque uma função avalia todos os seus argumentos antes de correr. Têm de ser
+*formas especiais* que o evaluator trata diretamente, decidindo se avalia o segundo
+operando de todo — a mesma categoria do `if`. Então uma linguagem distingue keywords como
+o `and`, o `or` e o `if` de funções precisamente porque algumas construções têm de
+controlar o que é avaliado, e esse controlo é exatamente o que torna possíveis os
+guardas, a preguiça, e os condicionais seguros.
+
+</Interview>
+
+## O track à frente
+
+A tua linguagem tem agora condições expressivas: comparações combinadas com `and`, `or`
+e `not` de curto-circuito, o suficiente para escrever predicados reais como uma
+verificação de ano bissexto. O interpretador — lexer, parser, e evaluator tree-walking
+com variáveis, closures, condicionais, e lógica booleana — é uma linguagem de programação
+completa, ainda que mínima, construída e testada de três formas, byte-idêntica em toda a
+parte. Daqui as adições são conforto e alcance: loops, `print` e strings, estruturas de
+dados, melhores diagnósticos. Mas a maquinaria essencial, e as ideias que mistificam a
+maioria das pessoas sobre como as linguagens funcionam, já as construíste tu próprio, de
+um scanner de caracteres para cima.
+
+## Referências & leitura adicional
+
+- [Crafting Interpreters — Control Flow (logical operators)](https://craftinginterpreters.com/control-flow.html#logical-operators) — o `and`/`or` de curto-circuito em profundidade
+- [Condicionais & Recursão](/systems-programming-academy/pt/part-7-interpreter/conditionals/) — a lição 4, cujo `if` preguiçoso isto generaliza
+- [Short-circuit evaluation](https://en.wikipedia.org/wiki/Short-circuit_evaluation) — o conceito e a sua história entre linguagens
+- [Special forms vs functions](https://en.wikipedia.org/wiki/Evaluation_strategy) — porque algumas construções têm de controlar a sua própria avaliação
+
+<Progress />
