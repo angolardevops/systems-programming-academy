@@ -493,6 +493,11 @@ export default defineConfig({
               slug: 'part-7-interpreter/booleans',
             },
             {
+              label: 'Statements, print & Loops',
+              translations: { 'pt-BR': 'Statements, print & Loops' },
+              slug: 'part-7-interpreter/loops',
+            },
+            {
               label: 'The Interpreter in Review',
               translations: { 'pt-BR': 'O Interpretador em Revisão' },
               slug: 'part-7-interpreter/synthesis',

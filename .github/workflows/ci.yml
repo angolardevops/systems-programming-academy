@@ -65,6 +65,7 @@ jobs:
           - part7-fns-rust
           - part7-cond-rust
           - part7-bool-rust
+          - part7-loops-rust
           - capstone-guestbook-rust
           - app-guestbook-rust
     defaults:
@@ -123,6 +124,7 @@ jobs:
           - part7-fns-go
           - part7-cond-go
           - part7-bool-go
+          - part7-loops-go
           - capstone-guestbook-go
           - app-guestbook-go
     defaults:
@@ -180,6 +182,7 @@ jobs:
           - part7-fns-py
           - part7-cond-py
           - part7-bool-py
+          - part7-loops-py
           - capstone-guestbook-py
           - app-guestbook-py
     defaults:

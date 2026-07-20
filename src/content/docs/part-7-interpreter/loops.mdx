@@ -1,0 +1,570 @@
+---
+title: "Build Your Own Interpreter — Statements, print & Loops"
+description: "Turn the expression evaluator into an imperative language in Rust, Go, and Python: statements separated by ; and grouped in { } blocks, a print statement for output, and a while loop. Run real multi-statement programs, verified byte-identical by their output."
+difficulty: advanced
+estimatedMinutes: 35
+languages: [python, go, rust]
+---
+
+import { Aside, Tabs, TabItem, Badge } from '@astrojs/starlight/components';
+import Quiz from '../../../components/Quiz.astro';
+import Interview from '../../../components/Interview.astro';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+import PyRunner from '../../../components/PyRunner.astro';
+
+<LessonMeta difficulty="advanced" minutes={35} languages={["python", "go", "rust"]} />
+
+<Badge text="Build Your Own X" variant="tip" size="large" />
+
+So far every program was one expression, and the interpreter *echoed* its value. A
+real language is different: it **does things** — it produces output and it repeats
+work. This lesson makes that leap. A program becomes a sequence of **statements**
+separated by `;`, grouped with `{ }` **blocks**; a `print` statement produces
+output; and a `while` loop repeats. Suddenly you can write actual programs:
+
+```text
+i = 1;
+while i <= 5 do { print i; i = i + 1 }
+```
+
+which prints `1 2 3 4 5`. The language you grew from a character scanner now runs
+recognizable code.
+
+<Aside type="note" title="Loops add convenience, not power">
+  Here is a subtle but important point: `while` adds **no computational power**.
+  The language became Turing-complete back at
+  [conditionals](/systems-programming-academy/part-7-interpreter/conditionals/) —
+  recursion can already express any repetition. What a loop adds is *convenience*
+  (an explicit, readable iteration) and *efficiency* (it runs in constant stack
+  space, where deep recursion would grow the stack). Many language features are
+  like this: comfort and reach layered on a small, already-universal core. What's
+  genuinely new in this lesson is **statements and output** — the shift from
+  computing a value to *running a program*.
+</Aside>
+
+Code:
+[Rust](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-loops-rust) · [Go](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-loops-go) · [Python](https://github.com/angolardevops/systems-programming-academy/tree/main/examples/part7-loops-py)
+— fmt/lint clean, 6 tests each, the program's **printed output byte-identical
+across all three languages**.
+
+## A program is now a list of statements
+
+The biggest change is the model. Before, `run_program` returned `"line => value"`
+for each line. Now it tokenizes the *whole* source (newlines are just whitespace),
+parses a **sequence of statements** separated by `;`, executes them against one
+environment, and returns only what `print` emitted. Statements are a new layer
+above expressions:
+
+```text
+program := stmt (';' stmt)*
+stmt := 'print' expr
+      | 'while' expr 'do' stmt
+      | '{' stmt (';' stmt)* '}'     (a block — a statement made of statements)
+      | name '(' params ')' '=' expr  (function definition)
+      | name '=' expr                 (assignment)
+      | expr                          (expression statement; value discarded)
+```
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="loops.py"
+def stmt(self) -> Stmt:
+    if self._is_kw("print"):
+        self.pos += 1
+        return Stmt("p", expr=self.expr())
+    if self._is_kw("while"):
+        self.pos += 1
+        cond = self.expr()
+        self._expect_kw("do")
+        return Stmt("w", expr=cond, body=self.stmt())   # body is one statement...
+    if self._kind_is("{"):                               # ...usually a block
+        self.pos += 1
+        stmts = []
+        while not self._kind_is("}"):
+            # skip ';' separators, collect statements until '}'
+            stmts.append(self.stmt())
+            ...
+        return Stmt("b", stmts=tuple(stmts))
+    ...   # function definition, assignment, or expression statement
+```
+</TabItem>
+<TabItem label="Go">
+```go title="loops.go"
+func (p *parser) stmt() (Stmt, error) {
+	if p.isKw("print") {
+		p.pos++
+		e, err := p.expr()
+		return Stmt{Kind: 'p', Expr: e}, err
+	}
+	if p.isKw("while") {
+		p.pos++
+		cond, _ := p.expr()
+		p.expectKw("do")
+		body, err := p.stmt()               // body is one statement...
+		return Stmt{Kind: 'w', Expr: cond, Body: &body}, err
+	}
+	if p.kindIs('{') {                       // ...usually a block
+		// collect statements separated by ';' until '}'
+	}
+	// ... function definition, assignment, or expression statement
+}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+fn stmt(&mut self) -> Result<Stmt, String> {
+    if self.is_kw("print") {
+        self.pos += 1;
+        return Ok(Stmt::Print(self.expr()?));
+    }
+    if self.is_kw("while") {
+        self.pos += 1;
+        let cond = self.expr()?;
+        self.expect_kw("do")?;
+        let body = self.stmt()?;             // body is one statement...
+        return Ok(Stmt::While(cond, Box::new(body)));
+    }
+    if self.peek() == Some(&Token::LBrace) { // ...usually a block
+        // collect statements separated by ';' until '}'
+    }
+    // ... function definition, assignment, or expression statement
+}
+```
+</TabItem>
+</Tabs>
+
+The elegant part: a **block is itself a statement** — `{ s1; s2 }` — so `while`'s
+body is "one statement" that happens to be a block of many. That recursion (a
+statement can contain statements) is what gives you nesting for free: loops inside
+loops, blocks inside blocks.
+
+## `print` and `while`: doing and repeating
+
+Execution now takes an *output accumulator*. `print` evaluates its expression and
+appends the result; `while` evaluates its condition and, while truthy, runs its
+body — over and over, mutating the environment each time:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+```python title="loops.py"
+def execute(stmt: Stmt, env: Scope, out: list[str]) -> None:
+    if stmt.kind == "p":                                  # print
+        out.append(_show(evaluate(stmt.expr, env)))
+    elif stmt.kind == "w":                                # while
+        while _as_int(evaluate(stmt.expr, env)) != 0:
+            execute(stmt.body, env, out)                  # run the body each pass
+    elif stmt.kind == "b":                                # block
+        for s in stmt.stmts:
+            execute(s, env, out)
+    elif stmt.kind == "a":                                # assignment (mutation)
+        env.vars[stmt.name] = evaluate(stmt.expr, env)
+    ...
+```
+</TabItem>
+<TabItem label="Go">
+```go title="loops.go"
+case 'p': // print
+	v, err := Eval(stmt.Expr, env)
+	if err != nil { return err }
+	*out = append(*out, show(v))
+case 'w': // while
+	for {
+		c, _ := Eval(stmt.Expr, env)
+		n, _ := asInt(c)
+		if n == 0 { break }
+		if err := Exec(*stmt.Body, env, out); err != nil { return err }
+	}
+case 'b': // block
+	for _, s := range stmt.Stmts {
+		if err := Exec(s, env, out); err != nil { return err }
+	}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="src/lib.rs"
+Stmt::Print(e) => {
+    let v = eval(e, env)?;
+    out.push(show(&v));
+}
+Stmt::While(cond, body) => {
+    while as_int(eval(cond, env)?)? != 0 {
+        exec(body, env, out)?;              // run the body each pass
+    }
+}
+Stmt::Block(stmts) => {
+    for s in stmts {
+        exec(s, env, out)?;
+    }
+}
+```
+</TabItem>
+</Tabs>
+
+`while` works because assignment *mutates* the shared environment: the loop's body
+changes the counter (`i = i + 1`), and the next condition check sees the new value.
+That is the imperative heart — state that changes over time, driven by iteration —
+and it rests entirely on the environment you built back in the variables lesson.
+
+## Real programs, verified by output
+
+The byte-identical check is now the most direct it has ever been: the program's
+*printed output*. Here is Fibonacci by loop, an iterative factorial, and a
+FizzBuzz-style classifier — one program, the same output from all three
+implementations:
+
+```text
+$ loops "a = 0; b = 1; i = 0; while i < 10 do { print a; t = a + b; a = b; b = t; i = i + 1 }"
+0
+1
+1
+2
+3
+5
+8
+13
+21
+34
+```
+
+A program with variables, a loop, and output — running on an interpreter you built
+from nothing but a character scanner, identical to the byte in Rust, Go, and
+Python.
+
+## Write and run a program in your browser
+
+Edit the program and press **Run** — write loops, functions, and `print`s; it
+executes locally via Pyodide:
+
+<PyRunner code={`CMP = ("<", "<=", ">", ">=", "==", "!=")
+CMPF = {"<": lambda a, b: a < b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b}
+
+def tokenize(s):
+    toks, i = [], 0
+    while i < len(s):
+        c = s[i]; nx = s[i + 1] if i + 1 < len(s) else ""
+        if c in " \\t\\n": i += 1
+        elif c == "=" and nx == "=": toks.append("=="); i += 2
+        elif c in "!<>" and nx == "=": toks.append(c + "="); i += 2
+        elif c in "<>": toks.append(c); i += 1
+        elif c in "=;{},+-*/()": toks.append(c); i += 1
+        elif c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit(): j += 1
+            toks.append(int(s[i:j])); i = j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"): j += 1
+            toks.append(("id", s[i:j])); i = j
+        else: raise ValueError(f"unexpected character {c!r}")
+    return toks
+
+class P:
+    def __init__(s, t): s.t, s.i = t, 0
+    def peek(s): return s.t[s.i] if s.i < len(s.t) else None
+    def at(s, k): return s.t[s.i + k] if s.i + k < len(s.t) else None
+    def nxt(s):
+        v = s.peek(); s.i += 1; return v
+    def iskw(s, k): return s.peek() == ("id", k)
+    def program(s):
+        stmts = []
+        while True:
+            while s.peek() == ";": s.i += 1
+            if s.peek() is None: return stmts
+            stmts.append(s.stmt())
+            if s.peek() is not None and s.peek() != ";":
+                raise ValueError("expected ';' between statements")
+    def stmt(s):
+        if s.iskw("print"): s.nxt(); return ("print", s.expr())
+        if s.iskw("while"):
+            s.nxt(); cond = s.expr()
+            if not s.iskw("do"): raise ValueError("expected 'do'")
+            s.nxt(); return ("while", cond, s.stmt())
+        if s.peek() == "{":
+            s.nxt(); body = []
+            while True:
+                while s.peek() == ";": s.i += 1
+                if s.peek() == "}": s.nxt(); break
+                if s.peek() is None: raise ValueError("unclosed '{'")
+                body.append(s.stmt())
+                if s.peek() is not None and s.peek() not in (";", "}"):
+                    raise ValueError("expected ';' or '}'")
+            return ("block", body)
+        if isinstance(s.peek(), tuple) and s.at(1) == "(" and s.is_fndef():
+            name = s.nxt()[1]; s.nxt()
+            params = []
+            if s.peek() != ")":
+                while True:
+                    params.append(s.nxt()[1])
+                    sep = s.nxt()
+                    if sep == ",": continue
+                    if sep == ")": break
+                    raise ValueError("bad params")
+            else: s.nxt()
+            if s.nxt() != "=": raise ValueError("expected '='")
+            return ("fndef", name, params, s.expr())
+        if isinstance(s.peek(), tuple) and s.at(1) == "=":
+            name = s.nxt()[1]; s.nxt()
+            return ("assign", name, s.expr())
+        return ("expr", s.expr())
+    def is_fndef(s):
+        depth, k = 0, 1
+        while s.at(k) is not None:
+            if s.at(k) == "(": depth += 1
+            elif s.at(k) == ")":
+                depth -= 1
+                if depth == 0: return s.at(k + 1) == "="
+            k += 1
+        return False
+    def expr(s):
+        if s.iskw("if"):
+            s.nxt(); cond = s.expr()
+            if not s.iskw("then"): raise ValueError("expected 'then'")
+            s.nxt(); then = s.expr()
+            if not s.iskw("else"): raise ValueError("expected 'else'")
+            s.nxt(); return ("if", cond, then, s.expr())
+        return s.orx()
+    def orx(s):
+        n = s.andx()
+        while s.iskw("or"): s.nxt(); n = ("or", n, s.andx())
+        return n
+    def andx(s):
+        n = s.notx()
+        while s.iskw("and"): s.nxt(); n = ("and", n, s.notx())
+        return n
+    def notx(s):
+        if s.iskw("not"): s.nxt(); return ("not", s.notx())
+        return s.cmp()
+    def cmp(s):
+        left = s.add()
+        if s.peek() in CMP:
+            op = s.nxt(); return ("cmp", op, left, s.add())
+        return left
+    def add(s):
+        n = s.term()
+        while s.peek() in ("+", "-"):
+            op = s.nxt(); n = (op, n, s.term())
+        return n
+    def term(s):
+        n = s.factor()
+        while s.peek() in ("*", "/"):
+            op = s.nxt(); n = (op, n, s.factor())
+        return n
+    def factor(s):
+        t = s.nxt()
+        if isinstance(t, int): return t
+        if isinstance(t, tuple):
+            if s.peek() == "(":
+                s.nxt(); args = []
+                if s.peek() != ")":
+                    args.append(s.expr())
+                    while s.peek() == ",": s.nxt(); args.append(s.expr())
+                if s.nxt() != ")": raise ValueError("expected ')'")
+                return ("call", t[1], args)
+            return ("var", t[1])
+        if t == "-": return ("neg", s.factor())
+        if t == "(":
+            n = s.expr()
+            if s.nxt() != ")": raise ValueError("expected ')'")
+            return n
+        raise ValueError("unexpected end of input" if t is None else f"unexpected {t!r}")
+
+class Scope:
+    def __init__(s, parent=None): s.v, s.parent = {}, parent
+    def get(s, n):
+        sc = s
+        while sc:
+            if n in sc.v: return sc.v[n]
+            sc = sc.parent
+        return None
+
+def asint(v):
+    if isinstance(v, int): return v
+    raise ValueError("cannot do arithmetic on a function")
+
+def ev(n, env):
+    if isinstance(n, int): return n
+    k = n[0]
+    if k == "var":
+        v = env.get(n[1])
+        if v is None: raise ValueError(f"undefined variable {n[1]!r}")
+        return v
+    if k == "neg": return -asint(ev(n[1], env))
+    if k == "not": return 1 if asint(ev(n[1], env)) == 0 else 0
+    if k == "and":
+        if asint(ev(n[1], env)) == 0: return 0
+        return 1 if asint(ev(n[2], env)) != 0 else 0
+    if k == "or":
+        if asint(ev(n[1], env)) != 0: return 1
+        return 1 if asint(ev(n[2], env)) != 0 else 0
+    if k == "cmp":
+        a, b = asint(ev(n[2], env)), asint(ev(n[3], env))
+        return 1 if CMPF[n[1]](a, b) else 0
+    if k == "if":
+        return ev(n[2], env) if asint(ev(n[1], env)) != 0 else ev(n[3], env)
+    if k == "call":
+        fn = env.get(n[1])
+        if not (isinstance(fn, tuple) and fn[0] == "fn"): raise ValueError(f"{n[1]!r} is not a function")
+        _, params, body, defenv = fn
+        args = [ev(a, env) for a in n[2]]
+        if len(args) != len(params): raise ValueError(f"{n[1]!r} arity mismatch")
+        call = Scope(defenv)
+        for p, a in zip(params, args): call.v[p] = a
+        return ev(body, call)
+    a, b = asint(ev(n[1], env)), asint(ev(n[2], env))
+    if k == "+": return a + b
+    if k == "-": return a - b
+    if k == "*": return a * b
+    if b == 0: raise ValueError("division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def execute(stmt, env, out):
+    k = stmt[0]
+    if k == "fndef": env.v[stmt[1]] = ("fn", stmt[2], stmt[3], env)
+    elif k == "assign": env.v[stmt[1]] = ev(stmt[2], env)
+    elif k == "print": out.append(str(ev(stmt[1], env)))
+    elif k == "while":
+        while asint(ev(stmt[1], env)) != 0: execute(stmt[2], env, out)
+    elif k == "block":
+        for st in stmt[1]: execute(st, env, out)
+    else: ev(stmt[1], env)
+
+def run(program):
+    env, out = Scope(), []
+    try:
+        for stmt in P(tokenize(program)).program():
+            execute(stmt, env, out)
+    except ValueError as e:
+        out.append("error: " + str(e))
+    for line in out: print(line)
+
+# a real program — edit it freely:
+run('''
+fizzbuzz(x) = if x - x/15*15 == 0 then 15
+              else if x - x/3*3 == 0 then 3
+              else if x - x/5*5 == 0 then 5
+              else x;
+n = 1;
+while n <= 15 do { print fizzbuzz(n); n = n + 1 }
+''')`} label="Python · a real program with loops · runs in your browser" />
+
+## Exercises
+
+**1. Add an `if`/`else` *statement* (all three).** There's already an `if`
+*expression* (`if c then a else b`), but a statement form — `if c do { ... }` or
+`if c do { ... } else { ... }` — lets a branch *run statements* (prints, loops)
+rather than produce a value. How does it differ from the expression `if`, and why
+do many languages have both?
+
+<details>
+<summary>Solution sketch</summary>
+
+The expression `if` *returns a value* and both branches must produce one; the
+statement `if` *performs actions* and its branches are statements that may print,
+loop, or assign — with an optional `else`. You add a new statement kind that
+evaluates the condition and executes the taken block (or the else block, or
+nothing). Languages often have both because the two jobs differ: choosing a value
+(`x = if cond then 1 else 2`) versus choosing what to *do* (`if ready do { launch }`).
+Some languages unify them by making blocks yield values; others keep them separate.
+
+</details>
+
+**2. Add a `for` loop that desugars to `while` (research + one language).** Give the
+language `for i = 1 to 10 do { ... }`. The cleanest implementation doesn't add a new
+execution case at all — it builds the same tree a `while` would. Show the
+desugaring, and explain why it needs no changes to the evaluator.
+
+<details>
+<summary>Solution sketch</summary>
+
+Parse `for i = lo to hi do body` and construct the statements `i = lo; while i <= hi
+do { body; i = i + 1 }` — the exact tree the equivalent `while` produces. Because the
+`for` never becomes a distinct runtime concept (only a parsing convenience that
+expands into assignment + `while`), the evaluator needs no new case. This is
+*desugaring* again, the same technique as compound assignment earlier: new syntax as
+a transformation into existing syntax, which keeps the evaluator small as the surface
+language grows.
+
+</details>
+
+**3. Add a `break` statement (any language).** Let a `break` inside a `while` stop
+the loop early. Why is this harder than `print` or assignment — what does the
+evaluator need that it didn't before?
+
+<details>
+<summary>Solution sketch</summary>
+
+`break` needs a way to *interrupt* the normal top-to-bottom flow of statement
+execution: when a `break` runs, control must jump out of the enclosing loop, skipping
+the rest of the body. Unlike `print`, which just does its thing and returns, `break`
+changes *what executes next*. Interpreters implement this with a control-flow signal
+— a special return value, an exception, or a status the loop checks after each
+statement — that unwinds out to the loop and stops it. It's the first construct that
+isn't "evaluate and continue", and it previews how `return`, `continue`, and
+exceptions all work: non-local control flow the evaluator must thread through.
+
+</details>
+
+<Quiz
+  question={'This lesson adds a while loop, yet the intro says it grants the language no new computational power. How can both be true?'}
+  options={[
+    { text: 'The language was already Turing-complete once it had recursion plus conditionals, so any loop can be rewritten as a recursive function; while adds convenience and constant-stack iteration, not new expressive power', correct: true, explanation: 'Recursion already expresses unbounded repetition, and a conditional gives it a stopping point — together they can compute anything computable. A while loop is equivalent in power to a recursive function (each can simulate the other), so it adds no capability. Its value is practical: an explicit, readable iteration that runs without growing the call stack.' },
+    { text: 'The while loop is only for output, so it does not really compute anything', correct: false, explanation: 'The loop absolutely computes — it drives iteration, mutating state each pass. The point is not that it computes nothing, but that its computational power is already achievable with recursion, so it adds no *new* power, only convenience.' },
+    { text: 'Loops are slower than recursion, so they add power by trading it for speed', correct: false, explanation: 'Loops are typically *cheaper* than deep recursion (constant stack space), and speed is unrelated to computational power. The reason it adds no power is that recursion + conditionals were already Turing-complete.' },
+    { text: 'The language loses power by adding loops, which is why nothing changes', correct: false, explanation: 'Adding a construct does not remove power. The language keeps all its power and gains a convenient iteration form; it simply does not gain any *new* computational capability, because it was already universal.' },
+  ]}
+/>
+
+<Quiz
+  question={'A while loop like `i = 1; while i <= 5 do { print i; i = i + 1 }` terminates and counts up. What makes iteration actually progress and eventually stop?'}
+  options={[
+    { text: 'Assignment mutates the shared environment: the body reassigns i, so each condition check sees the updated value, and once i exceeds 5 the condition is false and the loop ends', correct: true, explanation: 'The loop re-evaluates its condition against the same environment the body mutates. Because i = i + 1 writes the new value back, successive checks of i <= 5 see 2, 3, ... until 6, at which point the condition is false and the loop stops. Iteration progresses precisely because state changes between passes — the imperative core built on the environment.' },
+    { text: 'The interpreter counts how many times it has looped and stops at 5 automatically', correct: false, explanation: 'There is no built-in loop counter; the interpreter only re-checks the condition. Termination comes from the program mutating i until the condition i <= 5 becomes false, not from any automatic limit.' },
+    { text: 'Each pass creates a fresh scope, so i is reset and the loop self-limits', correct: false, explanation: 'A while body does not create a fresh scope that resets i — it mutates the existing environment. If i were reset each pass, the loop would never make progress and would run forever.' },
+    { text: 'while loops always run a fixed number of times determined at parse time', correct: false, explanation: 'The number of iterations is not fixed at parse time — it depends on the runtime condition. This loop runs five times because of the values i takes, and a different condition or updates would run a different number of times (or forever).' },
+  ]}
+/>
+
+## Interview corner
+
+<Interview question="What changes in an interpreter when you go from an expression evaluator to an imperative language with statements, output, and loops?">
+
+Three related shifts. First, a new syntactic layer: **statements** sit above
+expressions. An expression *produces a value*; a statement *performs an action* —
+print, assign, loop — and a program is a sequence of them, usually separated by `;`
+and grouped into blocks with `{ }`. The parser gains a statement grammar on top of
+the expression grammar, and crucially a block is itself a statement, which gives
+nesting (loops in loops) for free. Second, **effects**: the evaluator's job is no
+longer just to compute and return a value but to *do things in order*, so execution
+threads an output channel (for `print`) and relies on the environment being mutable
+(so assignment changes state that later statements and loop iterations observe).
+Third, **iteration**: a `while` re-evaluates its condition and re-runs its body
+against that mutating environment, which is what makes a loop progress and
+terminate. Notably, loops add no computational power — recursion plus conditionals
+were already Turing-complete — so this is about *ergonomics and I/O*, not
+capability. The deep structure is unchanged: it's still lex, parse, and walk a tree;
+you've just added a statement layer and let the walk have effects.
+
+</Interview>
+
+## The track ahead
+
+The language is now genuinely usable: variables, functions, closures, conditionals,
+boolean logic, and now statements, output, and loops — enough to write FizzBuzz,
+compute sequences, and print results, built and tested three ways, byte-identical by
+its output. What remains is reach: strings and data structures for richer values,
+`break`/`return` for non-local control flow, and better error messages with line
+numbers. But you have now built, from a character scanner, a small imperative
+programming language that runs real programs — the mystery of "how does a language
+work" fully dissolved into code you wrote yourself.
+
+## References & further reading
+
+- [Crafting Interpreters — Statements and State](https://craftinginterpreters.com/statements-and-state.html) and [Control Flow](https://craftinginterpreters.com/control-flow.html) — statements, blocks, and loops in depth
+- [Boolean Logic](/systems-programming-academy/part-7-interpreter/booleans/) — lesson 5, the expression language this makes imperative
+- [The Interpreter in Review](/systems-programming-academy/part-7-interpreter/synthesis/) — the whole track's arc and recurring ideas
+- [Structured program theorem](https://en.wikipedia.org/wiki/Structured_program_theorem) — why sequence, selection, and iteration are all you need
+
+<Progress />
