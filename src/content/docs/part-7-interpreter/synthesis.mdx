@@ -1,0 +1,131 @@
+---
+title: "Build Your Own Interpreter — In Review"
+description: "A reflective tour of Part 7: how five lessons grew a character scanner into a Turing-complete language, the one pipeline underneath every one of them, and the recurring ideas — environments, laziness, and the tree as meaning — that make a language work."
+difficulty: advanced
+estimatedMinutes: 12
+languages: [python, go, rust]
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+import LessonMeta from '../../../components/LessonMeta.astro';
+import Progress from '../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={12} languages={["python", "go", "rust"]} />
+
+<Badge text="Synthesis" variant="note" size="large" />
+
+Five lessons ago the language could add two numbers. Now it runs Euclid's GCD and
+checks leap years, with variables, functions, closures, recursion, conditionals,
+and short-circuit logic — a small but **complete, Turing-complete programming
+language**, built three times, byte-identical throughout. This page is the step
+back: what you actually built, and the handful of ideas that carried the whole
+way.
+
+## One pipeline, five times
+
+Every lesson in Part 7 was the same three-stage pipeline, extended by exactly one
+idea. That sameness is the point — it's why a real language and a four-operator
+calculator share a shape:
+
+```text
+source text  --lexer-->  tokens  --parser-->  a syntax tree  --evaluator-->  a value
+```
+
+| Lesson | What it added | The idea underneath |
+| --- | --- | --- |
+| [Expressions](/systems-programming-academy/part-7-interpreter/expressions/) | lexer · parser · evaluator | the pipeline itself; **precedence is the shape of the tree**, not a lookup table |
+| [Variables & State](/systems-programming-academy/part-7-interpreter/variables/) | an **environment** | memory: a `name → value` map threaded through evaluation |
+| [Functions & Closures](/systems-programming-academy/part-7-interpreter/functions/) | closures, an env **chain** | abstraction; **lexical scoping** = a call scope chained to the *definition* environment |
+| [Conditionals & Recursion](/systems-programming-academy/part-7-interpreter/conditionals/) | a **lazy** `if`, comparisons | decision; laziness lets recursion stop → **Turing-completeness** |
+| [Boolean Logic](/systems-programming-academy/part-7-interpreter/booleans/) | short-circuit `and` / `or` / `not` | expressive conditions; some constructs must be **special forms**, not functions |
+
+Read down the "idea" column and the arc is clear: give the language *memory*, then
+*abstraction*, then *decision*, then *expressive decision*. Each is a small addition
+to the same code — a token in the lexer, a rule in the parser, a case in the
+evaluator — and yet by the end you have crossed from "arithmetic" to "any
+computation."
+
+## The ideas that carried the whole way
+
+Four themes recur across the track, and they are the real lessons — the things that
+transfer to any language you'll ever use or build.
+
+### The tree *is* the meaning
+
+The parser's whole job is to turn a flat string into a tree whose *shape* encodes
+what the program means. `1 + 2 * 3` nests the multiplication below the addition;
+`f`'s body is a subtree; `if`'s branches are subtrees chosen at run time. Precedence,
+associativity, scope, control flow — none of them are separate machinery. They are
+all just *where a node sits in the tree*. Once you see that, "how does the language
+know `*` binds tighter than `+`?" stops being mysterious: the grammar put it there.
+
+### The environment, and its chain
+
+A single `name → value` map turned a calculator into a language with memory. Giving
+each function call its own map, *chained to the one where the function was defined*,
+turned that into closures and lexical scoping — and the same chain is the call stack.
+One data structure, extended, underlies variables, functions, scope, and recursion.
+If you understand the environment chain, you understand how almost every language
+manages names and state.
+
+### Laziness is a semantic tool, not an optimization
+
+Twice the track needed the evaluator to *not* evaluate something. `if` evaluates only
+the taken branch — without which recursion could never terminate. `and`/`or`
+short-circuit — without which a guard like `x != 0 and 100 / x` couldn't protect its
+own division. This is why languages have *special forms* (`if`, `and`) distinct from
+functions (which evaluate all their arguments): some constructs must decide *whether*
+to evaluate their operands. Controlling evaluation is a feature, not a footnote.
+
+### Byte-identical, three ways
+
+Every lesson was built in Python, Go, and Rust and verified to produce the *same
+bytes*. That discipline did more than prove correctness — it made the differences
+between the languages visible and forced the design to be exact. Rust's
+`Rc<RefCell<Scope>>`, Go's `*Scope` pointer, and Python's object reference are three
+spellings of "shared, mutable environment"; the interpreter behaves identically
+because the *idea* is identical, even as the languages spell it differently. That is
+the Academy's method applied to its most abstract subject.
+
+<Aside type="tip" title="How small it really is">
+  Each implementation is only a few hundred lines — a lexer that groups characters,
+  a recursive-descent parser of a handful of mutually-recursive functions, and a
+  tree-walking evaluator that is one `match`/`switch` over node kinds. That is the
+  entire secret. Production compilers add stages (type checking, optimization,
+  code generation) and industrial-strength versions of each, but the front end —
+  the part that turns text into a tree of meaning — is exactly what you built.
+</Aside>
+
+## What you can build now
+
+You can take any small language idea — a config format, a query DSL, a calculator
+for a spreadsheet, a rules engine, a template language — and build it, because they
+are all the same pipeline you now know by heart. You can read a real interpreter's
+source and recognize its lexer, its parser, its evaluator, its environment. And the
+"magic" of how Python or JavaScript runs your code is gone: it lexes, it parses, it
+walks a tree, it looks names up in an environment chain — the very things sitting in
+`examples/part7-*` right now, in three languages, tested to the byte.
+
+## Where the track could go next
+
+Everything left is expressiveness and reach, not new power — the language became
+Turing-complete at lesson four:
+
+- **`print` and statements** — output, so programs can *do* something visible, and sequencing beyond one expression per line.
+- **Loops** — `while`/`for`, which add no computational power (recursion already suffices) but bring convenience and constant-stack iteration.
+- **Strings and data structures** — a richer value type beyond integers, and lists/records to build real programs.
+- **A real type system** — booleans distinct from integers, catching `1 and 2` at parse or check time.
+- **Better errors** — line numbers and messages, the difference between a toy and a tool.
+
+Each is a modest addition to the same four stages. But the hard part — the ideas that
+make a language a language — you have already built, from nothing but a character
+scanner and five small steps.
+
+## References & further reading
+
+- [Crafting Interpreters](https://craftinginterpreters.com/) by Robert Nystrom — the definitive free book; this track is a three-language on-ramp to it
+- [The Three Languages, Compared](/systems-programming-academy/capstone/three-languages/) — the Academy's cross-language synthesis, whose method this track applied to interpreters
+- [SICP — Metalinguistic Abstraction](https://mitp-content-server.mit.edu/books/content/sectbyfn/books_pres_0/6515/sicp.zip/full-text/book/book-Z-H-25.html) — the classic treatment of building evaluators
+- Start again from [Expressions](/systems-programming-academy/part-7-interpreter/expressions/) — now that you can see the whole shape
+
+<Progress />

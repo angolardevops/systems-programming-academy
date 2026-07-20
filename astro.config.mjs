@@ -492,6 +492,11 @@ export default defineConfig({
               translations: { 'pt-BR': 'Lógica Booleana' },
               slug: 'part-7-interpreter/booleans',
             },
+            {
+              label: 'The Interpreter in Review',
+              translations: { 'pt-BR': 'O Interpretador em Revisão' },
+              slug: 'part-7-interpreter/synthesis',
+            },
           ],
         },
         {

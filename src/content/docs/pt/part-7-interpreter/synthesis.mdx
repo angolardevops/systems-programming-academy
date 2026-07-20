@@ -1,0 +1,134 @@
+---
+title: "Constrói o Teu Próprio Interpretador — Em Revisão"
+description: "Um tour reflexivo da Parte 7: como cinco lições fizeram crescer um scanner de caracteres numa linguagem Turing-completa, o único pipeline por baixo de todas elas, e as ideias recorrentes — environments, preguiça, e a árvore como significado — que fazem uma linguagem funcionar."
+difficulty: advanced
+estimatedMinutes: 12
+languages: [python, go, rust]
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+import LessonMeta from '../../../../components/LessonMeta.astro';
+import Progress from '../../../../components/Progress.astro';
+
+<LessonMeta difficulty="advanced" minutes={12} languages={["python", "go", "rust"]} />
+
+<Badge text="Síntese" variant="note" size="large" />
+
+Cinco lições atrás a linguagem conseguia somar dois números. Agora corre o GCD de
+Euclides e verifica anos bissextos, com variáveis, funções, closures, recursão,
+condicionais, e lógica de curto-circuito — uma pequena mas **completa linguagem de
+programação Turing-completa**, construída três vezes, byte-idêntica em toda a parte.
+Esta página é o recuo: o que de facto construíste, e o punhado de ideias que
+carregaram o caminho todo.
+
+## Um pipeline, cinco vezes
+
+Cada lição da Parte 7 foi o mesmo pipeline de três fases, estendido por exatamente
+uma ideia. Essa uniformidade é o ponto — é porque uma linguagem real e uma
+calculadora de quatro operadores partilham uma forma:
+
+```text
+texto-fonte  --lexer-->  tokens  --parser-->  árvore de sintaxe  --evaluator-->  valor
+```
+
+| Lição | O que adicionou | A ideia por baixo |
+| --- | --- | --- |
+| [Expressões](/systems-programming-academy/pt/part-7-interpreter/expressions/) | lexer · parser · evaluator | o próprio pipeline; **a precedência é a forma da árvore**, não uma tabela de lookup |
+| [Variáveis & Estado](/systems-programming-academy/pt/part-7-interpreter/variables/) | um **environment** | memória: um mapa `nome → valor` passado pela avaliação |
+| [Funções & Closures](/systems-programming-academy/pt/part-7-interpreter/functions/) | closures, uma **cadeia** de env | abstração; **scoping léxico** = scope de chamada encadeado ao env de *definição* |
+| [Condicionais & Recursão](/systems-programming-academy/pt/part-7-interpreter/conditionals/) | um `if` **preguiçoso**, comparações | decisão; a preguiça deixa a recursão parar → **Turing-completude** |
+| [Lógica Booleana](/systems-programming-academy/pt/part-7-interpreter/booleans/) | `and` / `or` / `not` de curto-circuito | condições expressivas; algumas construções têm de ser **formas especiais**, não funções |
+
+Lê a coluna "ideia" para baixo e o arco é claro: dá *memória* à linguagem, depois
+*abstração*, depois *decisão*, depois *decisão expressiva*. Cada uma é uma pequena
+adição ao mesmo código — um token no lexer, uma regra no parser, um caso no evaluator
+— e no entanto no fim atravessaste de "aritmética" para "qualquer computação".
+
+## As ideias que carregaram o caminho todo
+
+Quatro temas recorrem ao longo do track, e são as verdadeiras lições — as coisas que
+transferem para qualquer linguagem que alguma vez uses ou construas.
+
+### A árvore *é* o significado
+
+O trabalho todo do parser é transformar uma string plana numa árvore cuja *forma*
+codifica o que o programa significa. `1 + 2 * 3` aninha a multiplicação abaixo da
+adição; o corpo de `f` é uma subárvore; os ramos do `if` são subárvores escolhidas em
+tempo de execução. Precedência, associatividade, scope, controlo de fluxo — nenhum
+deles é maquinaria separada. São todos apenas *onde um nó está na árvore*. Assim que
+vês isso, "como é que a linguagem sabe que o `*` liga mais forte que o `+`?" deixa de
+ser um mistério: a gramática pô-lo lá.
+
+### O environment, e a sua cadeia
+
+Um único mapa `nome → valor` transformou uma calculadora numa linguagem com memória.
+Dar a cada chamada de função o seu próprio mapa, *encadeado àquele onde a função foi
+definida*, transformou isso em closures e scoping léxico — e a mesma cadeia é a call
+stack. Uma estrutura de dados, estendida, está por baixo de variáveis, funções, scope
+e recursão. Se entendes a cadeia de environments, entendes como quase toda a linguagem
+gere nomes e estado.
+
+### A preguiça é uma ferramenta semântica, não uma otimização
+
+Duas vezes o track precisou de o evaluator *não* avaliar algo. O `if` avalia só o ramo
+tomado — sem o qual a recursão nunca poderia terminar. O `and`/`or` fazem
+curto-circuito — sem o qual um guarda como `x != 0 and 100 / x` não conseguia proteger
+a sua própria divisão. É por isto que as linguagens têm *formas especiais* (`if`,
+`and`) distintas de funções (que avaliam todos os seus argumentos): algumas construções
+têm de decidir *se* avaliam os seus operandos. Controlar a avaliação é uma feature, não
+uma nota de rodapé.
+
+### Byte-idêntico, de três formas
+
+Cada lição foi construída em Python, Go e Rust e verificada a produzir os *mesmos
+bytes*. Essa disciplina fez mais que provar correção — tornou as diferenças entre as
+linguagens visíveis e forçou o design a ser exato. O `Rc<RefCell<Scope>>` do Rust, o
+ponteiro `*Scope` do Go, e a referência de objeto do Python são três grafias de
+"environment partilhado e mutável"; o interpretador comporta-se de forma idêntica
+porque a *ideia* é idêntica, mesmo que as linguagens a grafem de forma diferente. É o
+método da Academia aplicado ao seu tema mais abstrato.
+
+<Aside type="tip" title="Quão pequeno é de facto">
+  Cada implementação são apenas umas poucas centenas de linhas — um lexer que agrupa
+  caracteres, um parser recursive-descent de um punhado de funções mutuamente
+  recursivas, e um evaluator tree-walking que é um `match`/`switch` sobre tipos de nó.
+  É esse o segredo todo. Compiladores de produção adicionam fases (type checking,
+  otimização, geração de código) e versões de grau-industrial de cada, mas o front end
+  — a parte que transforma texto numa árvore de significado — é exatamente o que
+  construíste.
+</Aside>
+
+## O que consegues construir agora
+
+Consegues pegar em qualquer pequena ideia de linguagem — um formato de config, um DSL
+de queries, uma calculadora para uma folha de cálculo, um motor de regras, uma
+linguagem de templates — e construí-la, porque são todas o mesmo pipeline que agora
+conheces de cor. Consegues ler a fonte de um interpretador real e reconhecer o seu
+lexer, o seu parser, o seu evaluator, o seu environment. E a "magia" de como o Python
+ou o JavaScript corre o teu código desaparece: faz lex, faz parse, percorre uma árvore,
+procura nomes numa cadeia de environments — as próprias coisas que estão em
+`examples/part7-*` neste momento, em três linguagens, testadas ao byte.
+
+## Para onde o track poderia ir a seguir
+
+Tudo o que resta é expressividade e alcance, não poder novo — a linguagem tornou-se
+Turing-completa na lição quatro:
+
+- **`print` e statements** — output, para os programas poderem *fazer* algo visível, e sequenciamento para lá de uma expressão por linha.
+- **Loops** — `while`/`for`, que não adicionam poder computacional (a recursão já basta) mas trazem conveniência e iteração em stack constante.
+- **Strings e estruturas de dados** — um tipo de valor mais rico para lá dos inteiros, e listas/records para construir programas reais.
+- **Um sistema de tipos real** — booleanos distintos de inteiros, apanhando `1 and 2` no parse ou na verificação.
+- **Melhores erros** — números de linha e mensagens, a diferença entre um brinquedo e uma ferramenta.
+
+Cada um é uma adição modesta às mesmas quatro fases. Mas a parte difícil — as ideias que
+fazem de uma linguagem uma linguagem — já a construíste, de nada além de um scanner de
+caracteres e cinco pequenos passos.
+
+## Referências & leitura adicional
+
+- [Crafting Interpreters](https://craftinginterpreters.com/) de Robert Nystrom — o livro definitivo e gratuito; este track é uma rampa de acesso em três linguagens a ele
+- [As Três Linguagens, Comparadas](/systems-programming-academy/pt/capstone/three-languages/) — a síntese cross-language da Academia, cujo método este track aplicou a interpretadores
+- [SICP — Metalinguistic Abstraction](https://mitp-content-server.mit.edu/books/content/sectbyfn/books_pres_0/6515/sicp.zip/full-text/book/book-Z-H-25.html) — o tratamento clássico de construir evaluators
+- Recomeça das [Expressões](/systems-programming-academy/pt/part-7-interpreter/expressions/) — agora que consegues ver a forma toda
+
+<Progress />
